@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ path: require('path').resolve(__dirname, '../../.env') });
 require('express-async-errors');
 
 const express = require('express');
@@ -22,7 +22,8 @@ app.use(express.json());
 app.use(morgan('dev'));
 
 // ── Routes ────────────────────────────────────────────────────────────────────
-app.use('/auth', authRoutes);
+app.use('/api/auth', authRoutes);
+
 app.use('/api/repos', repoRoutes);
 app.use('/api/search', searchRoutes);
 app.use('/api/analysis', analysisRoutes);

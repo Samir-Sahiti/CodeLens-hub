@@ -127,36 +127,49 @@ The project follows an Agile methodology across five two-week sprints.
 ## Getting Started
 
 ### Prerequisites
-- Node.js 18+
-- Docker
-- Supabase account
-- GitHub OAuth App (for repository access)
-- Anthropic API key (for Claude integration)
 
-### Setup
+- **Node.js 18+** — [nodejs.org](https://nodejs.org)
+- **Docker Desktop** — for running the local Postgres instance
+- **Git Bash / WSL / macOS/Linux terminal** — to run `setup.sh`
+- **Supabase project** — create one free at [supabase.com](https://supabase.com)
+- **GitHub OAuth App** — register at GitHub → Settings → Developer settings → OAuth Apps
+- **Anthropic API key** — for Claude code search (Sprint 4)
+- **OpenAI API key** — for embedding generation (`text-embedding-3-small`)
+
+### One-time database setup
+
+Before running the app, apply the database migration:
+
+1. In your Supabase dashboard go to **Database → Extensions** and enable **`vector`** (pgvector)
+2. Open **SQL Editor → New query**, paste the contents of [`scripts/001_initial_schema.sql`](scripts/001_initial_schema.sql), and click **Run**
+
+### Local setup
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/codelens.git
-cd codelens
+git clone https://github.com/your-org/codelens-hub.git
+cd codelens-hub
 
-# Copy environment variables
-cp .env.example .env
+# Bootstrap — installs deps and copies .env.example → .env (idempotent)
+bash scripts/setup.sh
+
 # Fill in your credentials in .env
+# Required: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY,
+#           VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY,
+#           GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET,
+#           ANTHROPIC_API_KEY, OPENAI_API_KEY
 
-# Start infrastructure
+# Start local Postgres
 docker-compose up -d
 
-# Install and run backend
-cd backend
-npm install
-npm run dev
+# In terminal 1 — start the Express API (localhost:3001)
+cd backend && npm run dev
 
-# Install and run frontend
-cd ../frontend
-npm install
-npm run dev
+# In terminal 2 — start the Vite dev server (localhost:3000)
+cd frontend && npm run dev
 ```
+
+The frontend proxies all `/api/*` and `/auth/*` requests to the backend automatically — no CORS configuration needed in development.
 
 ---
 

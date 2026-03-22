@@ -1,15 +1,15 @@
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
+const { requireAuth } = require('../middleware/auth');
 
-// GitHub OAuth flow
-router.get('/github', authController.githubRedirect);
-router.get('/github/callback', authController.githubCallback);
+// Upsert profile row after GitHub OAuth (stores provider_token)
+router.post('/profile', requireAuth, authController.upsertProfile);
 
-// Validate session / get current user
-router.get('/me', authController.getMe);
+// Return current user from JWT
+router.get('/me', requireAuth, authController.getMe);
 
-// Sign out
+// Sign-out (no-op server-side — client clears its own session)
 router.post('/signout', authController.signOut);
 
 module.exports = router;
