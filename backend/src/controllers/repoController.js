@@ -3,7 +3,7 @@
  * Full implementation will be added in US-003 (GitHub API integration)
  * and US-004 (file indexing).
  */
-const { supabase } = require('../db/supabase');
+const { supabaseAdmin } = require('../db/supabase');
 
 const indexer = require('../services/indexer');
 
@@ -13,7 +13,7 @@ const connectRepo = async (req, res) => {
   if (!name) return res.status(400).json({ error: 'Repo name is required' });
 
   // 1. Get user's github token from profiles
-  const { data: profile } = await supabase
+  const { data: profile } = await supabaseAdmin
     .from('profiles')
     .select('github_access_token')
     .eq('id', req.user.id)
@@ -24,7 +24,7 @@ const connectRepo = async (req, res) => {
   }
 
   // 2. Insert repository
-  const { data: repo, error: insertError } = await supabase
+  const { data: repo, error: insertError } = await supabaseAdmin
     .from('repositories')
     .insert({
       user_id: req.user.id,
@@ -57,7 +57,7 @@ const uploadRepo = async (req, res) => {
   const name = req.file.originalname.replace('.zip', '');
 
   // 1. Insert repository record
-  const { data: repo, error: insertError } = await supabase
+  const { data: repo, error: insertError } = await supabaseAdmin
     .from('repositories')
     .insert({
       user_id: req.user.id,
@@ -81,7 +81,7 @@ const uploadRepo = async (req, res) => {
 
 /** GET /api/repos — list repos belonging to the authenticated user */
 const listRepos = async (req, res) => {
-  const { data, error } = await supabase
+  const { data, error } = await supabaseAdmin
     .from('repositories')
     .select('*')
     .eq('user_id', req.user.id)
@@ -112,7 +112,7 @@ const reindexRepo = async (req, res) => {
   const { repoId } = req.params;
 
   // 1. Verify ownership and get repo details
-  const { data: repo, error: fetchError } = await supabase
+  const { data: repo, error: fetchError } = await supabaseAdmin
     .from('repositories')
     .select('*')
     .eq('id', repoId)
@@ -128,7 +128,7 @@ const reindexRepo = async (req, res) => {
   const tables = ['code_chunks', 'analysis_issues', 'graph_edges', 'graph_nodes'];
   
   for (const table of tables) {
-    const { error: deleteError } = await supabase
+    const { error: deleteError } = await supabaseAdmin
       .from(table)
       .delete()
       .eq('repo_id', repoId);
@@ -140,7 +140,7 @@ const reindexRepo = async (req, res) => {
   }
 
   // 3. Keep the repo but reset status
-  const { error: updateError } = await supabase
+  const { error: updateError } = await supabaseAdmin
     .from('repositories')
     .update({ status: 'pending', file_count: 0, indexed_at: null })
     .eq('id', repoId);
@@ -153,7 +153,7 @@ const reindexRepo = async (req, res) => {
   // 4. Trigger the correct indexer based on source
   if (repo.source === 'github') {
     // Need token from profiles
-    const { data: profile } = await supabase
+    const { data: profile } = await supabaseAdmin
       .from('profiles')
       .select('github_access_token')
       .eq('id', req.user.id)
@@ -163,7 +163,7 @@ const reindexRepo = async (req, res) => {
       indexer.startGitHubIndexing(repo.id, profile.github_access_token, repo.name);
     } else {
       console.error(`[reindexRepo] Cannot reindex github repo ${repo.id} — missing token.`);
-      await supabase.from('repositories').update({ status: 'failed' }).eq('id', repoId);
+      await supabaseAdmin.from('repositories').update({ status: 'failed' }).eq('id', repoId);
     }
   } else {
     // For local uploads, since we deleted the zip, we will simulate a "retry" by
