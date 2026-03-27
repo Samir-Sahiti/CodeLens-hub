@@ -1,0 +1,19 @@
+FROM node:20-slim
+
+WORKDIR /app
+
+# Copy package files first for better caching
+COPY package*.json ./
+
+RUN npm install
+
+# Copy the rest of the application
+COPY . .
+
+# Expose the frontend port
+EXPOSE 3000
+
+# Command to run the development server
+# Vite defaults to 5173 but the docker-compose.yml expects 3000
+# Vite config should be checked, but for now we rely on the command
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "3000"]
