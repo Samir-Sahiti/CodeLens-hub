@@ -2,6 +2,7 @@
   "name": "codelens-frontend",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -23,6 +24,6 @@
     "eslint": "^8.56.0",
     "postcss": "^8.4.33",
     "tailwindcss": "^3.4.1",
-    "vite": "^5.0.10"
+    "vite": "^5.2.0"
   }
 }
