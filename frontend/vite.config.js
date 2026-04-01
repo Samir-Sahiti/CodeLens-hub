@@ -11,7 +11,7 @@ export default defineConfig({
       // Forward all /api/* requests to the Express backend in dev.
       // This covers /api/auth, /api/repos, /api/search, /api/analysis.
       '/api': {
-        target: 'http://backend:3001',
+        target: 'http://localhost:3001',
         changeOrigin: true,
       },
     },
