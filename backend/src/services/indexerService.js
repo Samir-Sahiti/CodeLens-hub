@@ -1,20 +1,352 @@
-const { parseRepository } = require('../parsers/repositoryParser');
-const { supabase } = require('../middleware/auth');
+const { parseFile } = require('../parsers/repositoryParser');
+const { supabaseAdmin } = require('../db/supabase');
+const { Octokit } = require('octokit');
+const pLimit = require('p-limit');
+const fs = require('fs/promises');
+const path = require('path');
+
+const VALID_EXTENSIONS = new Set(['.js', '.jsx', '.ts', '.tsx', '.py', '.cs']);
+
+function chunkArray(arr, size) {
+  const chunks = [];
+  for (let i = 0; i < arr.length; i += size) {
+    chunks.push(arr.slice(i, i + size));
+  }
+  return chunks;
+}
+
+async function fetchGithubFiles(owner, name, token) {
+  const octokit = new Octokit({ auth: token });
+  const { data: commit } = await octokit.rest.repos.getCommit({
+    owner,
+    repo: name,
+    ref: 'HEAD',
+  });
+  const treeSha = commit.commit.tree.sha;
+  const { data: tree } = await octokit.rest.git.getTree({
+    owner,
+    repo: name,
+    tree_sha: treeSha,
+    recursive: '1',
+  });
+
+  const files = tree.tree.filter(item =>
+    item.type === 'blob' && VALID_EXTENSIONS.has(path.extname(item.path).toLowerCase())
+  );
+
+  return files.map(f => ({ path: f.path, sha: f.sha, content: null }));
+}
+
+async function fetchLocalFiles(dir, baseDir = dir, results = []) {
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      // Create cross-platform relative path using posix separators
+      const relativePath = path.relative(baseDir, fullPath).split(path.sep).join('/');
+      if (entry.isDirectory()) {
+        await fetchLocalFiles(fullPath, baseDir, results);
+      } else {
+        if (VALID_EXTENSIONS.has(path.extname(relativePath).toLowerCase())) {
+          results.push({ path: relativePath, fsPath: fullPath, content: null });
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`[indexer] Failed to read directory ${dir}: ${err.message}`);
+  }
+  return results;
+}
+
+async function getGithubFileContent(octokit, owner, name, sha) {
+  const { data: blob } = await octokit.rest.git.getBlob({
+    owner, repo: name, file_sha: sha
+  });
+  return Buffer.from(blob.content, blob.encoding).toString('utf-8');
+}
 
 /**
  * Full indexing pipeline for a repository.
- * 1. Fetch file tree from GitHub
- * 2. Parse each file with Tree-sitter (AST → dependency edges)
- * 3. Store graph nodes/edges and file chunks in Supabase
- *
- * @param {string} repoId  - Internal repo UUID
- * @param {string} owner   - GitHub owner
- * @param {string} name    - GitHub repo name
- * @param {string} token   - GitHub access token
+ * @param {Object} params
+ * @param {string} params.repoId - Internal repo UUID
+ * @param {string} [params.owner] - GitHub owner
+ * @param {string} [params.name] - GitHub repo name
+ * @param {string} [params.token] - GitHub access token
+ * @param {string} [params.extractPath] - Path to extracted local zip
+ * @param {string} params.source - 'github' or 'upload'
  */
-const indexRepository = async (repoId, owner, name, token) => {
-  // TODO: implement full pipeline
-  console.log(`[indexer] Starting indexing for ${owner}/${name}`);
+const indexRepository = async ({ repoId, owner, name, token, extractPath, source }) => {
+  try {
+    console.log(`[indexer] Starting indexing for repoId: ${repoId} (source: ${source})`);
+
+    // 1. fetch files & 2. filter
+    let pendingFiles = [];
+    if (source === 'github') {
+      pendingFiles = await fetchGithubFiles(owner, name, token);
+    } else if (source === 'upload') {
+      pendingFiles = await fetchLocalFiles(extractPath);
+    }
+
+    const getAllFilesSet = new Set(pendingFiles.map(f => f.path));
+
+    // octokit instance for github fetching inside pLimit
+    const octokit = source === 'github' ? new Octokit({ auth: token }) : null;
+
+    const limit = pLimit(10);
+    const parsedFiles = [];
+
+    // 3. parse (with concurrency) and 4. resolve imports
+    await Promise.all(
+      pendingFiles.map(file =>
+        limit(async () => {
+          try {
+            if (source === 'github') {
+              file.content = await getGithubFileContent(octokit, owner, name, file.sha);
+            } else {
+              file.content = await fs.readFile(file.fsPath, 'utf-8');
+            }
+            // Parse file directly
+            const parsed = parseFile(file.path, file.content, getAllFilesSet);
+            parsedFiles.push(parsed);
+          } catch (err) {
+            console.warn(`[indexer] Failed to process ${file.path}: ${err.message}`);
+          }
+        })
+      )
+    );
+
+    // 5. dedupe nodes (in memory)
+    const nodeMap = new Map();
+    const allEdges = [];
+    let fileCount = pendingFiles.length; // From acceptance criteria or just matched valid files
+
+    for (const file of parsedFiles) {
+      if (!file) continue; // In case of skipped parse
+
+      // Find original file body to count lines
+      const originalFile = pendingFiles.find(f => f.path === file.filePath);
+      const lineCount = (originalFile && originalFile.content) ? originalFile.content.split('\n').length : 0;
+
+      // Ensure language handles no-extension case gracefully, fallback unknown
+      const ext = path.extname(file.filePath).toLowerCase();
+      let language = 'unknown';
+      if (['.js', '.jsx'].includes(ext)) language = 'javascript';
+      else if (['.ts', '.tsx'].includes(ext)) language = 'typescript';
+      else if (ext === '.py') language = 'python';
+      else if (ext === '.cs') language = 'c_sharp';
+
+      nodeMap.set(file.filePath, {
+        repo_id: repoId,
+        file_path: file.filePath,
+        language: language,
+        line_count: lineCount,
+        outgoing_count: 0,
+        incoming_count: 0,
+        complexity_score: 0
+      });
+
+      for (const imp of file.imports) {
+        // Create edges correctly
+        allEdges.push({
+          repo_id: repoId,
+          from_path: file.filePath,
+          to_path: imp
+        });
+      }
+    }
+
+    // Dedupe edges in memory
+    const edgeMap = new Map();
+    for (const edge of allEdges) {
+      const edgeKey = `${edge.from_path}->${edge.to_path}`;
+      if (!edgeMap.has(edgeKey)) {
+        edgeMap.set(edgeKey, edge);
+      }
+    }
+    const uniqueEdges = Array.from(edgeMap.values());
+    const uniqueNodes = Array.from(nodeMap.values());
+
+    // 6. bulk insert nodes
+    const nodeChunks = chunkArray(uniqueNodes, 500);
+    for (const chunk of nodeChunks) {
+      const { error } = await supabaseAdmin
+        .from('graph_nodes')
+        .upsert(chunk, { onConflict: 'repo_id,file_path', ignoreDuplicates: true });
+      if (error) throw new Error(`Database error inserting nodes: ${error.message}`);
+    }
+
+    // 7. bulk insert edges
+    const edgeChunks = chunkArray(uniqueEdges, 500);
+    for (const chunk of edgeChunks) {
+      const { error } = await supabaseAdmin
+        .from('graph_edges')
+        .upsert(chunk, { onConflict: 'repo_id,from_path,to_path', ignoreDuplicates: true });
+      if (error) throw new Error(`Database error inserting edges: ${error.message}`);
+    }
+
+    // 8. compute metrics
+    const outgoingMap = {};
+    const incomingMap = {};
+
+    uniqueEdges.forEach(edge => {
+      outgoingMap[edge.from_path] = (outgoingMap[edge.from_path] || 0) + 1;
+      incomingMap[edge.to_path] = (incomingMap[edge.to_path] || 0) + 1;
+    });
+
+    const totalNodes = uniqueNodes.length || 1; // avoid / 0
+
+    const finalNodes = uniqueNodes.map(node => {
+      const outC = outgoingMap[node.file_path] || 0;
+      const inC = incomingMap[node.file_path] || 0;
+      node.outgoing_count = outC;
+      node.incoming_count = inC;
+      node.complexity_score = node.line_count * (outC / totalNodes);
+      return node;
+    });
+
+    // 8b. persist metrics to graph_nodes via update
+    const metricsChunks = chunkArray(finalNodes, 500);
+    for (const chunk of metricsChunks) {
+      const { error } = await supabaseAdmin
+        .from('graph_nodes')
+        .upsert(chunk, { onConflict: 'repo_id,file_path', ignoreDuplicates: false }); // false to DO UPDATE
+      if (error) throw new Error(`Database error updating metrics: ${error.message}`);
+    }
+
+    // 9. issue detection
+    const issues = [];
+
+    // Circular dependency detection
+    const adjacencyList = new Map();
+    for (const edge of uniqueEdges) {
+      if (!adjacencyList.has(edge.from_path)) adjacencyList.set(edge.from_path, []);
+      adjacencyList.get(edge.from_path).push(edge.to_path);
+    }
+
+    const visited = new Set();
+    const recStack = new Set();
+    const cycles = [];
+
+    const detectCycle = (node, pathArr) => {
+      visited.add(node);
+      recStack.add(node);
+      pathArr.push(node);
+
+      const neighbors = adjacencyList.get(node) || [];
+      for (const neighbor of neighbors) {
+        if (!visited.has(neighbor)) {
+          detectCycle(neighbor, pathArr);
+        } else if (recStack.has(neighbor)) {
+          // cycle detected
+          const startIdx = pathArr.indexOf(neighbor);
+          const cyclePaths = pathArr.slice(startIdx);
+          cycles.push(cyclePaths);
+        }
+      }
+
+      pathArr.pop();
+      recStack.delete(node);
+    };
+
+    for (const node of nodeMap.keys()) {
+      if (!visited.has(node)) {
+        detectCycle(node, []);
+      }
+    }
+
+    // Issue: Circular Dependency
+    if (cycles.length > 0) {
+      // Create issue for the first few cycles to avoid massive spam
+      for (const cycle of cycles.slice(0, 10)) {
+        issues.push({
+          repo_id: repoId,
+          type: 'circular_dependency',
+          severity: 'high',
+          file_paths: cycle,
+          description: 'A circular dependency cycle was detected.'
+        });
+      }
+    }
+
+    // Issue: God file & High coupling & Dead code
+    for (const node of finalNodes) {
+      // God file
+      const godCondition1 = node.incoming_count >= 10 && node.incoming_count > (totalNodes * 0.3);
+      const godCondition2 = node.line_count > 500 && node.incoming_count > (totalNodes * 0.1);
+      if (godCondition1 || godCondition2) {
+        issues.push({
+          repo_id: repoId,
+          type: 'god_file',
+          severity: (godCondition1 && godCondition2) ? 'high' : 'medium',
+          file_paths: [node.file_path],
+          description: `This file is imported heavily — changes here have an extremely wide blast radius.`
+        });
+      }
+
+      // High coupling
+      if (node.outgoing_count > 15) {
+        let severity = 'low';
+        if (node.outgoing_count >= 30) severity = 'high';
+        else if (node.outgoing_count >= 20) severity = 'medium';
+
+        issues.push({
+          repo_id: repoId,
+          type: 'high_coupling',
+          severity,
+          file_paths: [node.file_path],
+          description: `This file imports ${node.outgoing_count} other files — it may be doing too much and is difficult to test or refactor.`
+        });
+      }
+
+      // Dead code
+      if (node.incoming_count === 0 && node.language !== 'c_sharp') {
+        const lowerPath = node.file_path.toLowerCase();
+        const isEntryPoint = lowerPath.endsWith('index.js') || lowerPath.endsWith('main.py') || lowerPath.endsWith('program.cs') || lowerPath.endsWith('app.js') || lowerPath.endsWith('server.js') || lowerPath.endsWith('index.ts') || lowerPath.endsWith('app.tsx');
+        if (!isEntryPoint && !node.file_path.includes('.test.') && !node.file_path.includes('.spec.')) {
+           issues.push({
+            repo_id: repoId,
+            type: 'dead_code',
+            severity: 'low',
+            file_paths: [node.file_path],
+            description: `No other files import this file — it may be unused.`
+          });
+        }
+      }
+    }
+
+    if (issues.length > 0) {
+      const issueChunks = chunkArray(issues, 500);
+      for (const chunk of issueChunks) {
+        const { error } = await supabaseAdmin.from('analysis_issues').insert(chunk);
+        if (error) console.error(`[indexer] Database error inserting issues: ${error.message}`);
+      }
+    }
+
+    // 10. update repo (ready)
+    await supabaseAdmin
+      .from('repositories')
+      .update({
+        status: 'ready',
+        indexed_at: new Date().toISOString(),
+        file_count: fileCount
+      })
+      .eq('id', repoId);
+
+    console.log(`[indexer] Successfully finished indexing for repoId: ${repoId}`);
+
+  } catch (error) {
+    if (repoId) {
+      await supabaseAdmin
+        .from('repositories')
+        .update({
+          status: 'failed'
+        })
+        .eq('id', repoId);
+    }
+
+    console.error(`[indexer] Failed pipeline for repoId ${repoId}:`, error);
+    throw error;
+  }
 };
 
 module.exports = { indexRepository };

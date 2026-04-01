@@ -11,39 +11,17 @@ const VALID_EXTENSIONS = new Set(['.js', '.jsx', '.ts', '.tsx', '.py', '.cs']);
 /**
  * Placeholder for the background indexing pipeline.
  * Full implementation in US-008.
- * 
+ *
  * For now, this just updates the status from 'pending' -> 'indexing' -> 'ready'.
  */
+const { indexRepository } = require('./indexerService');
+
 const startGitHubIndexing = async (repoId, githubToken, repoFullName) => {
-  try {
-    // 1. Mark as indexing immediately
-    await supabaseAdmin
-      .from('repositories')
-      .update({ status: 'indexing' })
-      .eq('id', repoId);
-
-    // 2. Simulate ~3s of network/indexing work
-    await new Promise(resolve => setTimeout(resolve, 3000));
-
-    // 3. Mark as ready
-    await supabaseAdmin
-      .from('repositories')
-      .update({
-        status: 'ready',
-        indexed_at: new Date().toISOString(),
-        file_count: Math.floor(Math.random() * 150) + 10 // Dummy file count
-      })
-      .eq('id', repoId);
-
-    console.log(`[Indexer] Successfully finished simulated indexing for ${repoFullName}`);
-  } catch (err) {
-    console.error(`[Indexer] Failed indexing for ${repoFullName}`, err);
-    await supabaseAdmin
-      .from('repositories')
-      .update({ status: 'failed' })
-      .eq('id', repoId);
-  }
+  const [owner, name] = repoFullName.split('/');
+  // The service handles marking it ready or failed, and the full try/catch pipeline
+  await indexRepository({ repoId, owner, name, token: githubToken, source: 'github' });
 };
+
 
 /**
  * Handles processing of a local uploaded repository ZIP.
@@ -58,7 +36,7 @@ const startLocalIndexing = async (repoId, zipFilePath, repoName) => {
 
     const zip = new AdmZip(zipFilePath);
     const zipEntries = zip.getEntries();
-    
+
     // Check if zip contains supported files
     let hasSupportedFiles = false;
     let fileCount = 0;
@@ -78,21 +56,10 @@ const startLocalIndexing = async (repoId, zipFilePath, repoName) => {
     }
 
     extractPath = await fs.mkdtemp(path.join(os.tmpdir(), `codelens-repo-${repoId}-`));
-    
-    // Simulate ~3s of network/indexing work
-    await new Promise(resolve => setTimeout(resolve, 3000));
+    // Trigger the real indexing pipeline
+    await indexRepository({ repoId, extractPath, source: 'upload' });
 
-    // Mark as ready
-    await supabaseAdmin
-      .from('repositories')
-      .update({
-        status: 'ready',
-        indexed_at: new Date().toISOString(),
-        file_count: fileCount
-      })
-      .eq('id', repoId);
-
-    console.log(`[Indexer] Successfully processed local upload for ${repoName}`);
+    console.log(`[Indexer] Successfully triggered real indexing for ${repoName}`);
 
   } catch (err) {
     console.error(`[Indexer] Failed indexing for local upload ${repoName}:`, err.message);
