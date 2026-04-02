@@ -1,5 +1,8 @@
 const { parseFile } = require('../parsers/repositoryParser');
+const { extractChunksFromFile } = require('../parsers/chunkParser');
+const { OpenAI } = require('openai');
 const { supabaseAdmin } = require('../db/supabase');
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const { Octokit } = require('octokit');
 const pLimit = require('p-limit');
 const fs = require('fs/promises');
@@ -320,6 +323,83 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
         const { error } = await supabaseAdmin.from('analysis_issues').insert(chunk);
         if (error) console.error(`[indexer] Database error inserting issues: ${error.message}`);
       }
+    }
+
+    // 11. Extract Semantic Chunks and Embed Vectors
+    try {
+      console.log(`[indexer] Starting semantic chunking and embedding for ${repoId}`);
+      
+      // 11a. Wipe obsolete chunks natively
+      await supabaseAdmin.from('code_chunks').delete().eq('repo_id', repoId);
+      
+      // 11b. Extract local raw chunks
+      const allExtractedChunks = [];
+      for (const file of pendingFiles) {
+        if (!file.content) continue;
+        const fileChunks = extractChunksFromFile(file.path, file.content, repoId);
+        allExtractedChunks.push(...fileChunks);
+      }
+      
+      console.log(`[indexer] Generated ${allExtractedChunks.length} raw chunks. Proceeding to OpenAI.`);
+      
+      // 11c. Batch API vectors (Respecting limit constraints)
+      const batches = chunkArray(allExtractedChunks, 20);
+      const mappedPayloads = [];
+
+      for (const batch of batches) {
+        try {
+          const res = await openai.embeddings.create({
+            input: batch.map(c => c.content),
+            model: "text-embedding-3-small"
+          });
+          
+          for (let i = 0; i < batch.length; i++) {
+            mappedPayloads.push({
+              repo_id: batch[i].repo_id,
+              file_path: batch[i].file_path,
+              start_line: batch[i].start_line,
+              end_line: batch[i].end_line,
+              content: batch[i].content,
+              embedding: res.data[i].embedding
+            });
+          }
+        } catch (batchErr) {
+          console.warn(`[indexer] Failed to embed an entire chunk batch. Initiating per-chunk exact rescue sequence.`);
+          
+          // File-level rescue sequence (Iterating natively without breaking context limits)
+          for (const singleChunk of batch) {
+            try {
+              const singleRes = await openai.embeddings.create({
+                input: singleChunk.content,
+                model: "text-embedding-3-small"
+              });
+              mappedPayloads.push({
+                repo_id: singleChunk.repo_id,
+                file_path: singleChunk.file_path,
+                start_line: singleChunk.start_line,
+                end_line: singleChunk.end_line,
+                content: singleChunk.content,
+                embedding: singleRes.data[0].embedding
+              });
+            } catch (singleErr) {
+               console.warn(`[indexer] File failed to embed chunk in ${singleChunk.file_path}: Skipped with a warning.`);
+            }
+          }
+        }
+      }
+
+      // 11d. Commit bulk inserts correctly against standard JSON array loops mapping matching Schema objects
+      if (mappedPayloads.length > 0) {
+         const insertBatches = chunkArray(mappedPayloads, 500);
+         for (const insBatch of insertBatches) {
+           const { error: insErr } = await supabaseAdmin.from('code_chunks').insert(insBatch);
+           if (insErr) console.error(`[indexer] DB insert err for vectors: ${insErr.message}`);
+         }
+      }
+      console.log(`[indexer] Completely finished semantic embeddings mappings. Saved ${mappedPayloads.length} vectors!`);
+      
+    } catch (embeddingError) {
+      console.warn(`[indexer] Global embedding step failed severely, isolating error entirely: ${embeddingError.message}`);
     }
 
     // 10. update repo (ready)
