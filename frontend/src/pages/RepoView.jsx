@@ -27,27 +27,178 @@ const TabButton = ({ active, label, onClick, badge }) => (
 );
 
 // --- Child Panels ---
-function GraphPanel({ nodes, edges, issues }) {
+function GraphPanel({ nodes, edges, issues, selectedNodeId }) {
   return (
-    <div className="flex h-96 flex-col items-center justify-center rounded-xl border border-gray-800 bg-gray-900/50">
+    <div className="flex h-[40rem] flex-col items-center justify-center rounded-xl border border-gray-800 bg-gray-900/50">
       <p className="text-gray-400">Interactive D3.js Graph Panel (Coming Soon)</p>
       <p className="text-gray-600 text-sm mt-2">Loaded {nodes.length} nodes and {edges.length} edges directly from props.</p>
+      {selectedNodeId && (
+        <p className="text-indigo-400 text-sm mt-4 font-medium border border-indigo-500/30 bg-indigo-500/10 px-4 py-2 rounded-lg text-center">
+          Event Received:<br/> Graph will auto-pan to highlight Node ID: <br/> <span className="font-mono text-xs">{selectedNodeId}</span>
+        </p>
+      )}
     </div>
   );
 }
 
-function MetricsPanel({ nodes, edges, issues }) {
+function MetricsPanel({ nodes, onNodeSelect }) {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [sortConfig, setSortConfig] = useState({ key: 'complexity_score', direction: 'desc' });
+
+  // 1. Filter first
+  const filteredNodes = nodes.filter(n => n.file_path.toLowerCase().includes(searchQuery.toLowerCase()));
+
+  // 2. Then Sort
+  const sortedNodes = [...filteredNodes].sort((a, b) => {
+    const valA = a[sortConfig.key] || 0;
+    const valB = b[sortConfig.key] || 0;
+    
+    if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
+    if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
+    return 0;
+  });
+
+  const handleSort = (key) => {
+    setSortConfig(prev => {
+      if (prev.key === key) {
+        return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
+      }
+      return { key, direction: 'desc' }; // default starting sort is desc
+    });
+  };
+
+  // 3. 90th Percentile Calculation (dynamically computed against FULL repo, not filtered active view)
+  const calc90th = (arr, key) => {
+    if (!arr || arr.length === 0) return 0;
+    const sortedVals = arr.map(n => n[key] || 0).sort((a, b) => a - b);
+    const index = Math.floor(0.9 * sortedVals.length);
+    return sortedVals[Math.min(index, sortedVals.length - 1)] || 0;
+  };
+
+  const p90Complexity = calc90th(nodes, 'complexity_score');
+  const p90Incoming = calc90th(nodes, 'incoming_count');
+
+  // Summary counts across whole repo
+  let criticalCount = 0;
+  let atRiskCount = 0;
+
+  nodes.forEach(n => {
+    const isHighComplex = n.complexity_score > p90Complexity;
+    const isHighIncoming = n.incoming_count > p90Incoming;
+    if (isHighComplex && isHighIncoming) criticalCount++;
+    else if (isHighComplex || isHighIncoming) atRiskCount++;
+  });
+
+  // UI Helpers
+  const SortIcon = ({ columnKey }) => {
+    if (sortConfig.key !== columnKey) return <span className="ml-2 text-gray-600 font-mono">↕</span>;
+    return <span className="ml-2 text-indigo-400 font-mono">{sortConfig.direction === 'asc' ? '↑' : '↓'}</span>;
+  };
+
+  const formatLanguage = (str) => {
+    if (!str) return 'Unknown';
+    if (str === 'javascript') return 'JavaScript';
+    if (str === 'typescript') return 'TypeScript';
+    if (str === 'python') return 'Python';
+    if (str === 'c_sharp') return 'C#';
+    return str.charAt(0).toUpperCase() + str.slice(1);
+  };
+
   return (
-    <div className="flex h-96 flex-col items-center justify-center rounded-xl border border-gray-800 bg-gray-900/50">
-      <p className="text-gray-400">Complexity Metrics Table Panel (Coming Soon)</p>
-      <p className="text-gray-600 text-sm mt-2">Will analyze {nodes.length} files.</p>
+    <div className="flex flex-col h-[40rem] overflow-hidden bg-gray-900/30 border border-gray-800 rounded-xl relative">
+      {/* Header & Meta Summary */}
+      <div className="flex items-center justify-between p-4 border-b border-gray-800 bg-gray-900/80">
+        <p className="text-sm text-gray-400 font-medium">
+          {nodes.length} files total &middot; 
+          <span className="text-red-400 ml-2">{criticalCount} critical</span> &middot; 
+          <span className="text-yellow-400 ml-2">{atRiskCount} at-risk</span>
+        </p>
+        <input
+          type="text"
+          placeholder="Search by file path..."
+          className="bg-gray-950 border border-gray-700 text-sm text-white rounded-md px-3 py-1.5 focus:outline-none focus:border-indigo-500 w-72 transition-colors placeholder:text-gray-600"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+        />
+      </div>
+
+      {/* Wrapping the table in an auto-scrolling container */}
+      <div className="flex-1 overflow-auto">
+        <table className="w-full text-left text-sm whitespace-nowrap">
+          <thead className="sticky top-0 bg-gray-800/95 backdrop-blur text-gray-300 z-10 shadow-sm border-b border-gray-700">
+            <tr>
+              <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('file_path')}>
+                File Path <SortIcon columnKey="file_path" />
+              </th>
+              <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('language')}>
+                Language <SortIcon columnKey="language" />
+              </th>
+              <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('line_count')}>
+                Lines <SortIcon columnKey="line_count" />
+              </th>
+              <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('outgoing_count')}>
+                Imports (Outgoing) <SortIcon columnKey="outgoing_count" />
+              </th>
+              <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('incoming_count')}>
+                Dependents (Incoming) <SortIcon columnKey="incoming_count" />
+              </th>
+              <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('complexity_score')}>
+                Complexity Score <SortIcon columnKey="complexity_score" />
+                {/* // TODO: replace with cyclomatic complexity in Sprint 5 */}
+              </th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-800/50">
+            {sortedNodes.map(node => {
+              // Calculate Risk Level Dynamically
+              const isHighComplex = node.complexity_score > p90Complexity;
+              const isHighIncoming = node.incoming_count > p90Incoming;
+              
+              let rowClass = "hover:bg-gray-800/60 cursor-pointer transition-colors";
+              let textFade = "text-gray-300";
+              let metaFade = "text-gray-500";
+
+              if (isHighComplex && isHighIncoming) {
+                rowClass = "bg-red-900/30 hover:bg-red-900/50 cursor-pointer transition-colors";
+                textFade = "text-red-100 font-medium";
+                metaFade = "text-red-300";
+              } else if (isHighComplex || isHighIncoming) {
+                rowClass = "bg-yellow-900/20 hover:bg-yellow-900/40 cursor-pointer transition-colors";
+                textFade = "text-yellow-100";
+                metaFade = "text-yellow-300/80";
+              }
+
+              return (
+                <tr key={node.id} onClick={() => onNodeSelect(node.id)} className={rowClass}>
+                  <td className={`px-6 py-3 font-mono text-xs ${textFade}`}>{node.file_path}</td>
+                  <td className={`px-6 py-3 ${metaFade}`}>{formatLanguage(node.language)}</td>
+                  <td className={`px-6 py-3 ${metaFade}`}>{node.line_count}</td>
+                  <td className={`px-6 py-3 ${metaFade}`}>{node.outgoing_count}</td>
+                  <td className={`px-6 py-3 ${metaFade}`}>{node.incoming_count}</td>
+                  <td className={`px-6 py-3 font-medium ${textFade}`}>
+                    {Number(node.complexity_score).toFixed(2)}
+                  </td>
+                </tr>
+              )
+            })}
+
+            {sortedNodes.length === 0 && (
+              <tr>
+                <td colSpan="6" className="text-center py-12 text-gray-500">
+                  No files found matching "{searchQuery}"
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
 
 function IssuesPanel({ nodes, edges, issues }) {
   return (
-    <div className="flex h-96 flex-col items-center justify-center rounded-xl border border-gray-800 bg-gray-900/50">
+    <div className="flex h-[40rem] flex-col items-center justify-center rounded-xl border border-gray-800 bg-gray-900/50">
       <p className="text-gray-400">Architectural Issues Panel</p>
       <p className="text-indigo-400 text-sm mt-2 font-medium">{issues.length} flaws detected across the codebase.</p>
     </div>
@@ -56,7 +207,7 @@ function IssuesPanel({ nodes, edges, issues }) {
 
 function SearchPanel({ nodes, edges, issues }) {
   return (
-    <div className="flex h-96 flex-col items-center justify-center rounded-xl border border-gray-800 bg-gray-900/50">
+    <div className="flex h-[40rem] flex-col items-center justify-center rounded-xl border border-gray-800 bg-gray-900/50">
       <p className="text-gray-400">Natural Language Search Panel (Coming Soon)</p>
       <p className="text-gray-600 text-sm mt-2">RAG Architecture loading...</p>
     </div>
@@ -70,6 +221,9 @@ export default function RepoView() {
   const [repo, setRepo] = useState(null);
   const [activeTab, setActiveTab] = useState('graph');
   
+  // Shared state uplifted to allow clicking a metrics row to highlight it in the tree
+  const [selectedNodeId, setSelectedNodeId] = useState(null);
+  
   // Analysis Data state
   const [analysisData, setAnalysisData] = useState({ nodes: [], edges: [], issues: [] });
   const [hasFetchedData, setHasFetchedData] = useState(false);
@@ -78,6 +232,12 @@ export default function RepoView() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   const [isReindexing, setIsReindexing] = useState(false);
+
+  // Tab jump handler
+  const handleNodeSelect = useCallback((nodeId) => {
+    setSelectedNodeId(nodeId);
+    setActiveTab('graph');
+  }, []);
 
   // Fetch the huge datasets automatically when ready
   const fetchAnalysisData = useCallback(async () => {
@@ -251,7 +411,7 @@ export default function RepoView() {
       </div>
 
       {/* Main Content Area */}
-      <div className="flex-1 p-8">
+      <div className="flex-1 p-8 pb-12">
         {isWorking ? (
           <div className="flex flex-col items-center justify-center py-32 rounded-xl border border-dashed border-gray-800 bg-gray-900/30">
             <div className="h-10 w-10 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent mb-4" />
@@ -283,11 +443,11 @@ export default function RepoView() {
         ) : (
           <div className="h-full relative">
             <div className={activeTab === 'graph' ? 'block h-full' : 'hidden'}>
-              <GraphPanel nodes={analysisData.nodes} edges={analysisData.edges} issues={analysisData.issues} />
+              <GraphPanel nodes={analysisData.nodes} edges={analysisData.edges} issues={analysisData.issues} selectedNodeId={selectedNodeId} />
             </div>
 
             <div className={activeTab === 'metrics' ? 'block h-full' : 'hidden'}>
-              <MetricsPanel nodes={analysisData.nodes} edges={analysisData.edges} issues={analysisData.issues} />
+              <MetricsPanel nodes={analysisData.nodes} onNodeSelect={handleNodeSelect} />
             </div>
 
             <div className={activeTab === 'issues' ? 'block h-full' : 'hidden'}>
