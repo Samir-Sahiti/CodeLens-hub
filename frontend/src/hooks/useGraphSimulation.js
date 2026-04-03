@@ -54,6 +54,10 @@ export function useGraphSimulation({
 
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
 
+  // Track whether we have nodes - used to re-trigger observer setup
+  // when the container element first appears in the DOM
+  const hasNodes = nodes.length > 0;
+
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
@@ -83,11 +87,19 @@ export function useGraphSimulation({
     observer.observe(container);
 
     return () => observer.disconnect();
-  }, [canvasRef, containerRef, renderMode, svgRef]);
+  }, [canvasRef, containerRef, renderMode, svgRef, hasNodes]);
 
   useEffect(() => {
-    const width = dimensions.width;
-    const height = dimensions.height;
+    let width = dimensions.width;
+    let height = dimensions.height;
+
+    // Fallback: if the ResizeObserver hasn't fired yet (e.g. the container
+    // wasn't in the DOM when the observer was first set up), read directly
+    // from the container element now that React has committed it.
+    if ((!width || !height) && containerRef.current) {
+      width = Math.max(containerRef.current.clientWidth, 320);
+      height = Math.max(containerRef.current.clientHeight, 320);
+    }
 
     if (!width || !height || nodes.length === 0) {
       return undefined;
@@ -100,14 +112,19 @@ export function useGraphSimulation({
     }));
       const localLinks = edges.map((edge) => ({ ...edge }));
 
+    // Tightly pack clusters
     const simulation = d3.forceSimulation(localNodes)
       .force('link', d3.forceLink(localLinks).id((node) => node.graphId).distance((link) => {
         const targetRadius = typeof link.target === 'object' ? link.target.radius : 14;
-        return Math.max(36, 80 + targetRadius);
+        return Math.max(40, 50 + targetRadius);
       }))
-      .force('charge', d3.forceManyBody().strength(-220))
-      .force('center', d3.forceCenter(width / 2, height / 2))
-      .force('collide', d3.forceCollide().radius((node) => node.radius + 8))
+      // Super weak long-distance repel, preventing them from flying apart
+      .force('charge', d3.forceManyBody().strength(-400).distanceMax(250))
+      // Strong centripetal gravity to pull disconnected components together beautifully
+      .force('x', d3.forceX(width / 2).strength(0.18))
+      .force('y', d3.forceY(height / 2).strength(0.18))
+      // Push nodes apart locally so they don't overlap labels
+      .force('collide', d3.forceCollide().radius((node) => node.radius + 35).iterations(3))
       .stop();
 
     for (let tick = 0; tick < PRETICK_COUNT; tick += 1) {
@@ -266,43 +283,82 @@ export function useGraphSimulation({
       .attr('d', 'M0,-5L10,0L0,5')
       .attr('fill', '#94a3b8');
 
+    // Drop shadow filter for nodes to look premium
+    const filter = defs.append('filter')
+      .attr('id', 'node-shadow')
+      .attr('x', '-20%').attr('y', '-20%').attr('width', '140%').attr('height', '140%');
+    filter.append('feDropShadow')
+      .attr('dx', '0').attr('dy', '4').attr('stdDeviation', '4')
+      .attr('flood-color', 'rgba(0, 0, 0, 0.5)');
+
     const viewport = svg.append('g').attr('class', 'graph-viewport');
     const edgeLayer = viewport.append('g').attr('class', 'graph-edge-layer');
     const nodeLayer = viewport.append('g').attr('class', 'graph-node-layer');
 
     edgeLayer
-      .selectAll('line')
+      .selectAll('path')
       .data(localLinks, (edge) => edge.id)
-      .join('line')
+      .join('path')
       .attr('class', (edge) => `graph-edge${isSelectionActive && !highlightedEdgeIds.has(edge.id) ? ' is-dimmed' : ''}`)
-      .attr('x1', (edge) => edge.source.x)
-      .attr('y1', (edge) => edge.source.y)
-      .attr('x2', (edge) => edge.target.x)
-      .attr('y2', (edge) => edge.target.y)
-      .attr('stroke', '#94a3b8')
-      .attr('stroke-width', (edge) => (highlightedEdgeIds.has(edge.id) ? 1.8 : 1.2))
+      .attr('d', (edge) => {
+        const dx = edge.target.x - edge.source.x;
+        const dy = edge.target.y - edge.source.y;
+        const dr = Math.sqrt(dx * dx + dy * dy) * 1.5; // Smooth arc
+        // If it's a self-link, draw a loop instead
+        if (edge.source === edge.target) {
+           return `M${edge.source.x},${edge.source.y - edge.source.radius} A15,15 0 1,1 ${edge.source.x + 1},${edge.source.y - edge.source.radius}`;
+        }
+        return `M${edge.source.x},${edge.source.y}A${dr},${dr} 0 0,1 ${edge.target.x},${edge.target.y}`;
+      })
+      .attr('fill', 'none')
+      .attr('stroke', '#64748b')
+      .attr('stroke-opacity', (edge) => (highlightedEdgeIds.has(edge.id) ? 0.9 : 0.3))
+      .attr('stroke-width', (edge) => (highlightedEdgeIds.has(edge.id) ? 2 : 1.2))
       .attr('marker-end', 'url(#dependency-arrowhead)');
 
-    const nodeSelection = nodeLayer
-      .selectAll('circle')
+    // Create node groups (circle + label)
+    const nodeGroups = nodeLayer
+      .selectAll('g.graph-node-group')
       .data(localNodes, (node) => node.graphId)
-      .join('circle')
-      .attr('class', (node) => `graph-node${isSelectionActive && !highlightedNodeIds.has(node.graphId) ? ' is-dimmed' : ''}`)
-      .attr('cx', (node) => node.x)
-      .attr('cy', (node) => node.y)
+      .join('g')
+      .attr('class', (node) => `graph-node-group${isSelectionActive && !highlightedNodeIds.has(node.graphId) ? ' is-dimmed' : ''}`)
+      .attr('transform', (node) => `translate(${node.x}, ${node.y})`)
+      .style('cursor', 'pointer');
+
+    // Circle
+    nodeGroups.append('circle')
       .attr('r', (node) => node.radius)
       .attr('fill', (node) => node.fill)
       .attr('stroke', (node) => {
-        if (selection.primaryId === node.graphId) return '#f8fafc';
-        return node.hasIssue ? '#ef4444' : '#0f172a';
+        if (selection.primaryId === node.graphId) return '#38bdf8';
+        return node.hasIssue ? '#ef4444' : 'rgba(255, 255, 255, 0.1)';
       })
       .attr('stroke-width', (node) => {
-        if (selection.primaryId === node.graphId) return 2.5;
-        return node.hasIssue ? 2.5 : 1.25;
+        if (selection.primaryId === node.graphId) return 3;
+        return node.hasIssue ? 3 : 1;
       })
-      .style('cursor', 'pointer');
+      .attr('filter', 'url(#node-shadow)');
 
-    nodeSelection.append('title').text((node) => node.file_path);
+    // File name label
+    nodeGroups.append('text')
+      .text((node) => {
+        const parts = node.file_path.split('/');
+        return parts.pop(); // basename only
+      })
+      .attr('x', 0)
+      .attr('y', (node) => node.radius + 16) // Centered exactly below node
+      .attr('text-anchor', 'middle')
+      .attr('fill', (node) => (selection.primaryId === node.graphId ? '#f8fafc' : '#94a3b8'))
+      .attr('font-size', (node) => (selection.primaryId === node.graphId ? '13px' : '11px'))
+      .attr('font-weight', (node) => (selection.primaryId === node.graphId ? '600' : '400'))
+      .attr('font-family', 'ui-sans-serif, system-ui, sans-serif')
+      .attr('pointer-events', 'none')
+      .attr('opacity', (node) => (!isSelectionActive || highlightedNodeIds.has(node.graphId) ? 1 : 0.2));
+
+    // Tooltip with full path
+    nodeGroups.append('title').text((node) => node.file_path);
+
+    const nodeSelection = nodeGroups;
 
     nodeSelection.on('click', (_event, node) => {
       onNodeClick(node);
@@ -337,7 +393,28 @@ export function useGraphSimulation({
         .scale(1);
       svg.call(zoomBehavior.transform, nextTransform);
     } else {
-      svg.call(zoomBehavior.transform, d3.zoomIdentity);
+      // Auto-fit: calculate bounding box and zoom to fit all nodes
+      const xs = localNodes.map((n) => n.x);
+      const ys = localNodes.map((n) => n.y);
+      const minX = Math.min(...xs) - 100;
+      const maxX = Math.max(...xs) + 100;
+      const minY = Math.min(...ys) - 100;
+      const maxY = Math.max(...ys) + 120; // extra padding for bottom text labels
+      const graphWidth = Math.max(maxX - minX, 1);
+      const graphHeight = Math.max(maxY - minY, 1);
+      
+      // Calculate scale to fit. Limit max scale to 2.5 (super clear), min scale to 0.15
+      let scale = Math.min(width / graphWidth, height / graphHeight);
+      scale = Math.max(0.15, Math.min(scale * 0.9, 2.5));
+      
+      const midX = (minX + maxX) / 2;
+      const midY = (minY + maxY) / 2;
+      
+      const fitTransform = d3.zoomIdentity
+        .translate(width / 2, height / 2)
+        .scale(scale)
+        .translate(-midX, -midY);
+      svg.call(zoomBehavior.transform, fitTransform);
     }
 
     return () => {

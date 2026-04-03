@@ -34,24 +34,25 @@ const QUERIES = {
         (identifier) @require_ident (#eq? @require_ident "require")
         (arguments (string) @import_path))
 
-      ;; Named Exports: export const x = 1, export function f() {}
+      ;; Named Exports
       (export_statement
-        (lexical_declaration (variable_declarator (identifier) @export_name)))
+        (lexical_declaration (variable_declarator name: (_) @export_name)))
       (export_statement
-        (function_declaration (identifier) @export_name))
+        (function_declaration name: (_) @export_name))
       (export_statement
-        (class_declaration (identifier) @export_name))
+        (class_declaration name: (_) @export_name))
 
-      ;; Default Exports: export default x
+      ;; Default Exports
       (export_statement
-        (identifier) @export_name)
+        value: (_) @export_name)
       (export_statement
-        (function_declaration (identifier) @export_name))
+        (function_declaration name: (_) @export_name))
       (export_statement
-        (class_declaration (identifier) @export_name))
+        (class_declaration name: (_) @export_name))
       
-      ;; Export list: export { x, y as z }
-      (export_specifier (identifier) @export_name)
+      ;; Export list
+      (export_specifier name: (_) @export_name)
+      (export_specifier alias: (_) @export_name)
     `,
   python: `
     ;; Simple import: import pkg.mod

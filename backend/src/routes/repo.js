@@ -23,6 +23,9 @@ router.get('/', requireAuth, repoController.listRepos);
 // Get indexing status for a repo
 router.get('/:repoId/status', requireAuth, repoController.getStatus);
 
+// Get full analysis data (nodes, edges, issues)
+router.get('/:repoId/analysis', requireAuth, repoController.getAnalysisData);
+
 // Re-trigger indexing on a repository
 router.post('/:repoId/reindex', requireAuth, repoController.reindexRepo);
 

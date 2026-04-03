@@ -1,10 +1,7 @@
 /**
- * Repository controller stubs
- * Full implementation will be added in US-003 (GitHub API integration)
- * and US-004 (file indexing).
+ * Repository controller 
  */
 const { supabaseAdmin } = require('../db/supabase');
-
 const indexer = require('../services/indexer');
 
 /** POST /api/repos — connect a GitHub repo and trigger indexing */
@@ -41,7 +38,6 @@ const connectRepo = async (req, res) => {
   }
 
   // 3. Fire-and-forget background indexing
-  // We don't await this so the user gets an immediate 200 OK
   indexer.startGitHubIndexing(repo.id, profile.github_access_token, name);
 
   res.json({ ok: true, repo });
@@ -53,7 +49,6 @@ const uploadRepo = async (req, res) => {
     return res.status(400).json({ error: 'No repository zip file uploaded' });
   }
 
-  // Use original file name without extension
   const name = req.file.originalname.replace('.zip', '');
 
   // 1. Insert repository record
@@ -97,21 +92,43 @@ const listRepos = async (req, res) => {
 
 /** GET /api/repos/:repoId/status — polling endpoint for indexing progress */
 const getStatus = async (req, res) => {
-  // TODO: US-004 — return current status from repositories table
-  res.status(501).json({ error: 'Not implemented' });
+  const { repoId } = req.params;
+  const { data, error } = await supabaseAdmin
+    .from('repositories')
+    .select('status, file_count')
+    .eq('id', repoId)
+    .eq('user_id', req.user.id)
+    .single();
+
+  if (error || !data) {
+    return res.status(404).json({ error: 'Repository not found' });
+  }
+
+  res.json(data);
 };
 
 /** DELETE /api/repos/:repoId — remove repo and all related data */
 const deleteRepo = async (req, res) => {
-  // TODO: cascade delete handled by FK constraints in DB
-  res.status(501).json({ error: 'Not implemented' });
+  const { repoId } = req.params;
+  
+  const { error } = await supabaseAdmin
+    .from('repositories')
+    .delete()
+    .eq('id', repoId)
+    .eq('user_id', req.user.id);
+
+  if (error) {
+    console.error('[deleteRepo] Error:', error);
+    return res.status(500).json({ error: 'Failed to delete repository' });
+  }
+
+  res.json({ ok: true });
 };
 
 /** POST /api/repos/:repoId/reindex — re-trigger indexing on a repository */
 const reindexRepo = async (req, res) => {
   const { repoId } = req.params;
 
-  // 1. Verify ownership and get repo details
   const { data: repo, error: fetchError } = await supabaseAdmin
     .from('repositories')
     .select('*')
@@ -123,8 +140,6 @@ const reindexRepo = async (req, res) => {
     return res.status(404).json({ error: 'Repository not found or unauthorized' });
   }
 
-  // 2. Cascade delete existing indexing data exactly in this order
-  // (code_chunks, analysis_issues, graph_edges, graph_nodes)
   const tables = ['code_chunks', 'analysis_issues', 'graph_edges', 'graph_nodes'];
   
   for (const table of tables) {
@@ -139,7 +154,6 @@ const reindexRepo = async (req, res) => {
     }
   }
 
-  // 3. Keep the repo but reset status
   const { error: updateError } = await supabaseAdmin
     .from('repositories')
     .update({ status: 'pending', file_count: 0, indexed_at: null })
@@ -150,9 +164,7 @@ const reindexRepo = async (req, res) => {
     return res.status(500).json({ error: 'Failed to restart repository indexing' });
   }
 
-  // 4. Trigger the correct indexer based on source
   if (repo.source === 'github') {
-    // Need token from profiles
     const { data: profile } = await supabaseAdmin
       .from('profiles')
       .select('github_access_token')
@@ -162,12 +174,9 @@ const reindexRepo = async (req, res) => {
     if (profile?.github_access_token) {
       indexer.startGitHubIndexing(repo.id, profile.github_access_token, repo.name);
     } else {
-      console.error(`[reindexRepo] Cannot reindex github repo ${repo.id} — missing token.`);
       await supabaseAdmin.from('repositories').update({ status: 'failed' }).eq('id', repoId);
     }
   } else if (repo.source === 'upload') {
-    // Bug 4 Fix: ZIP files are deleted after initial indexing to save space.
-    // For now, re-indexing uploaded repos is not supported.
     return res.status(400).json({ 
       error: 'Re-indexing is not supported for uploaded repositories. Please delete and upload the ZIP again.' 
     });
@@ -176,4 +185,48 @@ const reindexRepo = async (req, res) => {
   res.json({ ok: true, message: 'Re-indexing started' });
 };
 
-module.exports = { connectRepo, uploadRepo, listRepos, getStatus, reindexRepo, deleteRepo };
+/** GET /api/repos/:repoId/analysis — fetch nodes, edges, and issues in a single request */
+const getAnalysisData = async (req, res) => {
+  const { repoId } = req.params;
+  console.log(`[getAnalysisData] Fetching analysis data for repoId: ${repoId} for user: ${req.user.id}`);
+  
+  const { data: repo, error: fetchError } = await supabaseAdmin
+    .from('repositories')
+    .select('id')
+    .eq('id', repoId)
+    .eq('user_id', req.user.id)
+    .single();
+
+  if (fetchError || !repo) {
+    return res.status(404).json({ error: 'Repository not found or unauthorized' });
+  }
+
+  try {
+    const [
+      { data: nodes, error: nodesErr },
+      { data: edges, error: edgesErr },
+      { data: issues, error: issuesErr }
+    ] = await Promise.all([
+      supabaseAdmin.from('graph_nodes').select('*').eq('repo_id', repoId),
+      supabaseAdmin.from('graph_edges').select('*').eq('repo_id', repoId),
+      supabaseAdmin.from('analysis_issues').select('*').eq('repo_id', repoId)
+    ]);
+
+    if (nodesErr) throw nodesErr;
+    if (edgesErr) throw edgesErr;
+    if (issuesErr) throw issuesErr;
+
+    console.log(`[getAnalysisData] Found ${nodes.length} nodes, ${edges.length} edges, ${issues.length} issues for repo ${repoId}`);
+
+    res.json({
+      nodes: nodes || [],
+      edges: edges || [],
+      issues: issues || []
+    });
+  } catch (err) {
+    console.error('[getAnalysisData] Error:', err);
+    res.status(500).json({ error: 'Failed to fetch repository analysis data' });
+  }
+};
+
+module.exports = { connectRepo, uploadRepo, listRepos, getStatus, reindexRepo, deleteRepo, getAnalysisData };

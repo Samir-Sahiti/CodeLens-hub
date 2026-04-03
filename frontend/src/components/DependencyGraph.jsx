@@ -236,6 +236,7 @@ export default function DependencyGraph({ nodes, edges, issues, selectedNodeId, 
     onBackgroundClick: () => onNodeSelect(null),
   });
 
+
   if (graphNodes.length === 0) {
     return (
       <div className="flex h-[40rem] items-center justify-center rounded-2xl border border-dashed border-gray-800 bg-gray-900/40 text-center">

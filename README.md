@@ -50,28 +50,27 @@ A natural language search interface powered by a RAG (Retrieval-Augmented Genera
 ## Tech Stack
 
 ### Frontend
-- React + D3.js — component-based UI with interactive dependency graph visualisation
+- **Framework**: React 18, built with Vite for optimal HMR and lightning-fast builds
+- **Styling**: Tailwind CSS for a modern, utility-first design system
+- **Visualisation**: D3.js (Force-Directed Graph) for interactive, physics-based dependency plotting
+- **Routing**: React Router DOM
 
 ### Backend
-- Node.js + Express — REST API layer, repository indexing, and analysis engine
+- **Environment**: Node.js + Express.js handling REST API layers and async indexing pipelines
+- **Code Parsing**: Tree-sitter for robust, cross-language Abstract Syntax Tree (AST) generation. Currently supports JavaScript, TypeScript, TSX, Python, and C#.
+- **Version Control API**: GitHub REST API (Octokit) for securely pulling repository file trees and raw source code
 
-### Database
-- Supabase (PostgreSQL) — storing indexed repo data, analysis results, and user projects
+### Database & Authentication
+- **Operational DB**: Supabase (PostgreSQL) storing indexed repo metadata, nodes, edges, and issues
+- **Authentication**: Supabase Auth handling secure sign-ins and JWT session management
+- **Vector Storage**: `pgvector` extension for storing and performing similarity searches on code embeddings
 
-### AI Integration
-- Claude API — natural language code search and explanation (RAG architecture over indexed chunks)
-
-### Code Parsing
-- Tree-sitter — AST parsing with support for JavaScript, TypeScript, Python, and C#
-
-### GitHub Integration
-- GitHub REST API — repository connection, commit history, and PR data
-
-### Authentication
-- Supabase Auth
+### AI Integration (RAG Pipeline)
+- **Embeddings**: OpenAI API (`text-embedding-3-small` or equivalent) to generate semantic vectors for code chunks
+- **LLM Reasoning**: Anthropic Claude API / OpenAI GPT-4 to explain code structures and answer natural language queries based on retrieved context
 
 ### Infrastructure
-- Docker
+- **Containerisation**: Docker & Docker Compose for reproducible local environments and streamlined service execution
 
 ---
 

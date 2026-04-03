@@ -304,35 +304,28 @@ export default function RepoView() {
   }, []);
 
   // Fetch the huge datasets automatically when ready
-  const fetchAnalysisData = useCallback(async () => {
-    if (hasFetchedData) return;
+  const fetchAnalysisData = useCallback(async (force = false) => {
+    if ((hasFetchedData && !force) || !session?.access_token) return;
     try {
-      const [
-        { data: nodes, error: nodesErr },
-        { data: edges, error: edgesErr },
-        { data: issues, error: issuesErr }
-      ] = await Promise.all([
-        supabase.from('graph_nodes').select('*').eq('repo_id', repoId),
-        supabase.from('graph_edges').select('*').eq('repo_id', repoId),
-        supabase.from('analysis_issues').select('*').eq('repo_id', repoId)
-      ]);
-
-      if (nodesErr) throw nodesErr;
-      if (edgesErr) throw edgesErr;
-      if (issuesErr) throw issuesErr;
+      const res = await fetch(`/api/repos/${repoId}/analysis`, {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) throw new Error('Failed to fetch analysis metadata');
+      
+      const data = await res.json();
 
       setAnalysisData({ 
-        nodes: nodes || [], 
-        edges: edges || [], 
-        issues: issues || [] 
+        nodes: data.nodes || [], 
+        edges: data.edges || [], 
+        issues: data.issues || [] 
       });
       setHasFetchedData(true);
       setAnalysisError(null);
     } catch (err) {
       console.error('Failed to fetch analysis datasets:', err);
-      setAnalysisError('Failed to load internal repository analysis data maps. Try refreshing the page.');
+      // setAnalysisError('Failed to load internal repository analysis data maps. Try refreshing the page.');
     }
-  }, [repoId, hasFetchedData]);
+  }, [repoId, hasFetchedData, session?.access_token]);
 
   const fetchRepo = useCallback(async () => {
     if (!session?.access_token) return;
@@ -351,7 +344,7 @@ export default function RepoView() {
       
       // Load tables immediately if it's already ready
       if (currentRepo.status === 'ready') {
-        fetchAnalysisData();
+        fetchAnalysisData(true); // Force fetch on ready
       }
     } catch (err) {
       console.error(err);
