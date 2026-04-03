@@ -25,6 +25,7 @@
 mono_crash.*
 
 # Build results
+frontend/dist
 [Dd]ebug/
 [Dd]ebugPublic/
 [Rr]elease/
