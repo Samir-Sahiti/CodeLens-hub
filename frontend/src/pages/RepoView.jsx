@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabase';
+import DependencyGraph from '../components/DependencyGraph';
 
 // Helper component for tabs
 const TabButton = ({ active, label, onClick, badge }) => (
@@ -27,20 +28,6 @@ const TabButton = ({ active, label, onClick, badge }) => (
 );
 
 // --- Child Panels ---
-function GraphPanel({ nodes, edges, issues, selectedNodeId }) {
-  return (
-    <div className="flex h-[40rem] flex-col items-center justify-center rounded-xl border border-gray-800 bg-gray-900/50">
-      <p className="text-gray-400">Interactive D3.js Graph Panel (Coming Soon)</p>
-      <p className="text-gray-600 text-sm mt-2">Loaded {nodes.length} nodes and {edges.length} edges directly from props.</p>
-      {selectedNodeId && (
-        <p className="text-indigo-400 text-sm mt-4 font-medium border border-indigo-500/30 bg-indigo-500/10 px-4 py-2 rounded-lg text-center">
-          Event Received:<br/> Graph will auto-pan to highlight Node ID: <br/> <span className="font-mono text-xs">{selectedNodeId}</span>
-        </p>
-      )}
-    </div>
-  );
-}
-
 function MetricsPanel({ nodes, onNodeSelect }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [sortConfig, setSortConfig] = useState({ key: 'complexity_score', direction: 'desc' });
@@ -169,7 +156,7 @@ function MetricsPanel({ nodes, onNodeSelect }) {
               }
 
               return (
-                <tr key={node.id} onClick={() => onNodeSelect(node.id)} className={rowClass}>
+                <tr key={node.id || node.file_path} onClick={() => onNodeSelect(node.id || node.file_path)} className={rowClass}>
                   <td className={`px-6 py-3 font-mono text-xs ${textFade}`}>{node.file_path}</td>
                   <td className={`px-6 py-3 ${metaFade}`}>{formatLanguage(node.language)}</td>
                   <td className={`px-6 py-3 ${metaFade}`}>{node.line_count}</td>
@@ -198,7 +185,7 @@ function MetricsPanel({ nodes, onNodeSelect }) {
 
 function IssuesPanel({ nodes, issues, onNodeSelect }) {
   const nodeMap = useMemo(
-    () => new Map(nodes.map(n => [n.file_path, n.id])),
+    () => new Map(nodes.map(n => [n.file_path, n.id || n.file_path])),
     [nodes]
   );
 
@@ -520,7 +507,13 @@ export default function RepoView() {
         ) : (
           <div className="h-full relative">
             <div className={activeTab === 'graph' ? 'block h-full' : 'hidden'}>
-              <GraphPanel nodes={analysisData.nodes} edges={analysisData.edges} issues={analysisData.issues} selectedNodeId={selectedNodeId} />
+              <DependencyGraph
+                nodes={analysisData.nodes}
+                edges={analysisData.edges}
+                issues={analysisData.issues}
+                selectedNodeId={selectedNodeId}
+                onNodeSelect={handleNodeSelect}
+              />
             </div>
 
             <div className={activeTab === 'metrics' ? 'block h-full' : 'hidden'}>
