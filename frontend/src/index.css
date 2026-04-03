@@ -1,3 +1,13 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+.graph-node,
+.graph-edge {
+  transition: opacity 180ms ease;
+}
+
+.graph-node.is-dimmed,
+.graph-edge.is-dimmed {
+  opacity: 0.15;
+}
