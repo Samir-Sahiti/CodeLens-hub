@@ -16,7 +16,7 @@ export default defineConfig(({ mode }) => {
         // In Docker, we use 'http://backend:3001'.
         // For local development outside Docker, it defaults to 'http://localhost:3101'.
         '/api': {
-          target: env.VITE_API_PROXY_TARGET || 'http://localhost:3101',
+          target: env.VITE_API_PROXY_TARGET || 'http://localhost:3001',
           changeOrigin: true,
         },
       },

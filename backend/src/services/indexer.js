@@ -56,6 +56,7 @@ const startLocalIndexing = async (repoId, zipFilePath, repoName) => {
     }
 
     extractPath = await fs.mkdtemp(path.join(os.tmpdir(), `codelens-repo-${repoId}-`));
+    zip.extractAllTo(extractPath, true); // Fix: add this between the two lines above
     // Trigger the real indexing pipeline
     await indexRepository({ repoId, extractPath, source: 'upload' });
 

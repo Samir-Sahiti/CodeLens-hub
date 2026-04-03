@@ -165,12 +165,12 @@ const reindexRepo = async (req, res) => {
       console.error(`[reindexRepo] Cannot reindex github repo ${repo.id} — missing token.`);
       await supabaseAdmin.from('repositories').update({ status: 'failed' }).eq('id', repoId);
     }
-  } else {
-    // For local uploads, since we deleted the zip, we will simulate a "retry" by
-    // running the dummy local indexing on a fake path, which will fail if it strictly needs it, 
-    // or we can simulate a quick ready flip. We'll simulate a 3s reset.
-    // In US-008 we're instructed to call the same pipeline.
-    indexer.startLocalIndexing(repo.id, '', repo.name).catch(() => {});
+  } else if (repo.source === 'upload') {
+    // Bug 4 Fix: ZIP files are deleted after initial indexing to save space.
+    // For now, re-indexing uploaded repos is not supported.
+    return res.status(400).json({ 
+      error: 'Re-indexing is not supported for uploaded repositories. Please delete and upload the ZIP again.' 
+    });
   }
 
   res.json({ ok: true, message: 'Re-indexing started' });

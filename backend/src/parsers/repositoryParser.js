@@ -60,6 +60,10 @@ const QUERIES = {
     (import_from_statement
       module_name: (dotted_name) @import_path)
 
+    ;; Relative import: from . import x
+    (import_from_statement
+      (relative_import) @import_path)
+
     ;; Class & Function definitions
     (class_definition
       name: (identifier) @export_name)
@@ -72,6 +76,13 @@ const QUERIES = {
       [
         (identifier) @import_path
         (qualified_name) @import_path
+      ])
+
+    ;; namespace MyApp.Services { ... }
+    (namespace_declaration
+      name: [
+        (identifier) @export_name
+        (qualified_name) @export_name
       ])
 
     ;; Class, Interface, Record, Struct declarations
@@ -88,6 +99,34 @@ const QUERIES = {
 const resolveImportPath = (importPath, sourceFile, allFiles, ext) => {
   // Python resolution
   if (ext === '.py') {
+    // Handle relative imports (e.g., .utils, ..helpers)
+    if (importPath.startsWith('.')) {
+      let currentDir = path.dirname(sourceFile);
+      let dots = 0;
+      while (importPath[dots] === '.') {
+        dots++;
+      }
+      
+      // Navigate up for each dot beyond the first
+      for (let i = 1; i < dots; i++) {
+        currentDir = path.dirname(currentDir);
+      }
+      
+      const rest = importPath.substring(dots).replace(/\./g, '/');
+      const relPath = rest ? path.posix.join(currentDir, rest) : currentDir;
+      
+      const candidates = [
+        relPath + '.py',
+        path.posix.join(relPath, '__init__.py')
+      ];
+      
+      for (const cand of candidates) {
+        if (allFiles.has(cand)) return cand;
+      }
+      return null;
+    }
+
+    // Absolute-style import (pkg.mod)
     const parts = importPath.split('.');
     const dotPath = parts.join('/');
     const candidates = [
@@ -97,16 +136,17 @@ const resolveImportPath = (importPath, sourceFile, allFiles, ext) => {
 
     for (const cand of candidates) {
       if (allFiles.has(cand)) return cand;
-      // Try relative to source file
+      // Try relative to source file root (first level)
       const relative = path.posix.join(path.dirname(sourceFile), cand);
       if (allFiles.has(relative)) return relative;
     }
     return null;
   }
 
-  // C# resolution (Currently treats namespace as the dependency identity)
-  if (ext === '.cs') {
-    return importPath; // In C#, we track namespaces as strings
+  // C# resolution
+  if (ext === '.cs' && allFiles instanceof Map) {
+    // allFiles is the namespaceMap in this context
+    return allFiles.get(importPath) || null;
   }
 
   // JS/TS resolution
@@ -168,7 +208,11 @@ const parseFile = (filePath, source, allFiles = new Set()) => {
           const rawPath = capture.node.text;
           const resolved = resolveImportPath(rawPath, filePath, allFiles, ext);
           if (resolved) {
-            imports.add(resolved);
+            if (Array.isArray(resolved)) {
+              resolved.forEach(r => imports.add(r));
+            } else {
+              imports.add(resolved);
+            }
           }
         } else if (capture.name === 'export_name') {
           exports.add(capture.node.text);

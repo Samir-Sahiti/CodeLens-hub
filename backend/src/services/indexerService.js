@@ -96,6 +96,40 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     const octokit = source === 'github' ? new Octokit({ auth: token }) : null;
 
     const limit = pLimit(10);
+
+    // 2.5 Optional Pre-pass for C# Namespaces (US-011)
+    const namespaceMap = new Map();
+    const isCSharpRepo = pendingFiles.some(f => f.path.toLowerCase().endsWith('.cs'));
+    
+    if (isCSharpRepo) {
+      console.log(`[indexer] C# files detected. Running namespace pre-pass...`);
+      await Promise.all(
+        pendingFiles.map(file =>
+          limit(async () => {
+            if (!file.path.toLowerCase().endsWith('.cs')) return;
+            try {
+              if (source === 'github') {
+                file.content = await getGithubFileContent(octokit, owner, name, file.sha);
+              } else {
+                file.content = await fs.readFile(file.fsPath, 'utf-8');
+              }
+              const parsed = parseFile(file.path, file.content, getAllFilesSet);
+              for (const ns of parsed.exports) {
+                if (!namespaceMap.has(ns)) namespaceMap.set(ns, new Set());
+                namespaceMap.get(ns).add(file.path);
+              }
+            } catch (err) {
+              console.warn(`[indexer] Failed pre-pass for ${file.path}: ${err.message}`);
+            }
+          })
+        )
+      );
+      // Convert sets to arrays for easier usage in resolver
+      for (const [ns, paths] of namespaceMap.entries()) {
+        namespaceMap.set(ns, Array.from(paths));
+      }
+    }
+
     const parsedFiles = [];
 
     // 3. parse (with concurrency) and 4. resolve imports
@@ -103,13 +137,16 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       pendingFiles.map(file =>
         limit(async () => {
           try {
-            if (source === 'github') {
-              file.content = await getGithubFileContent(octokit, owner, name, file.sha);
-            } else {
-              file.content = await fs.readFile(file.fsPath, 'utf-8');
+            // Content might already be loaded from pre-pass
+            if (!file.content) {
+              if (source === 'github') {
+                file.content = await getGithubFileContent(octokit, owner, name, file.sha);
+              } else {
+                file.content = await fs.readFile(file.fsPath, 'utf-8');
+              }
             }
-            // Parse file directly
-            const parsed = parseFile(file.path, file.content, getAllFilesSet);
+            // Parse file directly, passing namespaceMap for C# resolution
+            const parsed = parseFile(file.path, file.content, isCSharpRepo ? namespaceMap : getAllFilesSet);
             parsedFiles.push(parsed);
           } catch (err) {
             console.warn(`[indexer] Failed to process ${file.path}: ${err.message}`);
