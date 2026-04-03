@@ -20,12 +20,21 @@ function chunkArray(arr, size) {
 
 async function fetchGithubFiles(owner, name, token) {
   const octokit = new Octokit({ auth: token });
-  const { data: commit } = await octokit.rest.repos.getCommit({
-    owner,
-    repo: name,
-    ref: 'HEAD',
-  });
-  const treeSha = commit.commit.tree.sha;
+  let treeSha;
+  try {
+    const { data: commit } = await octokit.rest.repos.getCommit({
+      owner,
+      repo: name,
+      ref: 'HEAD',
+    });
+    treeSha = commit.commit.tree.sha;
+  } catch (err) {
+    if (err.status === 404) {
+      throw new Error(`GitHub repository '${owner}/${name}' not found or insufficient OAuth permissions. (Ensure 'repo' scope is granted in Supabase/GitHub)`);
+    }
+    throw err;
+  }
+
   const { data: tree } = await octokit.rest.git.getTree({
     owner,
     repo: name,
@@ -362,84 +371,88 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       }
     }
 
-    // 11. Extract Semantic Chunks and Embed Vectors
-    try {
-      console.log(`[indexer] Starting semantic chunking and embedding for ${repoId}`);
-      
-      // 11a. Wipe obsolete chunks natively
-      await supabaseAdmin.from('code_chunks').delete().eq('repo_id', repoId);
-      
-      // 11b. Extract local raw chunks
-      const allExtractedChunks = [];
-      for (const file of pendingFiles) {
-        if (!file.content) continue;
-        const fileChunks = extractChunksFromFile(file.path, file.content, repoId);
-        allExtractedChunks.push(...fileChunks);
-      }
-      
-      console.log(`[indexer] Generated ${allExtractedChunks.length} raw chunks. Proceeding to OpenAI.`);
-      
-      // 11c. Batch API vectors (Respecting limit constraints)
-      const batches = chunkArray(allExtractedChunks, 20);
-      const mappedPayloads = [];
+    // 10. Extract Semantic Chunks and Embed Vectors (US-017)
+    if (!process.env.OPENAI_API_KEY) {
+      console.log('[indexer] No OPENAI_API_KEY set — skipping embedding step.');
+    } else {
+      try {
+        console.log(`[indexer] Starting semantic chunking and embedding for ${repoId}`);
+        
+        // 10a. Wipe obsolete chunks natively
+        await supabaseAdmin.from('code_chunks').delete().eq('repo_id', repoId);
+        
+        // 10b. Extract local raw chunks
+        const allExtractedChunks = [];
+        for (const file of pendingFiles) {
+          if (!file.content) continue;
+          const fileChunks = extractChunksFromFile(file.path, file.content, repoId);
+          allExtractedChunks.push(...fileChunks);
+        }
+        
+        console.log(`[indexer] Generated ${allExtractedChunks.length} raw chunks. Proceeding to OpenAI.`);
+        
+        // 10c. Batch API vectors (Respecting limit constraints)
+        const batches = chunkArray(allExtractedChunks, 20);
+        const mappedPayloads = [];
 
-      for (const batch of batches) {
-        try {
-          const res = await openai.embeddings.create({
-            input: batch.map(c => c.content),
-            model: "text-embedding-3-small"
-          });
-          
-          for (let i = 0; i < batch.length; i++) {
-            mappedPayloads.push({
-              repo_id: batch[i].repo_id,
-              file_path: batch[i].file_path,
-              start_line: batch[i].start_line,
-              end_line: batch[i].end_line,
-              content: batch[i].content,
-              embedding: res.data[i].embedding
+        for (const batch of batches) {
+          try {
+            const res = await openai.embeddings.create({
+              input: batch.map(c => c.content),
+              model: "text-embedding-3-small"
             });
-          }
-        } catch (batchErr) {
-          console.warn(`[indexer] Failed to embed an entire chunk batch. Initiating per-chunk exact rescue sequence.`);
-          
-          // File-level rescue sequence (Iterating natively without breaking context limits)
-          for (const singleChunk of batch) {
-            try {
-              const singleRes = await openai.embeddings.create({
-                input: singleChunk.content,
-                model: "text-embedding-3-small"
-              });
+            
+            for (let i = 0; i < batch.length; i++) {
               mappedPayloads.push({
-                repo_id: singleChunk.repo_id,
-                file_path: singleChunk.file_path,
-                start_line: singleChunk.start_line,
-                end_line: singleChunk.end_line,
-                content: singleChunk.content,
-                embedding: singleRes.data[0].embedding
+                repo_id: batch[i].repo_id,
+                file_path: batch[i].file_path,
+                start_line: batch[i].start_line,
+                end_line: batch[i].end_line,
+                content: batch[i].content,
+                embedding: res.data[i].embedding
               });
-            } catch (singleErr) {
-               console.warn(`[indexer] File failed to embed chunk in ${singleChunk.file_path}: Skipped with a warning.`);
+            }
+          } catch (batchErr) {
+            console.warn(`[indexer] Batch embed failed: ${batchErr.message}. Falling back to per-chunk.`);
+            
+            // File-level rescue sequence (Iterating natively without breaking context limits)
+            for (const singleChunk of batch) {
+              try {
+                const singleRes = await openai.embeddings.create({
+                  input: singleChunk.content,
+                  model: "text-embedding-3-small"
+                });
+                mappedPayloads.push({
+                  repo_id: singleChunk.repo_id,
+                  file_path: singleChunk.file_path,
+                  start_line: singleChunk.start_line,
+                  end_line: singleChunk.end_line,
+                  content: singleChunk.content,
+                  embedding: singleRes.data[0].embedding
+                });
+              } catch (singleErr) {
+                 console.warn(`[indexer] Failed to embed chunk in ${singleChunk.file_path}: ${singleErr.message}`);
+              }
             }
           }
         }
-      }
 
-      // 11d. Commit bulk inserts correctly against standard JSON array loops mapping matching Schema objects
-      if (mappedPayloads.length > 0) {
-         const insertBatches = chunkArray(mappedPayloads, 500);
-         for (const insBatch of insertBatches) {
-           const { error: insErr } = await supabaseAdmin.from('code_chunks').insert(insBatch);
-           if (insErr) console.error(`[indexer] DB insert err for vectors: ${insErr.message}`);
-         }
+        // 10d. Commit bulk inserts correctly against standard JSON array loops mapping matching Schema objects
+        if (mappedPayloads.length > 0) {
+           const insertBatches = chunkArray(mappedPayloads, 500);
+           for (const insBatch of insertBatches) {
+             const { error: insErr } = await supabaseAdmin.from('code_chunks').insert(insBatch);
+             if (insErr) console.error(`[indexer] DB insert err for vectors: ${insErr.message}`);
+           }
+        }
+        console.log(`[indexer] Completely finished semantic embeddings mappings. Saved ${mappedPayloads.length} vectors!`);
+        
+      } catch (embeddingError) {
+        console.warn(`[indexer] Global embedding step failed severely, isolating error entirely: ${embeddingError.message}`);
       }
-      console.log(`[indexer] Completely finished semantic embeddings mappings. Saved ${mappedPayloads.length} vectors!`);
-      
-    } catch (embeddingError) {
-      console.warn(`[indexer] Global embedding step failed severely, isolating error entirely: ${embeddingError.message}`);
     }
 
-    // 10. update repo (ready)
+    // 11. update repo (ready)
     await supabaseAdmin
       .from('repositories')
       .update({
@@ -461,8 +474,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
         .eq('id', repoId);
     }
 
-    console.error(`[indexer] Failed pipeline for repoId ${repoId}:`, error);
-    throw error;
+    console.error(`[indexer] Failed pipeline for repoId ${repoId}:`, error.message);
   }
 };
 

@@ -18,8 +18,13 @@ const { indexRepository } = require('./indexerService');
 
 const startGitHubIndexing = async (repoId, githubToken, repoFullName) => {
   const [owner, name] = repoFullName.split('/');
-  // The service handles marking it ready or failed, and the full try/catch pipeline
-  await indexRepository({ repoId, owner, name, token: githubToken, source: 'github' });
+  // The service handles marking it ready or failed, and the full try/catch pipeline.
+  // We wrap it again here to ensure unhandled rejections never reach the main process.
+  try {
+    await indexRepository({ repoId, owner, name, token: githubToken, source: 'github' });
+  } catch (err) {
+    console.error(`[Indexer] Top-level fallback error for ${repoFullName}:`, err.message);
+  }
 };
 
 
@@ -56,7 +61,7 @@ const startLocalIndexing = async (repoId, zipFilePath, repoName) => {
     }
 
     extractPath = await fs.mkdtemp(path.join(os.tmpdir(), `codelens-repo-${repoId}-`));
-    zip.extractAllTo(extractPath, true); // Fix: add this between the two lines above
+    zip.extractAllTo(extractPath, true);
     // Trigger the real indexing pipeline
     await indexRepository({ repoId, extractPath, source: 'upload' });
 

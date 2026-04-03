@@ -1,6 +1,7 @@
 const Parser = require('tree-sitter');
 const JavaScript = require('tree-sitter-javascript');
 const TypeScript = require('tree-sitter-typescript').typescript;
+const TSX = require('tree-sitter-typescript').tsx;
 const Python = require('tree-sitter-python');
 const CSharp = require('tree-sitter-c-sharp');
 
@@ -8,49 +9,50 @@ const path = require('path');
 
 const LANGUAGE_MAP = {
   '.js': JavaScript,
-  '.jsx': JavaScript,
+  '.jsx': TSX,
   '.ts': TypeScript,
-  '.tsx': TypeScript,
+  '.tsx': TSX,
   '.py': Python,
   '.cs': CSharp,
 };
 
 const QUERIES = {
-  javascript: `
-    ;; ESM Imports
-    (import_statement
-      source: (string (string_fragment) @import_path))
+    javascript: `
+      ;; ESM Imports: import { x } from "./foo"
+      (import_statement (string) @import_path)
 
-    ;; Re-exports
-    (export_statement
-      source: (string (string_fragment) @import_path))
+      ;; Re-exports: export { x } from "./foo"
+      (export_statement (string) @import_path)
 
-    ;; Dynamic imports
-    (call_expression
-      function: (import)
-      arguments: (arguments (string (string_fragment) @import_path)))
+      ;; Dynamic imports: import("./foo")
+      (call_expression
+        (import)
+        (arguments (string) @import_path))
 
-    ;; CommonJS require
-    (call_expression
-      function: (identifier) @func_name (#eq? @func_name "require")
-      arguments: (arguments (string (string_fragment) @import_path)))
+      ;; CommonJS require: require("./foo")
+      (call_expression
+        (identifier) @require_ident (#eq? @require_ident "require")
+        (arguments (string) @import_path))
 
-    ;; Named Exports (e.g., export const x = 1)
-    (export_statement
-      declaration: [
-        (lexical_declaration (variable_declarator name: (identifier) @export_name))
-        (function_declaration name: (identifier) @export_name)
-        (class_declaration name: (identifier) @export_name)
-      ])
+      ;; Named Exports: export const x = 1, export function f() {}
+      (export_statement
+        (lexical_declaration (variable_declarator (identifier) @export_name)))
+      (export_statement
+        (function_declaration (identifier) @export_name))
+      (export_statement
+        (class_declaration (identifier) @export_name))
 
-    ;; Default Exports (simplified)
-    (export_statement
-      value: (identifier) @export_name)
-    
-    ;; Export list (e.g., export { x, y })
-    (export_statement
-      (export_clause (export_specifier (identifier) @export_name)))
-  `,
+      ;; Default Exports: export default x
+      (export_statement
+        (identifier) @export_name)
+      (export_statement
+        (function_declaration (identifier) @export_name))
+      (export_statement
+        (class_declaration (identifier) @export_name))
+      
+      ;; Export list: export { x, y as z }
+      (export_specifier (identifier) @export_name)
+    `,
   python: `
     ;; Simple import: import pkg.mod
     (import_statement
@@ -205,7 +207,13 @@ const parseFile = (filePath, source, allFiles = new Set()) => {
     for (const match of matches) {
       for (const capture of match.captures) {
         if (capture.name === 'import_path') {
-          const rawPath = capture.node.text;
+          let rawPath = capture.node.text;
+          // Strip surrounding quotes from the string node
+          if ((rawPath.startsWith("'") && rawPath.endsWith("'")) ||
+              (rawPath.startsWith('"') && rawPath.endsWith('"')) ||
+              (rawPath.startsWith('`') && rawPath.endsWith('`'))) {
+            rawPath = rawPath.slice(1, -1);
+          }
           const resolved = resolveImportPath(rawPath, filePath, allFiles, ext);
           if (resolved) {
             if (Array.isArray(resolved)) {

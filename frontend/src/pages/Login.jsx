@@ -21,6 +21,7 @@ export default function Login() {
         provider: 'github',
         options: {
           redirectTo: window.location.origin + '/auth/callback',
+          scopes: 'repo', // Request repository permissions
         },
       });
       if (error) throw error;
