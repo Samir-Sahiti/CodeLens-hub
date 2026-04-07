@@ -4,6 +4,8 @@ const searchController = require('../controllers/searchController');
 const { requireAuth } = require('../middleware/auth');
 
 // Natural language search over an indexed repo (RAG)
+// POST /api/search/:repoId   body: { query: string }
+// Streams back SSE events: { type: 'sources'|'chunk'|'done'|'error', ... }
 router.post('/:repoId', requireAuth, searchController.search);
 
 module.exports = router;

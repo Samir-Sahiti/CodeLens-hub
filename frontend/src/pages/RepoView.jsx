@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabase';
 import DependencyGraph from '../components/DependencyGraph';
+import SearchPanel from '../components/SearchPanel';
 
 // Helper component for tabs
 const TabButton = ({ active, label, onClick, badge }) => (
@@ -269,14 +270,6 @@ function IssuesPanel({ nodes, issues, onNodeSelect }) {
   );
 }
 
-function SearchPanel({ nodes, edges, issues }) {
-  return (
-    <div className="flex h-[40rem] flex-col items-center justify-center rounded-xl border border-gray-800 bg-gray-900/50">
-      <p className="text-gray-400">Natural Language Search Panel (Coming Soon)</p>
-      <p className="text-gray-600 text-sm mt-2">RAG Architecture loading...</p>
-    </div>
-  );
-}
 
 export default function RepoView() {
   const { repoId } = useParams();
@@ -518,7 +511,7 @@ export default function RepoView() {
             </div>
 
             <div className={activeTab === 'search' ? 'block h-full' : 'hidden'}>
-              <SearchPanel nodes={analysisData.nodes} edges={analysisData.edges} issues={analysisData.issues} />
+              <SearchPanel repoId={repoId} />
             </div>
           </div>
         )}
