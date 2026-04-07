@@ -1,13 +1,24 @@
+import { useState, useEffect } from 'react';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import OnboardingModal from './OnboardingModal';
 
 export default function Layout() {
   const { user, signOut } = useAuth();
   const location = useLocation();
+  const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
+
+  // Show onboarding modal on first dashboard visit
+  useEffect(() => {
+    if (
+      location.pathname === '/dashboard' &&
+      !localStorage.getItem('codelens_onboarding_complete')
+    ) {
+      setIsOnboardingOpen(true);
+    }
+  }, [location.pathname]);
 
   const handleSignOut = async () => {
-    // Clear any local app state if needed here before signing out.
-    // AuthContext and Supabase will handle the redirect to /login
     await signOut();
   };
 
@@ -45,7 +56,7 @@ export default function Layout() {
 
         {/* User / Sign Out Footer */}
         <div className="border-t border-gray-800 p-4">
-          <div className="flex items-center gap-3 mb-4">
+          <div className="flex items-center gap-3 mb-3">
             <div className="h-8 w-8 overflow-hidden rounded-full bg-gray-800">
               {user?.user_metadata?.avatar_url ? (
                 <img src={user.user_metadata.avatar_url} alt="Avatar" className="h-full w-full object-cover" />
@@ -61,7 +72,16 @@ export default function Layout() {
               </span>
             </div>
           </div>
-          
+
+          {/* Show introduction again — positioned above sign out */}
+          <button
+            onClick={() => setIsOnboardingOpen(true)}
+            className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-gray-500 hover:bg-gray-800 hover:text-gray-300 transition-colors mb-1"
+          >
+            <InfoIcon className="h-4 w-4 shrink-0" />
+            Show introduction again
+          </button>
+
           <button
             onClick={handleSignOut}
             className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-gray-400 hover:bg-gray-800 hover:text-white transition-colors"
@@ -76,6 +96,12 @@ export default function Layout() {
       <main className="flex-1 overflow-y-auto">
         <Outlet />
       </main>
+
+      {/* Onboarding Modal */}
+      <OnboardingModal
+        isOpen={isOnboardingOpen}
+        onClose={() => setIsOnboardingOpen(false)}
+      />
     </div>
   );
 }
@@ -93,6 +119,14 @@ function SignOutIcon(props) {
   return (
     <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75" />
+    </svg>
+  );
+}
+
+function InfoIcon(props) {
+  return (
+    <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" />
     </svg>
   );
 }
