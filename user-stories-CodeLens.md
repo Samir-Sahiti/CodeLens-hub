@@ -691,6 +691,31 @@ Assign labels: `epic/infra`, `epic/auth`, `epic/dashboard`, `epic/graph`, `epic/
 
 ---
 
+### US-026: AI Code Review Panel
+
+**Labels:** `epic/ai` `epic/search`
+**Milestone:** Sprint 6 — Weeks 11–12
+
+---
+
+**As a** developer
+**I want to** paste a code snippet and get an AI review that considers my actual codebase
+**So that** I know whether the code is well-written and whether it integrates cleanly with what already exists
+
+**Acceptance Criteria**
+- [ ] Code Review panel accessible from the repo sidebar nav
+- [ ] Textarea for pasting a code snippet (up to ~200 lines)
+- [ ] Optional context field: "What is this code supposed to do?"
+- [ ] On submit, sends the snippet + top 5 semantically similar chunks from the indexed codebase to Claude
+- [ ] Claude responds with: a quality assessment, specific improvement suggestions, and a compatibility note ("This pattern matches how auth is handled in src/middleware/auth.js" or "This introduces a new pattern that conflicts with...")
+- [ ] Response streams in like the Search panel
+- [ ] A "Clean up this code" quick action that asks Claude to rewrite the snippet following patterns it found in the repo
+
+**Note**
+> Reuse the SSE streaming infrastructure from `searchController.js`. The system prompt should be: "You are reviewing a code snippet for a developer. You have context from their existing codebase below. Assess code quality, suggest improvements, and specifically note whether this code is consistent with the patterns and conventions you see in their codebase."
+
+---
+
 ## 💥 EPIC: Change Impact Analysis
 
 ---
@@ -870,6 +895,197 @@ Assign labels: `epic/infra`, `epic/auth`, `epic/dashboard`, `epic/graph`, `epic/
 
 ---
 
+### US-027: Context-aware sidebar navigation
+
+**Labels:** `epic/dashboard`
+**Milestone:** Sprint 5 — Weeks 9–10
+
+---
+
+**As a** developer navigating a repository
+**I want** the sidebar to reflect where I am in the app
+**So that** navigation feels natural and the sidebar earns its space
+
+**Acceptance Criteria**
+- [ ] On the Dashboard, sidebar shows: Dashboard link (as now)
+- [ ] When inside `/repo/:repoId`, sidebar shows: a "← Repositories" back link, the repo name (truncated with tooltip), then nav items: Graph, Metrics, Issues, Search, Code Review
+- [ ] Active sidebar item highlighted with the same indigo indicator as the current tab system
+- [ ] The horizontal tab bar on the repo page is removed — sidebar takes over that role
+- [ ] Status badge (Ready / Indexing / Failed) shown next to the repo name in sidebar
+- [ ] Issue count badge shown on the Issues sidebar item
+
+**Note**
+> Lift the tab state up to a URL param (`/repo/:repoId?tab=graph`) so the sidebar links work correctly with browser back/forward. The `Layout.jsx` component needs a repo prop passed from `RepoView` — or use a context. Either works.
+
+---
+
+### US-028: GitHub Webhooks for auto-sync
+
+**Labels:** `epic/infra`
+**Milestone:** Sprint 6 — Weeks 11–12
+
+---
+
+**As a** developer
+**I want** CodeLens to listen for pushes to my connected GitHub repositories
+**So that** my dependency graph and AI search index are always up-to-date automatically
+
+**Acceptance Criteria**
+- [ ] Provide a "Generate Webhook URL" button in repo settings
+- [ ] Endpoint `/api/webhooks/github` accepts GitHub push events
+- [ ] Validates payload signature using a webhook secret
+- [ ] Automatically triggers the re-index pipeline (`US-008`) for that repository
+- [ ] "Auto-sync" toggle added to repo cards to easily enable/disable webhook indexing
+
+**Note**
+> GitHub webhooks need a secret to verify the `x-hub-signature-256`. Store the secret securely in the `repositories` table. Only trigger index on pushes to the `default_branch` to avoid unnecessary processing on feature branches.
+
+---
+
+## 🚀 EPIC: Production & Deployment
+
+---
+
+### US-029: Production Dockerisation
+
+**Labels:** `epic/infra` `devops`
+**Milestone:** Sprint 7 — Weeks 13–14
+
+---
+
+**As a** DevOps engineer / developer
+**I want** production-ready Dockerfiles for the frontend and backend
+**So that** the application can be deployed consistently and securely anywhere containerised hosting is supported
+
+**Acceptance Criteria**
+- [ ] Backend `Dockerfile` uses a multi-stage build, ignoring `devDependencies`
+- [ ] Frontend `Dockerfile` builds the Vite app and serves the static output via Nginx
+- [ ] A `docker-compose.prod.yml` template created for full-stack deployment without hot-reloading overhead
+- [ ] Docker images enforce running as a non-root unprivileged user for security
+- [ ] All sensitive credentials (Supabase keys, GitHub secrets) are passed strictly as environment variables
+
+**Note**
+> The backend container only needs Node.js. The frontend needs Node.js for the build stage, but should use a lightweight Nginx alpine image for serving the built `/dist` folder.
+
+---
+
+### US-030: CI/CD Pipeline (GitHub Actions)
+
+**Labels:** `epic/infra` `devops`
+**Milestone:** Sprint 7 — Weeks 13–14
+
+---
+
+**As a** developer
+**I want** a GitHub Actions pipeline that runs on every push and pull request
+**So that** broken code is blocked from being merged and successful builds are automatically deployed
+
+**Acceptance Criteria**
+- [ ] GitHub Actions workflow `.github/workflows/ci.yml` established
+- [ ] Pipeline runs `npm run lint` and any automated tests for both frontend and backend
+- [ ] Code cannot be merged into `main` if the pipeline fails
+- [ ] A continuous deployment pipeline `cd.yml` is triggered upon merges to `main`
+- [ ] Deployment steps push the latest Docker images to a registry (e.g. GitHub Container Registry or Docker Hub)
+
+**Note**
+> Use standard Node.js setup actions with caching for `node_modules` to keep build times low.
+
+---
+
+### US-031: Cloud Infrastructure & Hosting Setup
+
+**Labels:** `epic/infra` `devops`
+**Milestone:** Sprint 7 — Weeks 13–14
+
+---
+
+**As a** stakeholder
+**I want** the CodeLens application to be hosted publicly on the web
+**So that** users don't have to clone the repository to use the tool
+
+**Acceptance Criteria**
+- [ ] Production frontend deployed (e.g., to Vercel, Netlify, or via Docker on AWS/DigitalOcean)
+- [ ] Production backend deployed and publicly accessible via HTTPS
+- [ ] A separate production Supabase instance is configured with production secrets
+- [ ] Custom domain successfully routed to the frontend
+- [ ] GitHub OAuth App updated/created with the production callback URL
+
+**Note**
+> Ensure CORS is correctly configured on the backend to *only* accept requests from the deployed frontend domain. Protect all API endpoints.
+
+---
+
+## 🌟 EPIC: Advanced Integrations & Teams
+
+---
+
+### US-032: Architecture Graph Export (PNG/SVG)
+
+**Labels:** `epic/graph`
+**Milestone:** Sprint 6 — Weeks 11–12
+
+---
+
+**As a** developer
+**I want** to export the visual architecture graph as an image
+**So that** I can easily embed it in my documentation, READMEs, or share it in presentations
+
+**Acceptance Criteria**
+- [ ] An "Export Image" button added to the Graph view panel
+- [ ] Supports exporting the current view as both a high-resolution PNG and a scalable SVG
+- [ ] The export inherits the current graph state (highlights, zoomed positions, and labels)
+- [ ] Visual artifacts like UI panels or floating buttons are excluded from the exported image
+
+**Note**
+> If using D3 with an SVG element, you can serialize the SVG to a blob for download. If using a Canvas renderer (for large graphs), use `.toDataURL()` to generate the PNG.
+
+---
+
+### US-033: "Chat with this File" (Targeted AI Context)
+
+**Labels:** `epic/ai`
+**Milestone:** Sprint 6 — Weeks 11–12
+
+---
+
+**As a** developer
+**I want** to click on a specific file node in the graph and ask the AI questions strictly about that file
+**So that** I can deep-dive into complex files without the global search retrieving unrelated context
+
+**Acceptance Criteria**
+- [ ] Context menu / Details panel for a node includes a "Chat with this file" action
+- [ ] Triggers a targeted AI chat panel where the context is forcibly scoped only to the selected file's content (and optionally its direct imports)
+- [ ] Disables standard RAG similarity search for this chat session
+- [ ] Prompts the user with file-specific suggestions like "Explain what this file does" or "Find potential bugs in this code"
+
+**Note**
+> Instead of embedding a natural language query, fetch the full content of the selected file directly from the database and pass it as the exclusive `system` context to Claude.
+
+---
+
+### US-034: Team Organizations (Auto-invite GitHub Collaborators)
+
+**Labels:** `epic/auth` `epic/dashboard`
+**Milestone:** Sprint 8 — Weeks 15–16
+
+---
+
+**As a** lead developer
+**I want** to form a Team dynamically based on my GitHub repo collaborators
+**So that** the entire team automatically gains access to the indexed graph and AI search without having to re-index the repo themselves
+
+**Acceptance Criteria**
+- [ ] "Create Team" flow allows a user to group repositories under a Team context
+- [ ] The backend calls the GitHub API (`/repos/{owner}/{repo}/collaborators`) to fetch a list of authorized users
+- [ ] When an authorized collaborator signs into CodeLens, they automatically see the Team's shared repositories on their Dashboard
+- [ ] Shared repos only need to be indexed once, saving compute and API calls
+- [ ] Access controls (RBAC) ensure users only see repositories they genuinely have GitHub access to
+
+**Note**
+> Supabase RLS policies will need updating. Instead of `user_id = auth.uid()`, create a `team_members` join table and adjust policies to permit access if a user is part of the `team_members` linking to the repository's team. Relying on the GitHub collaborators API adds a seamless "magic" invite experience.
+
+---
+
 ## 🏷️ Suggested GitHub Labels
 
 | Label | Color | Description |
@@ -882,6 +1098,7 @@ Assign labels: `epic/infra`, `epic/auth`, `epic/dashboard`, `epic/graph`, `epic/
 | `epic/ai` | `#D97706` | AI integration and RAG pipeline |
 | `epic/search` | `#0D9488` | Natural language search feature |
 | `epic/impact` | `#DC2626` | Change impact analysis feature |
+| `devops` | `#FCA5A5` | DevOps, CI/CD, and Hosting |
 | `database` | `#1D4ED8` | Database schema and migrations |
 
 ---
@@ -894,4 +1111,7 @@ Assign labels: `epic/infra`, `epic/auth`, `epic/dashboard`, `epic/graph`, `epic/
 | Sprint 2 — Core Analysis Engine | Weeks 3–4 | US-009 → US-012 |
 | Sprint 3 — Visualisation & Metrics | Weeks 5–6 | US-013 → US-016 |
 | Sprint 4 — AI Layer & Impact Analysis | Weeks 7–8 | US-017 → US-021 |
-| Sprint 5 — Polish & Stabilisation | Weeks 9–10 | US-022 → US-025 |
+| Sprint 5 — Polish & Stabilisation | Weeks 9–10 | US-022 → US-025, US-027 |
+| Sprint 6 — Advanced Integrations | Weeks 11–12 | US-026, US-028, US-032, US-033 |
+| Sprint 7 — DevOps & Deployment | Weeks 13–14 | US-029 → US-031 |
+| Sprint 8 — Teams & Collaboration | Weeks 15–16 | US-034 |
