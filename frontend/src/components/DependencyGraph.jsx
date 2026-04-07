@@ -98,11 +98,158 @@ function GraphDetailsPanel({ node }) {
   );
 }
 
-export default function DependencyGraph({ nodes, edges, issues, selectedNodeId, onNodeSelect }) {
+function ImpactAnalysisPanel({ impactAnalysis, onClearImpactAnalysis }) {
+  const [showAllTransitive, setShowAllTransitive] = useState(false);
+
+  useEffect(() => {
+    setShowAllTransitive(false);
+  }, [impactAnalysis?.sourcePath]);
+
+  if (!impactAnalysis) return null;
+
+  const isLargeBlastRadius = impactAnalysis.transitive.length > 100;
+  const visibleTransitive = isLargeBlastRadius && !showAllTransitive
+    ? impactAnalysis.transitive.slice(0, 25)
+    : impactAnalysis.transitive;
+  const hiddenCount = impactAnalysis.transitive.length - visibleTransitive.length;
+
+  const handleCopyImpactList = async () => {
+    const allPaths = [
+      impactAnalysis.sourcePath,
+      ...impactAnalysis.direct,
+      ...impactAnalysis.transitive,
+    ];
+
+    try {
+      await navigator.clipboard.writeText(allPaths.join('\n'));
+    } catch (error) {
+      console.error('Failed to copy impact list:', error);
+    }
+  };
+
+  const handleExportJson = () => {
+    const payload = JSON.stringify({
+      source: impactAnalysis.sourcePath,
+      direct: impactAnalysis.direct,
+      transitive: impactAnalysis.transitive,
+    }, null, 2);
+
+    const blob = new Blob([payload], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${impactAnalysis.sourceName.replace(/[^\w.-]+/g, '_')}-impact.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <aside className="w-80 shrink-0 rounded-2xl border border-gray-800 bg-gray-900/80 p-5 shadow-2xl shadow-black/20 transition-all duration-300">
+      <div className="flex h-full flex-col">
+        <div className="mb-5">
+          <p className="text-xs uppercase tracking-[0.2em] text-amber-400/80">Impact Analysis</p>
+          <h3 className="mt-2 break-all font-mono text-sm text-gray-100">{impactAnalysis.sourcePath}</h3>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3">
+            <p className="text-xs uppercase tracking-[0.16em] text-red-200/70">Direct</p>
+            <p className="mt-1 text-2xl font-semibold text-red-100">{impactAnalysis.direct.length}</p>
+          </div>
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3">
+            <p className="text-xs uppercase tracking-[0.16em] text-amber-200/70">Transitive</p>
+            <p className="mt-1 text-2xl font-semibold text-amber-100">{impactAnalysis.transitive.length}</p>
+          </div>
+        </div>
+
+        {impactAnalysis.direct.length === 0 && impactAnalysis.transitive.length === 0 ? (
+          <div className="mt-5 rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-4 text-sm text-emerald-100">
+            No files depend on this file - changes here are isolated.
+          </div>
+        ) : (
+          <div className="mt-5 space-y-4 overflow-y-auto pr-1">
+            <section>
+              <div className="mb-2 flex items-center justify-between">
+                <h4 className="text-xs uppercase tracking-[0.16em] text-gray-500">Directly Affected Files</h4>
+                <span className="text-xs text-red-300">{impactAnalysis.direct.length}</span>
+              </div>
+              <div className="space-y-2">
+                {impactAnalysis.direct.map((filePath) => (
+                  <div key={filePath} className="rounded-xl border border-gray-800 bg-gray-950/70 px-3 py-2 font-mono text-xs text-red-100">
+                    {filePath}
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section>
+              <div className="mb-2 flex items-center justify-between">
+                <h4 className="text-xs uppercase tracking-[0.16em] text-gray-500">Transitively Affected Files</h4>
+                <button
+                  onClick={() => setShowAllTransitive((current) => !current)}
+                  className="text-xs font-medium text-amber-300 transition hover:text-amber-200"
+                >
+                  {isLargeBlastRadius ? (showAllTransitive ? 'Collapse' : 'Expand') : null}
+                </button>
+              </div>
+              <div className="space-y-2">
+                {visibleTransitive.map((filePath) => (
+                  <div key={filePath} className="rounded-xl border border-gray-800 bg-gray-950/70 px-3 py-2 font-mono text-xs text-amber-100">
+                    {filePath}
+                  </div>
+                ))}
+                {hiddenCount > 0 && (
+                  <div className="rounded-xl border border-dashed border-gray-700 px-3 py-2 text-xs text-gray-400">
+                    ...and {hiddenCount} more
+                  </div>
+                )}
+              </div>
+            </section>
+          </div>
+        )}
+
+        <div className="mt-5 grid grid-cols-1 gap-2">
+          <button
+            onClick={handleCopyImpactList}
+            className="rounded-xl border border-gray-700 bg-gray-950/80 px-4 py-3 text-sm font-medium text-gray-100 transition hover:border-gray-500 hover:bg-gray-900"
+          >
+            Copy impact list
+          </button>
+          <button
+            onClick={handleExportJson}
+            className="rounded-xl border border-gray-700 bg-gray-950/80 px-4 py-3 text-sm font-medium text-gray-100 transition hover:border-gray-500 hover:bg-gray-900"
+          >
+            Export as JSON
+          </button>
+          <button
+            onClick={onClearImpactAnalysis}
+            className="rounded-xl bg-amber-500 px-4 py-3 text-sm font-semibold text-gray-950 transition hover:bg-amber-400"
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+export default function DependencyGraph({
+  nodes,
+  edges,
+  issues,
+  selectedNodeId,
+  impactAnalysis,
+  onNodeSelect,
+  onAnalyseImpact,
+  onClearImpactAnalysis,
+}) {
   const containerRef = useRef(null);
   const svgRef = useRef(null);
   const canvasRef = useRef(null);
   const [toastVisible, setToastVisible] = useState(false);
+  const [contextMenu, setContextMenu] = useState(null);
 
   const issueNodePaths = useMemo(() => {
     const pathSet = new Set();
@@ -111,11 +258,6 @@ export default function DependencyGraph({ nodes, edges, issues, selectedNodeId, 
     });
     return pathSet;
   }, [issues]);
-
-  const nodeByPath = useMemo(
-    () => new Map(nodes.map((node) => [node.file_path, node])),
-    [nodes]
-  );
 
   const graphNodes = useMemo(() => {
     const maxIncoming = Math.max(1, ...nodes.map((node) => node.incoming_count || 0));
@@ -215,6 +357,15 @@ export default function DependencyGraph({ nodes, edges, issues, selectedNodeId, 
     return () => window.clearTimeout(timeoutId);
   }, [toastVisible]);
 
+  useEffect(() => {
+    if (!contextMenu) return undefined;
+
+    const handleOutsideClick = () => setContextMenu(null);
+    window.addEventListener('pointerdown', handleOutsideClick);
+
+    return () => window.removeEventListener('pointerdown', handleOutsideClick);
+  }, [contextMenu]);
+
   const { resetView } = useGraphSimulation({
     containerRef,
     svgRef,
@@ -223,8 +374,16 @@ export default function DependencyGraph({ nodes, edges, issues, selectedNodeId, 
     edges: graphEdges,
     renderMode,
     selection,
+    impactAnalysis,
     focusNodeId: selection.primaryId,
     onNodeClick: (node) => onNodeSelect(node.graphId),
+    onNodeContextMenu: (node, event) => {
+      setContextMenu({
+        node,
+        x: event.clientX,
+        y: event.clientY,
+      });
+    },
     onNodeDoubleClick: async (node) => {
       try {
         await navigator.clipboard.writeText(node.file_path);
@@ -233,7 +392,10 @@ export default function DependencyGraph({ nodes, edges, issues, selectedNodeId, 
         console.error('Failed to copy file path:', error);
       }
     },
-    onBackgroundClick: () => onNodeSelect(null),
+    onBackgroundClick: () => {
+      setContextMenu(null);
+      onNodeSelect(null);
+    },
   });
 
 
@@ -272,9 +434,55 @@ export default function DependencyGraph({ nodes, edges, issues, selectedNodeId, 
         </div>
 
         <GraphToast message="File path copied to clipboard" visible={toastVisible} />
+
+        {contextMenu && (
+          <div
+            className="fixed z-30 min-w-44 rounded-xl border border-gray-700 bg-gray-950/95 p-2 shadow-2xl shadow-black/50 backdrop-blur"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <button
+              onClick={() => {
+                onNodeSelect(contextMenu.node.graphId);
+                setContextMenu(null);
+              }}
+              className="block w-full rounded-lg px-3 py-2 text-left text-sm text-gray-100 transition hover:bg-gray-800"
+            >
+              View details
+            </button>
+            <button
+              onClick={() => {
+                onAnalyseImpact(contextMenu.node);
+                setContextMenu(null);
+              }}
+              className="block w-full rounded-lg px-3 py-2 text-left text-sm text-amber-200 transition hover:bg-gray-800"
+            >
+              Analyse impact
+            </button>
+            <button
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(contextMenu.node.file_path);
+                  setToastVisible(true);
+                } catch (error) {
+                  console.error('Failed to copy file path:', error);
+                } finally {
+                  setContextMenu(null);
+                }
+              }}
+              className="block w-full rounded-lg px-3 py-2 text-left text-sm text-gray-100 transition hover:bg-gray-800"
+            >
+              Copy path
+            </button>
+          </div>
+        )}
       </div>
 
-      <GraphDetailsPanel node={selectedNode} />
+      {impactAnalysis ? (
+        <ImpactAnalysisPanel impactAnalysis={impactAnalysis} onClearImpactAnalysis={onClearImpactAnalysis} />
+      ) : (
+        <GraphDetailsPanel node={selectedNode} />
+      )}
     </div>
   );
 }

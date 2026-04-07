@@ -1,9 +1,74 @@
 import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { supabase } from '../lib/supabase';
 import DependencyGraph from '../components/DependencyGraph';
 import SearchPanel from '../components/SearchPanel';
+
+function formatLanguage(str) {
+  if (!str) return 'Unknown';
+  if (str === 'javascript') return 'JavaScript';
+  if (str === 'typescript') return 'TypeScript';
+  if (str === 'python') return 'Python';
+  if (str === 'c_sharp') return 'C#';
+  return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+function getFileBasename(filePath) {
+  if (!filePath) return 'Unknown file';
+  const normalizedPath = filePath.replace(/\\/g, '/');
+  const parts = normalizedPath.split('/');
+  return parts[parts.length - 1] || filePath;
+}
+
+function buildImpactAnalysis(sourcePath, nodes, edges) {
+  if (!sourcePath) return null;
+
+  const nodeByPath = new Map(nodes.map((node) => [node.file_path, node]));
+  const sourceNode = nodeByPath.get(sourcePath);
+  if (!sourceNode) return null;
+
+  const reverseAdjacency = new Map();
+  edges.forEach((edge) => {
+    if (!edge.from_path || !edge.to_path) return;
+    if (!reverseAdjacency.has(edge.to_path)) {
+      reverseAdjacency.set(edge.to_path, new Set());
+    }
+    reverseAdjacency.get(edge.to_path).add(edge.from_path);
+  });
+
+  const visited = new Set([sourcePath]);
+  const queue = [{ path: sourcePath, depth: 0 }];
+  const direct = [];
+  const transitive = [];
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    const dependents = reverseAdjacency.get(current.path) || new Set();
+
+    dependents.forEach((dependentPath) => {
+      if (visited.has(dependentPath)) return;
+      visited.add(dependentPath);
+
+      const nextDepth = current.depth + 1;
+      if (nextDepth === 1) direct.push(dependentPath);
+      else transitive.push(dependentPath);
+
+      queue.push({ path: dependentPath, depth: nextDepth });
+    });
+  }
+
+  const getGraphId = (path) => nodeByPath.get(path)?.id || path;
+
+  return {
+    sourceId: sourceNode.id || sourceNode.file_path,
+    sourcePath: sourceNode.file_path,
+    sourceName: getFileBasename(sourceNode.file_path),
+    direct,
+    transitive,
+    directIds: direct.map(getGraphId),
+    transitiveIds: transitive.map(getGraphId),
+  };
+}
 
 // Helper component for tabs
 const TabButton = ({ active, label, onClick, badge }) => (
@@ -29,7 +94,7 @@ const TabButton = ({ active, label, onClick, badge }) => (
 );
 
 // --- Child Panels ---
-function MetricsPanel({ nodes, onNodeSelect }) {
+function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [sortConfig, setSortConfig] = useState({ key: 'complexity_score', direction: 'desc' });
 
@@ -83,103 +148,148 @@ function MetricsPanel({ nodes, onNodeSelect }) {
     return <span className="ml-2 text-indigo-400 font-mono">{sortConfig.direction === 'asc' ? '↑' : '↓'}</span>;
   };
 
-  const formatLanguage = (str) => {
-    if (!str) return 'Unknown';
-    if (str === 'javascript') return 'JavaScript';
-    if (str === 'typescript') return 'TypeScript';
-    if (str === 'python') return 'Python';
-    if (str === 'c_sharp') return 'C#';
-    return str.charAt(0).toUpperCase() + str.slice(1);
-  };
-
   return (
-    <div className="flex flex-col h-[40rem] overflow-hidden bg-gray-900/30 border border-gray-800 rounded-xl relative">
-      {/* Header & Meta Summary */}
-      <div className="flex items-center justify-between p-4 border-b border-gray-800 bg-gray-900/80">
-        <p className="text-sm text-gray-400 font-medium">
-          {nodes.length} files total &middot; 
-          <span className="text-red-400 ml-2">{criticalCount} critical</span> &middot; 
-          <span className="text-yellow-400 ml-2">{atRiskCount} at-risk</span>
-        </p>
-        <input
-          type="text"
-          placeholder="Search by file path..."
-          className="bg-gray-950 border border-gray-700 text-sm text-white rounded-md px-3 py-1.5 focus:outline-none focus:border-indigo-500 w-72 transition-colors placeholder:text-gray-600"
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-        />
-      </div>
+    <div className="flex h-[40rem] gap-4">
+      <div className="flex flex-1 flex-col overflow-hidden rounded-xl border border-gray-800 bg-gray-900/30 relative">
+        <div className="flex items-center justify-between border-b border-gray-800 bg-gray-900/80 p-4">
+          <p className="text-sm text-gray-400 font-medium">
+            {nodes.length} files total &middot;
+            <span className="text-red-400 ml-2">{criticalCount} critical</span> &middot;
+            <span className="text-yellow-400 ml-2">{atRiskCount} at-risk</span>
+          </p>
+          <input
+            type="text"
+            placeholder="Search by file path..."
+            className="bg-gray-950 border border-gray-700 text-sm text-white rounded-md px-3 py-1.5 focus:outline-none focus:border-indigo-500 w-72 transition-colors placeholder:text-gray-600"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+        </div>
 
-      {/* Wrapping the table in an auto-scrolling container */}
-      <div className="flex-1 overflow-auto">
-        <table className="w-full text-left text-sm whitespace-nowrap">
-          <thead className="sticky top-0 bg-gray-800/95 backdrop-blur text-gray-300 z-10 shadow-sm border-b border-gray-700">
-            <tr>
-              <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('file_path')}>
-                File Path <SortIcon columnKey="file_path" />
-              </th>
-              <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('language')}>
-                Language <SortIcon columnKey="language" />
-              </th>
-              <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('line_count')}>
-                Lines <SortIcon columnKey="line_count" />
-              </th>
-              <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('outgoing_count')}>
-                Imports (Outgoing) <SortIcon columnKey="outgoing_count" />
-              </th>
-              <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('incoming_count')}>
-                Dependents (Incoming) <SortIcon columnKey="incoming_count" />
-              </th>
-              <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('complexity_score')}>
-                Complexity Score <SortIcon columnKey="complexity_score" />
-                {/* // TODO: replace with cyclomatic complexity in Sprint 5 */}
-              </th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-800/50">
-            {sortedNodes.map(node => {
-              // Calculate Risk Level Dynamically
-              const isHighComplex = node.complexity_score > p90Complexity;
-              const isHighIncoming = node.incoming_count > p90Incoming;
-              
-              let rowClass = "hover:bg-gray-800/60 cursor-pointer transition-colors";
-              let textFade = "text-gray-300";
-              let metaFade = "text-gray-500";
+        <div className="flex-1 overflow-auto">
+          <table className="w-full text-left text-sm whitespace-nowrap">
+            <thead className="sticky top-0 bg-gray-800/95 backdrop-blur text-gray-300 z-10 shadow-sm border-b border-gray-700">
+              <tr>
+                <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('file_path')}>
+                  File Path <SortIcon columnKey="file_path" />
+                </th>
+                <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('language')}>
+                  Language <SortIcon columnKey="language" />
+                </th>
+                <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('line_count')}>
+                  Lines <SortIcon columnKey="line_count" />
+                </th>
+                <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('outgoing_count')}>
+                  Imports (Outgoing) <SortIcon columnKey="outgoing_count" />
+                </th>
+                <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('incoming_count')}>
+                  Dependents (Incoming) <SortIcon columnKey="incoming_count" />
+                </th>
+                <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('complexity_score')}>
+                  Complexity Score <SortIcon columnKey="complexity_score" />
+                </th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-800/50">
+              {sortedNodes.map(node => {
+                const isHighComplex = node.complexity_score > p90Complexity;
+                const isHighIncoming = node.incoming_count > p90Incoming;
+                const isSelected = selectedNode && (selectedNode.id || selectedNode.file_path) === (node.id || node.file_path);
 
-              if (isHighComplex && isHighIncoming) {
-                rowClass = "bg-red-900/30 hover:bg-red-900/50 cursor-pointer transition-colors";
-                textFade = "text-red-100 font-medium";
-                metaFade = "text-red-300";
-              } else if (isHighComplex || isHighIncoming) {
-                rowClass = "bg-yellow-900/20 hover:bg-yellow-900/40 cursor-pointer transition-colors";
-                textFade = "text-yellow-100";
-                metaFade = "text-yellow-300/80";
-              }
+                let rowClass = "hover:bg-gray-800/60 cursor-pointer transition-colors";
+                let textFade = "text-gray-300";
+                let metaFade = "text-gray-500";
 
-              return (
-                <tr key={node.id || node.file_path} onClick={() => onNodeSelect(node.id || node.file_path)} className={rowClass}>
-                  <td className={`px-6 py-3 font-mono text-xs ${textFade}`}>{node.file_path}</td>
-                  <td className={`px-6 py-3 ${metaFade}`}>{formatLanguage(node.language)}</td>
-                  <td className={`px-6 py-3 ${metaFade}`}>{node.line_count}</td>
-                  <td className={`px-6 py-3 ${metaFade}`}>{node.outgoing_count}</td>
-                  <td className={`px-6 py-3 ${metaFade}`}>{node.incoming_count}</td>
-                  <td className={`px-6 py-3 font-medium ${textFade}`}>
-                    {Number(node.complexity_score).toFixed(2)}
+                if (isHighComplex && isHighIncoming) {
+                  rowClass = "bg-red-900/30 hover:bg-red-900/50 cursor-pointer transition-colors";
+                  textFade = "text-red-100 font-medium";
+                  metaFade = "text-red-300";
+                } else if (isHighComplex || isHighIncoming) {
+                  rowClass = "bg-yellow-900/20 hover:bg-yellow-900/40 cursor-pointer transition-colors";
+                  textFade = "text-yellow-100";
+                  metaFade = "text-yellow-300/80";
+                }
+
+                if (isSelected) {
+                  rowClass = `${rowClass} ring-1 ring-inset ring-sky-400/70 bg-sky-500/10`;
+                }
+
+                return (
+                  <tr key={node.id || node.file_path} onClick={() => onNodeSelect(node.id || node.file_path)} className={rowClass}>
+                    <td className={`px-6 py-3 font-mono text-xs ${textFade}`}>{node.file_path}</td>
+                    <td className={`px-6 py-3 ${metaFade}`}>{formatLanguage(node.language)}</td>
+                    <td className={`px-6 py-3 ${metaFade}`}>{node.line_count}</td>
+                    <td className={`px-6 py-3 ${metaFade}`}>{node.outgoing_count}</td>
+                    <td className={`px-6 py-3 ${metaFade}`}>{node.incoming_count}</td>
+                    <td className={`px-6 py-3 font-medium ${textFade}`}>
+                      {Number(node.complexity_score).toFixed(2)}
+                    </td>
+                  </tr>
+                );
+              })}
+
+              {sortedNodes.length === 0 && (
+                <tr>
+                  <td colSpan="6" className="text-center py-12 text-gray-500">
+                    No files found matching "{searchQuery}"
                   </td>
                 </tr>
-              )
-            })}
-
-            {sortedNodes.length === 0 && (
-              <tr>
-                <td colSpan="6" className="text-center py-12 text-gray-500">
-                  No files found matching "{searchQuery}"
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
+
+      <aside
+        className={`w-72 shrink-0 rounded-2xl border border-gray-800 bg-gray-900/80 p-5 shadow-2xl shadow-black/20 transition-all duration-300 ${
+          selectedNode ? 'translate-x-0 opacity-100' : 'pointer-events-none translate-x-8 opacity-0 -mr-72'
+        }`}
+      >
+        {selectedNode && (
+          <div className="flex h-full flex-col">
+            <div className="mb-5">
+              <p className="text-xs uppercase tracking-[0.2em] text-gray-500">File Details</p>
+              <h3 className="mt-2 break-all font-mono text-sm text-gray-100">{selectedNode.file_path}</h3>
+            </div>
+
+            <div className="space-y-3 text-sm">
+              <div className="rounded-xl border border-gray-800 bg-gray-950/70 p-3">
+                <p className="text-xs uppercase tracking-[0.16em] text-gray-500">Language</p>
+                <p className="mt-1 text-gray-100">{formatLanguage(selectedNode.language)}</p>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-xl border border-gray-800 bg-gray-950/70 p-3">
+                  <p className="text-xs uppercase tracking-[0.16em] text-gray-500">Lines</p>
+                  <p className="mt-1 text-lg font-semibold text-white">{selectedNode.line_count || 0}</p>
+                </div>
+                <div className="rounded-xl border border-gray-800 bg-gray-950/70 p-3">
+                  <p className="text-xs uppercase tracking-[0.16em] text-gray-500">Complexity</p>
+                  <p className="mt-1 text-lg font-semibold text-white">{Number(selectedNode.complexity_score || 0).toFixed(2)}</p>
+                </div>
+                <div className="rounded-xl border border-gray-800 bg-gray-950/70 p-3">
+                  <p className="text-xs uppercase tracking-[0.16em] text-gray-500">Imports</p>
+                  <p className="mt-1 text-lg font-semibold text-white">{selectedNode.outgoing_count || 0}</p>
+                </div>
+                <div className="rounded-xl border border-gray-800 bg-gray-950/70 p-3">
+                  <p className="text-xs uppercase tracking-[0.16em] text-gray-500">Dependents</p>
+                  <p className="mt-1 text-lg font-semibold text-white">{selectedNode.incoming_count || 0}</p>
+                </div>
+              </div>
+            </div>
+
+            <button
+              onClick={() => onAnalyseImpact(selectedNode)}
+              className="mt-5 rounded-xl bg-amber-500 px-4 py-3 text-sm font-semibold text-gray-950 transition hover:bg-amber-400"
+            >
+              Analyse impact
+            </button>
+
+            <p className="mt-auto pt-5 text-xs text-gray-500">
+              Select a row to inspect a file, then launch blast radius analysis from here.
+            </p>
+          </div>
+        )}
+      </aside>
     </div>
   );
 }
@@ -278,8 +388,8 @@ export default function RepoView() {
   const [repo, setRepo] = useState(null);
   const [activeTab, setActiveTab] = useState('graph');
   
-  // Shared state uplifted to allow clicking a metrics row to highlight it in the tree
   const [selectedNodeId, setSelectedNodeId] = useState(null);
+  const [impactSourcePath, setImpactSourcePath] = useState(null);
   
   // Analysis Data state
   const [analysisData, setAnalysisData] = useState({ nodes: [], edges: [], issues: [] });
@@ -290,10 +400,37 @@ export default function RepoView() {
   const [error, setError] = useState(null);
   const [isReindexing, setIsReindexing] = useState(false);
 
-  // Tab jump handler
-  const handleNodeSelect = useCallback((nodeIdOrIds) => {
+  const handleNodeSelect = useCallback((nodeIdOrIds, options = {}) => {
     setSelectedNodeId(nodeIdOrIds);
+    if (options.openGraph) {
+      setActiveTab('graph');
+    }
+  }, []);
+
+  const selectedNode = useMemo(() => {
+    if (Array.isArray(selectedNodeId) || !selectedNodeId) return null;
+    return analysisData.nodes.find((node) => (node.id || node.file_path) === selectedNodeId) || null;
+  }, [analysisData.nodes, selectedNodeId]);
+
+  const impactAnalysis = useMemo(
+    () => buildImpactAnalysis(impactSourcePath, analysisData.nodes, analysisData.edges),
+    [analysisData.edges, analysisData.nodes, impactSourcePath]
+  );
+
+  const handleStartImpactAnalysis = useCallback((nodeOrPath) => {
+    const sourcePath = typeof nodeOrPath === 'string' ? nodeOrPath : nodeOrPath?.file_path;
+    if (!sourcePath) return;
+
+    const sourceNode = analysisData.nodes.find((node) => node.file_path === sourcePath);
+    if (!sourceNode) return;
+
+    setImpactSourcePath(sourcePath);
+    setSelectedNodeId(sourceNode.id || sourceNode.file_path);
     setActiveTab('graph');
+  }, [analysisData.nodes]);
+
+  const handleClearImpactAnalysis = useCallback(() => {
+    setImpactSourcePath(null);
   }, []);
 
   // Fetch the huge datasets automatically when ready
@@ -368,6 +505,7 @@ export default function RepoView() {
     if (!session?.access_token) return;
     setIsReindexing(true);
     setHasFetchedData(false); // reset so it re-fetches exactly what changed
+    setImpactSourcePath(null);
     
     try {
       const res = await fetch(`/api/repos/${repoId}/reindex`, {
@@ -462,6 +600,23 @@ export default function RepoView() {
 
       {/* Main Content Area */}
       <div className="flex-1 p-8 pb-12">
+        {impactAnalysis && (
+          <div className="mb-6 flex items-center justify-between gap-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-5 py-4 text-amber-100">
+            <div>
+              <p className="text-xs uppercase tracking-[0.2em] text-amber-300/80">Impact Analysis Active</p>
+              <p className="mt-1 text-sm">
+                <span className="font-semibold">{impactAnalysis.sourceName}</span> has {impactAnalysis.direct.length} direct and {impactAnalysis.transitive.length} transitive dependents highlighted.
+              </p>
+            </div>
+            <button
+              onClick={handleClearImpactAnalysis}
+              className="rounded-full border border-amber-300/30 px-4 py-2 text-sm font-medium text-amber-50 transition hover:border-amber-200 hover:bg-amber-400/10"
+            >
+              Clear analysis
+            </button>
+          </div>
+        )}
+
         {isWorking ? (
           <div className="flex flex-col items-center justify-center py-32 rounded-xl border border-dashed border-gray-800 bg-gray-900/30">
             <div className="h-10 w-10 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent mb-4" />
@@ -498,16 +653,28 @@ export default function RepoView() {
                 edges={analysisData.edges}
                 issues={analysisData.issues}
                 selectedNodeId={selectedNodeId}
+                impactAnalysis={impactAnalysis}
                 onNodeSelect={handleNodeSelect}
+                onAnalyseImpact={handleStartImpactAnalysis}
+                onClearImpactAnalysis={handleClearImpactAnalysis}
               />
             </div>
 
             <div className={activeTab === 'metrics' ? 'block h-full' : 'hidden'}>
-              <MetricsPanel nodes={analysisData.nodes} onNodeSelect={handleNodeSelect} />
+              <MetricsPanel
+                nodes={analysisData.nodes}
+                selectedNode={selectedNode}
+                onNodeSelect={handleNodeSelect}
+                onAnalyseImpact={handleStartImpactAnalysis}
+              />
             </div>
 
             <div className={activeTab === 'issues' ? 'block h-full' : 'hidden'}>
-              <IssuesPanel nodes={analysisData.nodes} issues={analysisData.issues} onNodeSelect={handleNodeSelect} />
+              <IssuesPanel
+                nodes={analysisData.nodes}
+                issues={analysisData.issues}
+                onNodeSelect={(nodeIds) => handleNodeSelect(nodeIds, { openGraph: true })}
+              />
             </div>
 
             <div className={activeTab === 'search' ? 'block h-full' : 'hidden'}>
