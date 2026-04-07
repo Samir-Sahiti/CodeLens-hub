@@ -43,8 +43,10 @@ export function useGraphSimulation({
   edges,
   renderMode,
   selection,
+  impactAnalysis,
   focusNodeId,
   onNodeClick,
+  onNodeContextMenu,
   onNodeDoubleClick,
   onBackgroundClick,
 }) {
@@ -134,9 +136,57 @@ export function useGraphSimulation({
     const highlightedNodeIds = selection.highlightedNodeIds;
     const highlightedEdgeIds = selection.highlightedEdgeIds;
     const isSelectionActive = selection.isActive;
+    const isImpactActive = Boolean(impactAnalysis);
+    const directImpactIds = new Set(impactAnalysis?.directIds || []);
+    const transitiveImpactIds = new Set(impactAnalysis?.transitiveIds || []);
+    const impactedNodeIds = new Set([
+      impactAnalysis?.sourceId,
+      ...directImpactIds,
+      ...transitiveImpactIds,
+    ].filter(Boolean));
 
-    const edgeOpacity = (edgeId) => (!isSelectionActive || highlightedEdgeIds.has(edgeId) ? 0.9 : 0.15);
-    const nodeOpacity = (nodeId) => (!isSelectionActive || highlightedNodeIds.has(nodeId) ? 1 : 0.15);
+    const getNodeOpacity = (nodeId) => {
+      if (isImpactActive) {
+        return impactedNodeIds.has(nodeId) ? 1 : 0.12;
+      }
+      return !isSelectionActive || highlightedNodeIds.has(nodeId) ? 1 : 0.15;
+    };
+
+    const getEdgeOpacity = (edge) => {
+      if (isImpactActive) {
+        const sourceId = typeof edge.source === 'object' ? edge.source.graphId : edge.source;
+        const targetId = typeof edge.target === 'object' ? edge.target.graphId : edge.target;
+        return impactedNodeIds.has(sourceId) && impactedNodeIds.has(targetId) ? 0.75 : 0.08;
+      }
+      return !isSelectionActive || highlightedEdgeIds.has(edge.id) ? 0.9 : 0.15;
+    };
+
+    const getNodeFill = (node) => {
+      if (!isImpactActive) return node.fill;
+      if (impactAnalysis?.sourceId === node.graphId) return '#ef4444';
+      if (directImpactIds.has(node.graphId) || transitiveImpactIds.has(node.graphId)) return '#f59e0b';
+      return node.fill;
+    };
+
+    const getNodeStroke = (node) => {
+      if (isImpactActive) {
+        if (impactAnalysis?.sourceId === node.graphId) return '#fecaca';
+        if (directImpactIds.has(node.graphId) || transitiveImpactIds.has(node.graphId)) return '#fde68a';
+      }
+
+      if (selection.primaryId === node.graphId) return '#38bdf8';
+      return node.hasIssue ? '#ef4444' : 'rgba(255, 255, 255, 0.1)';
+    };
+
+    const getNodeStrokeWidth = (node) => {
+      if (isImpactActive) {
+        if (impactAnalysis?.sourceId === node.graphId) return 3.5;
+        if (directImpactIds.has(node.graphId) || transitiveImpactIds.has(node.graphId)) return 2.5;
+      }
+
+      if (selection.primaryId === node.graphId) return 3;
+      return node.hasIssue ? 3 : 1;
+    };
 
     const focusNode = focusNodeId
       ? localNodes.find((node) => node.graphId === focusNodeId)
@@ -176,32 +226,29 @@ export function useGraphSimulation({
           const endX = target.x - ((target.radius + 8) * Math.cos(angle));
           const endY = target.y - ((target.radius + 8) * Math.sin(angle));
 
-          context.strokeStyle = `rgba(148, 163, 184, ${edgeOpacity(link.id)})`;
-          context.lineWidth = highlightedEdgeIds.has(link.id) ? 1.8 : 1.2;
+          const lineOpacity = getEdgeOpacity(link);
+          const edgeColor = isImpactActive ? `rgba(245, 158, 11, ${lineOpacity})` : `rgba(148, 163, 184, ${lineOpacity})`;
+
+          context.strokeStyle = edgeColor;
+          context.lineWidth = isImpactActive ? 1.8 : highlightedEdgeIds.has(link.id) ? 1.8 : 1.2;
           context.beginPath();
           context.moveTo(startX, startY);
           context.lineTo(endX, endY);
           context.stroke();
 
-          drawArrowhead(context, startX, startY, endX, endY, 7, `rgba(148, 163, 184, ${edgeOpacity(link.id)})`);
+          drawArrowhead(context, startX, startY, endX, endY, 7, edgeColor);
         });
 
         localNodes.forEach((node) => {
-          context.globalAlpha = nodeOpacity(node.graphId);
-          context.fillStyle = node.fill;
+          context.globalAlpha = getNodeOpacity(node.graphId);
+          context.fillStyle = getNodeFill(node);
           context.beginPath();
           context.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
           context.fill();
 
-          context.strokeStyle = node.hasIssue ? '#ef4444' : '#0f172a';
-          context.lineWidth = node.hasIssue ? 2.5 : 1.25;
+          context.strokeStyle = getNodeStroke(node);
+          context.lineWidth = getNodeStrokeWidth(node);
           context.stroke();
-
-          if (selection.primaryId === node.graphId) {
-            context.strokeStyle = '#f8fafc';
-            context.lineWidth = 2.5;
-            context.stroke();
-          }
         });
 
         context.globalAlpha = 1;
@@ -258,11 +305,22 @@ export function useGraphSimulation({
       };
 
       canvasSelection.on('click', handlePointer);
+      canvasSelection.on('contextmenu', (event) => {
+        event.preventDefault();
+
+        const [x, y] = d3.pointer(event, canvas);
+        const graphPoint = canvasTransformRef.current.invert([x, y]);
+        const hitNode = getNodeAtPoint(localNodes, graphPoint);
+        if (hitNode) {
+          onNodeContextMenu?.(hitNode, event);
+        }
+      });
 
       return () => {
         simulation.stop();
         canvasSelection.on('.zoom', null);
         canvasSelection.on('click', null);
+        canvasSelection.on('contextmenu', null);
       };
     }
 
@@ -299,7 +357,7 @@ export function useGraphSimulation({
       .selectAll('path')
       .data(localLinks, (edge) => edge.id)
       .join('path')
-      .attr('class', (edge) => `graph-edge${isSelectionActive && !highlightedEdgeIds.has(edge.id) ? ' is-dimmed' : ''}`)
+      .attr('class', (edge) => `graph-edge${!isImpactActive && isSelectionActive && !highlightedEdgeIds.has(edge.id) ? ' is-dimmed' : ''}`)
       .attr('d', (edge) => {
         const dx = edge.target.x - edge.source.x;
         const dy = edge.target.y - edge.source.y;
@@ -311,9 +369,9 @@ export function useGraphSimulation({
         return `M${edge.source.x},${edge.source.y}A${dr},${dr} 0 0,1 ${edge.target.x},${edge.target.y}`;
       })
       .attr('fill', 'none')
-      .attr('stroke', '#64748b')
-      .attr('stroke-opacity', (edge) => (highlightedEdgeIds.has(edge.id) ? 0.9 : 0.3))
-      .attr('stroke-width', (edge) => (highlightedEdgeIds.has(edge.id) ? 2 : 1.2))
+      .attr('stroke', () => (isImpactActive ? '#f59e0b' : '#64748b'))
+      .attr('stroke-opacity', (edge) => getEdgeOpacity(edge))
+      .attr('stroke-width', (edge) => (isImpactActive ? 1.8 : highlightedEdgeIds.has(edge.id) ? 2 : 1.2))
       .attr('marker-end', 'url(#dependency-arrowhead)');
 
     // Create node groups (circle + label)
@@ -321,22 +379,17 @@ export function useGraphSimulation({
       .selectAll('g.graph-node-group')
       .data(localNodes, (node) => node.graphId)
       .join('g')
-      .attr('class', (node) => `graph-node-group${isSelectionActive && !highlightedNodeIds.has(node.graphId) ? ' is-dimmed' : ''}`)
+      .attr('class', (node) => `graph-node-group${getNodeOpacity(node.graphId) < 0.2 ? ' is-dimmed' : ''}`)
       .attr('transform', (node) => `translate(${node.x}, ${node.y})`)
+      .attr('opacity', (node) => getNodeOpacity(node.graphId))
       .style('cursor', 'pointer');
 
     // Circle
     nodeGroups.append('circle')
       .attr('r', (node) => node.radius)
-      .attr('fill', (node) => node.fill)
-      .attr('stroke', (node) => {
-        if (selection.primaryId === node.graphId) return '#38bdf8';
-        return node.hasIssue ? '#ef4444' : 'rgba(255, 255, 255, 0.1)';
-      })
-      .attr('stroke-width', (node) => {
-        if (selection.primaryId === node.graphId) return 3;
-        return node.hasIssue ? 3 : 1;
-      })
+      .attr('fill', (node) => getNodeFill(node))
+      .attr('stroke', (node) => getNodeStroke(node))
+      .attr('stroke-width', (node) => getNodeStrokeWidth(node))
       .attr('filter', 'url(#node-shadow)');
 
     // File name label
@@ -348,12 +401,16 @@ export function useGraphSimulation({
       .attr('x', 0)
       .attr('y', (node) => node.radius + 16) // Centered exactly below node
       .attr('text-anchor', 'middle')
-      .attr('fill', (node) => (selection.primaryId === node.graphId ? '#f8fafc' : '#94a3b8'))
-      .attr('font-size', (node) => (selection.primaryId === node.graphId ? '13px' : '11px'))
-      .attr('font-weight', (node) => (selection.primaryId === node.graphId ? '600' : '400'))
+      .attr('fill', (node) => {
+        if (impactAnalysis?.sourceId === node.graphId) return '#fef2f2';
+        if (directImpactIds.has(node.graphId) || transitiveImpactIds.has(node.graphId)) return '#fffbeb';
+        return selection.primaryId === node.graphId ? '#f8fafc' : '#94a3b8';
+      })
+      .attr('font-size', (node) => ((selection.primaryId === node.graphId || impactAnalysis?.sourceId === node.graphId) ? '13px' : '11px'))
+      .attr('font-weight', (node) => ((selection.primaryId === node.graphId || impactAnalysis?.sourceId === node.graphId) ? '600' : '400'))
       .attr('font-family', 'ui-sans-serif, system-ui, sans-serif')
       .attr('pointer-events', 'none')
-      .attr('opacity', (node) => (!isSelectionActive || highlightedNodeIds.has(node.graphId) ? 1 : 0.2));
+      .attr('opacity', (node) => getNodeOpacity(node.graphId));
 
     // Tooltip with full path
     nodeGroups.append('title').text((node) => node.file_path);
@@ -366,6 +423,11 @@ export function useGraphSimulation({
 
     nodeSelection.on('dblclick', (_event, node) => {
       onNodeDoubleClick(node);
+    });
+
+    nodeSelection.on('contextmenu', (event, node) => {
+      event.preventDefault();
+      onNodeContextMenu?.(node, event);
     });
 
     svg.on('click', (event) => {
@@ -429,8 +491,10 @@ export function useGraphSimulation({
     edges,
     focusNodeId,
     nodes,
+    impactAnalysis,
     onBackgroundClick,
     onNodeClick,
+    onNodeContextMenu,
     onNodeDoubleClick,
     renderMode,
     selection,
