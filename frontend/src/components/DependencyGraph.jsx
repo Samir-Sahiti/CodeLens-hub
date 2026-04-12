@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useGraphSimulation } from '../hooks/useGraphSimulation';
 
 const LANGUAGE_COLORS = {
@@ -235,6 +235,102 @@ function ImpactAnalysisPanel({ impactAnalysis, onClearImpactAnalysis }) {
   );
 }
 
+/**
+ * Compute directory clusters from flat file nodes.
+ * Groups files sharing the same parent directory into a single cluster node.
+ * Returns { clusterNodes, clusterEdges } ready for the simulation.
+ */
+function computeClusters(graphNodes, graphEdges, expandedClusters) {
+  // Group nodes by directory path
+  const dirMap = new Map(); // dirPath -> [node, ...]
+  graphNodes.forEach((node) => {
+    const parts = node.file_path.replace(/\\/g, '/').split('/');
+    const dir = parts.length > 1 ? parts.slice(0, -1).join('/') : '(root)';
+    if (!dirMap.has(dir)) dirMap.set(dir, []);
+    dirMap.get(dir).push(node);
+  });
+
+  const clusterNodes = [];
+  const nodeToCluster = new Map(); // graphId -> clusterId
+  const expandedNodeIds = new Set();
+
+  dirMap.forEach((dirNodes, dirPath) => {
+    const isExpanded = expandedClusters.has(dirPath);
+
+    if (isExpanded || dirNodes.length <= 2) {
+      // Show individual nodes
+      dirNodes.forEach((node) => {
+        clusterNodes.push(node);
+        if (isExpanded) expandedNodeIds.add(node.graphId);
+      });
+    } else {
+      // Create cluster node
+      const clusterId = `cluster:${dirPath}`;
+      const totalIncoming = dirNodes.reduce((s, n) => s + (n.incoming_count || 0), 0);
+      const totalOutgoing = dirNodes.reduce((s, n) => s + (n.outgoing_count || 0), 0);
+      const avgComplexity = dirNodes.reduce((s, n) => s + (n.complexity_score || 0), 0) / dirNodes.length;
+      const hasIssue = dirNodes.some((n) => n.hasIssue);
+
+      // Use the most common language in the cluster for coloring
+      const langCounts = {};
+      dirNodes.forEach((n) => {
+        const lang = n.language || 'unknown';
+        langCounts[lang] = (langCounts[lang] || 0) + 1;
+      });
+      const dominantLang = Object.keys(langCounts).reduce((a, b) => (langCounts[a] >= langCounts[b] ? a : b), 'unknown');
+
+      const clusterNode = {
+        graphId: clusterId,
+        file_path: dirPath,
+        language: dominantLang,
+        line_count: dirNodes.reduce((s, n) => s + (n.line_count || 0), 0),
+        incoming_count: totalIncoming,
+        outgoing_count: totalOutgoing,
+        complexity_score: avgComplexity,
+        radius: 18 + Math.min(20, Math.sqrt(dirNodes.length) * 6),
+        fill: LANGUAGE_COLORS[dominantLang] || LANGUAGE_COLORS.unknown,
+        hasIssue,
+        isCluster: true,
+        clusterDir: dirPath,
+        childCount: dirNodes.length,
+        childIds: dirNodes.map((n) => n.graphId),
+      };
+
+      clusterNodes.push(clusterNode);
+      dirNodes.forEach((n) => nodeToCluster.set(n.graphId, clusterId));
+    }
+  });
+
+  // Build cluster ID lookup for remaining individual nodes
+  const clusterNodeIds = new Set(clusterNodes.map((n) => n.graphId));
+
+  // Remap edges
+  const edgeDedup = new Map();
+  graphEdges.forEach((edge) => {
+    const srcMapped = nodeToCluster.get(edge.source) || edge.source;
+    const tgtMapped = nodeToCluster.get(edge.target) || edge.target;
+
+    // Skip internal cluster edges
+    if (srcMapped === tgtMapped) return;
+    // Skip edges where either end doesn't exist in our node set
+    if (!clusterNodeIds.has(srcMapped) || !clusterNodeIds.has(tgtMapped)) return;
+
+    const key = `${srcMapped}->${tgtMapped}`;
+    if (!edgeDedup.has(key)) {
+      edgeDedup.set(key, {
+        id: key,
+        source: srcMapped,
+        target: tgtMapped,
+      });
+    }
+  });
+
+  return {
+    clusterNodes,
+    clusterEdges: Array.from(edgeDedup.values()),
+  };
+}
+
 export default function DependencyGraph({
   nodes,
   edges,
@@ -250,6 +346,8 @@ export default function DependencyGraph({
   const canvasRef = useRef(null);
   const [toastVisible, setToastVisible] = useState(false);
   const [contextMenu, setContextMenu] = useState(null);
+  const [clusteringEnabled, setClusteringEnabled] = useState(true);
+  const [expandedClusters, setExpandedClusters] = useState(new Set());
 
   const issueNodePaths = useMemo(() => {
     const pathSet = new Set();
@@ -292,6 +390,32 @@ export default function DependencyGraph({
     });
   }, [edges, graphNodeByPath]);
 
+  // Compute clustered data when clustering is enabled and there are many nodes
+  const shouldCluster = clusteringEnabled && graphNodes.length > 300;
+
+  const clusteredData = useMemo(() => {
+    if (!shouldCluster) return null;
+    return computeClusters(graphNodes, graphEdges, expandedClusters);
+  }, [graphNodes, graphEdges, expandedClusters, shouldCluster]);
+
+  // Use clustered or raw data for the simulation
+  const simNodes = clusteredData ? clusteredData.clusterNodes : graphNodes;
+  const simEdges = clusteredData ? clusteredData.clusterEdges : graphEdges;
+
+  const handleClusterClick = useCallback((node) => {
+    if (!node.isCluster) return false;
+    setExpandedClusters((prev) => {
+      const next = new Set(prev);
+      if (next.has(node.clusterDir)) {
+        next.delete(node.clusterDir);
+      } else {
+        next.add(node.clusterDir);
+      }
+      return next;
+    });
+    return true;
+  }, []);
+
   const selectedIds = useMemo(() => {
     if (Array.isArray(selectedNodeId)) return selectedNodeId.filter(Boolean);
     return selectedNodeId ? [selectedNodeId] : [];
@@ -310,7 +434,7 @@ export default function DependencyGraph({
     if (Array.isArray(selectedNodeId)) {
       const highlightedNodeIds = new Set(selectedIds);
       const highlightedEdgeIds = new Set(
-        graphEdges
+        simEdges
           .filter((edge) => highlightedNodeIds.has(edge.source) || highlightedNodeIds.has(edge.target))
           .map((edge) => edge.id)
       );
@@ -327,7 +451,7 @@ export default function DependencyGraph({
     const highlightedNodeIds = new Set([primaryId]);
     const highlightedEdgeIds = new Set();
 
-    graphEdges.forEach((edge) => {
+    simEdges.forEach((edge) => {
       if (edge.source === primaryId || edge.target === primaryId) {
         highlightedNodeIds.add(edge.source);
         highlightedNodeIds.add(edge.target);
@@ -341,13 +465,13 @@ export default function DependencyGraph({
       highlightedNodeIds,
       highlightedEdgeIds,
     };
-  }, [graphEdges, selectedIds, selectedNodeId]);
+  }, [simEdges, selectedIds, selectedNodeId]);
 
   const selectedNode = useMemo(() => {
     const primaryId = selection.primaryId;
     if (!primaryId) return null;
-    return graphNodes.find((node) => node.graphId === primaryId) || null;
-  }, [graphNodes, selection.primaryId]);
+    return simNodes.find((node) => node.graphId === primaryId) || null;
+  }, [simNodes, selection.primaryId]);
 
   const renderMode = graphNodes.length > 300 ? 'canvas' : 'svg';
 
@@ -370,14 +494,19 @@ export default function DependencyGraph({
     containerRef,
     svgRef,
     canvasRef,
-    nodes: graphNodes,
-    edges: graphEdges,
+    nodes: simNodes,
+    edges: simEdges,
     renderMode,
     selection,
     impactAnalysis,
     focusNodeId: selection.primaryId,
-    onNodeClick: (node) => onNodeSelect(node.graphId),
+    onNodeClick: (node) => {
+      // If it's a cluster node, toggle expansion instead of selecting
+      if (node.isCluster && handleClusterClick(node)) return;
+      onNodeSelect(node.graphId);
+    },
     onNodeContextMenu: (node, event) => {
+      if (node.isCluster) return; // No context menu for clusters
       setContextMenu({
         node,
         x: event.clientX,
@@ -385,6 +514,10 @@ export default function DependencyGraph({
       });
     },
     onNodeDoubleClick: async (node) => {
+      if (node.isCluster) {
+        handleClusterClick(node);
+        return;
+      }
       try {
         await navigator.clipboard.writeText(node.file_path);
         setToastVisible(true);
@@ -419,6 +552,29 @@ export default function DependencyGraph({
             <span className="rounded-full border border-gray-700 bg-gray-950/80 px-3 py-1 text-xs uppercase tracking-[0.18em] text-gray-400">
               {renderMode === 'canvas' ? 'Canvas mode' : 'SVG mode'}
             </span>
+            {graphNodes.length > 300 && (
+              <button
+                onClick={() => {
+                  setClusteringEnabled((v) => !v);
+                  setExpandedClusters(new Set());
+                }}
+                className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                  clusteringEnabled
+                    ? 'border-indigo-500/40 bg-indigo-500/15 text-indigo-300 hover:bg-indigo-500/25'
+                    : 'border-gray-700 bg-gray-950/80 text-gray-400 hover:border-gray-500'
+                }`}
+              >
+                {clusteringEnabled ? '▣ Clustered' : '◻ Flat'}
+              </button>
+            )}
+            {shouldCluster && expandedClusters.size > 0 && (
+              <button
+                onClick={() => setExpandedClusters(new Set())}
+                className="rounded-full border border-gray-700 bg-gray-950/80 px-3 py-1 text-xs font-medium text-gray-400 transition hover:border-gray-500 hover:text-gray-200"
+              >
+                Collapse all
+              </button>
+            )}
             <button
               onClick={resetView}
               className="rounded-full border border-gray-700 bg-gray-950/80 px-4 py-2 text-sm font-medium text-gray-100 transition hover:border-gray-500 hover:bg-gray-900"
@@ -427,6 +583,11 @@ export default function DependencyGraph({
             </button>
           </div>
         </div>
+        {shouldCluster && (
+          <div className="absolute bottom-4 left-4 z-10 rounded-full border border-gray-700 bg-gray-950/80 px-3 py-1.5 text-xs text-gray-400">
+            {simNodes.length} clusters from {graphNodes.length} files · Click a cluster to expand
+          </div>
+        )}
 
         <div ref={containerRef} className="h-full w-full">
           <svg ref={svgRef} className={renderMode === 'svg' ? 'block h-full w-full' : 'hidden'} />

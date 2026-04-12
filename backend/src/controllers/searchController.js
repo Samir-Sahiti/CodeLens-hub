@@ -152,38 +152,62 @@ const search = async (req, res) => {
     res.write(`data: ${JSON.stringify(payload)}\n\n`);
   };
 
+  // 10-second pipeline timeout to meet the <10s acceptance criterion
+  const PIPELINE_TIMEOUT_MS = 10000;
+  const pipelineStart = Date.now();
+  let pipelineTimedOut = false;
+
+  const timeoutId = setTimeout(() => {
+    pipelineTimedOut = true;
+    try {
+      send({ type: 'error', message: 'Search timed out. The query took longer than 10 seconds. Try a shorter or more specific question.' });
+      res.end();
+    } catch { /* stream may already be closed */ }
+  }, PIPELINE_TIMEOUT_MS);
+
   try {
-    // 1. Check OpenAI key is available
+    // 1. Check API keys
     if (!process.env.OPENAI_API_KEY) {
+      clearTimeout(timeoutId);
       send({ type: 'error', message: 'Search is not available: OpenAI API key not configured.' });
       return res.end();
     }
 
     if (!process.env.ANTHROPIC_API_KEY) {
+      clearTimeout(timeoutId);
       send({ type: 'error', message: 'Search is not available: Anthropic API key not configured.' });
       return res.end();
     }
 
     // 2. Embed the query
+    const embedStart = Date.now();
     let embedding;
     try {
       embedding = await embedQuery(query.trim());
     } catch (err) {
+      clearTimeout(timeoutId);
       send({ type: 'error', message: 'Failed to process your query. Please try again.' });
       return res.end();
     }
+    console.log(`[search] Embedding took ${Date.now() - embedStart}ms`);
+    if (pipelineTimedOut) return;
 
     // 3. Vector similarity search
+    const searchStart = Date.now();
     let chunks;
     try {
       chunks = await retrieveChunks(repoId, embedding, 8);
     } catch (err) {
+      clearTimeout(timeoutId);
       send({ type: 'error', message: 'Failed to search the codebase index. Please try again.' });
       return res.end();
     }
+    console.log(`[search] Vector search took ${Date.now() - searchStart}ms, returned ${(chunks || []).length} chunks`);
+    if (pipelineTimedOut) return;
 
     // 4. Guard: if no chunks at all, return graceful fallback
     if (!chunks || chunks.length === 0) {
+      clearTimeout(timeoutId);
       send({ type: 'sources', sources: [] });
       send({ type: 'chunk', text: "I couldn't find any indexed code for this repository. The repository may not have been fully embedded yet — try re-indexing it." });
       send({ type: 'done' });
@@ -193,20 +217,35 @@ const search = async (req, res) => {
     // 5. Guard: if best match cosine distance > 0.4, no relevant code found
     const bestDistance = chunks[0]?.distance ?? 0;
     if (bestDistance > 0.4 && chunks[0]?.distance !== undefined) {
+      clearTimeout(timeoutId);
       send({ type: 'sources', sources: [] });
       send({ type: 'chunk', text: "I couldn't find relevant code for that question in this repository. Try rephrasing your question or asking about a specific file or feature." });
       send({ type: 'done' });
       return res.end();
     }
 
+    // 5b. Context size guard — trim chunks if combined content exceeds 12,000 chars
+    const MAX_CONTEXT_CHARS = 12000;
+    let totalChars = 0;
+    const trimmedChunks = [];
+    for (const chunk of chunks) {
+      const chunkLen = (chunk.content || '').length;
+      if (totalChars + chunkLen > MAX_CONTEXT_CHARS && trimmedChunks.length > 0) {
+        break; // Already have some context, stop adding more
+      }
+      trimmedChunks.push(chunk);
+      totalChars += chunkLen;
+    }
+
     // 6. Send sources immediately (up to 5)
-    const sources = chunks.slice(0, 5).map(formatSource);
+    const sources = trimmedChunks.slice(0, 5).map(formatSource);
     send({ type: 'sources', sources });
 
     // 7. Build Claude prompt
-    const { system, user } = buildPrompt(query.trim(), chunks);
+    const { system, user } = buildPrompt(query.trim(), trimmedChunks);
 
     // 8. Stream Claude response
+    const llmStart = Date.now();
     const stream = await anthropic.messages.create({
       model:      'claude-sonnet-4-20250514',
       max_tokens: 1500,
@@ -216,15 +255,21 @@ const search = async (req, res) => {
     });
 
     for await (const event of stream) {
+      if (pipelineTimedOut) break;
       if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
         send({ type: 'chunk', text: event.delta.text });
       }
     }
 
-    send({ type: 'done' });
-    res.end();
+    clearTimeout(timeoutId);
+    if (!pipelineTimedOut) {
+      console.log(`[search] LLM streaming took ${Date.now() - llmStart}ms, total pipeline ${Date.now() - pipelineStart}ms`);
+      send({ type: 'done' });
+      res.end();
+    }
 
   } catch (err) {
+    clearTimeout(timeoutId);
     console.error('[search] Unhandled error:', err);
     try {
       send({ type: 'error', message: 'An unexpected error occurred. Please try again.' });

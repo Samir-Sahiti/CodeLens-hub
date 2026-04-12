@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import DependencyGraph from '../components/DependencyGraph';
 import SearchPanel from '../components/SearchPanel';
+import VirtualTable from '../components/VirtualTable';
 
 function formatLanguage(str) {
   if (!str) return 'Unknown';
@@ -166,77 +167,79 @@ function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact }) {
           />
         </div>
 
-        <div className="flex-1 overflow-auto">
-          <table className="w-full text-left text-sm whitespace-nowrap">
-            <thead className="sticky top-0 bg-gray-800/95 backdrop-blur text-gray-300 z-10 shadow-sm border-b border-gray-700">
-              <tr>
-                <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('file_path')}>
-                  File Path <SortIcon columnKey="file_path" />
-                </th>
-                <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('language')}>
-                  Language <SortIcon columnKey="language" />
-                </th>
-                <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('line_count')}>
-                  Lines <SortIcon columnKey="line_count" />
-                </th>
-                <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('outgoing_count')}>
-                  Imports (Outgoing) <SortIcon columnKey="outgoing_count" />
-                </th>
-                <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('incoming_count')}>
-                  Dependents (Incoming) <SortIcon columnKey="incoming_count" />
-                </th>
-                <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('complexity_score')}>
-                  Complexity Score <SortIcon columnKey="complexity_score" />
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-800/50">
-              {sortedNodes.map(node => {
-                const isHighComplex = node.complexity_score > p90Complexity;
-                const isHighIncoming = node.incoming_count > p90Incoming;
-                const isSelected = selectedNode && (selectedNode.id || selectedNode.file_path) === (node.id || node.file_path);
-
-                let rowClass = "hover:bg-gray-800/60 cursor-pointer transition-colors";
-                let textFade = "text-gray-300";
-                let metaFade = "text-gray-500";
-
-                if (isHighComplex && isHighIncoming) {
-                  rowClass = "bg-red-900/30 hover:bg-red-900/50 cursor-pointer transition-colors";
-                  textFade = "text-red-100 font-medium";
-                  metaFade = "text-red-300";
-                } else if (isHighComplex || isHighIncoming) {
-                  rowClass = "bg-yellow-900/20 hover:bg-yellow-900/40 cursor-pointer transition-colors";
-                  textFade = "text-yellow-100";
-                  metaFade = "text-yellow-300/80";
-                }
-
-                if (isSelected) {
-                  rowClass = `${rowClass} ring-1 ring-inset ring-sky-400/70 bg-sky-500/10`;
-                }
-
-                return (
-                  <tr key={node.id || node.file_path} onClick={() => onNodeSelect(node.id || node.file_path)} className={rowClass}>
-                    <td className={`px-6 py-3 font-mono text-xs ${textFade}`}>{node.file_path}</td>
-                    <td className={`px-6 py-3 ${metaFade}`}>{formatLanguage(node.language)}</td>
-                    <td className={`px-6 py-3 ${metaFade}`}>{node.line_count}</td>
-                    <td className={`px-6 py-3 ${metaFade}`}>{node.outgoing_count}</td>
-                    <td className={`px-6 py-3 ${metaFade}`}>{node.incoming_count}</td>
-                    <td className={`px-6 py-3 font-medium ${textFade}`}>
-                      {Number(node.complexity_score).toFixed(2)}
-                    </td>
-                  </tr>
-                );
-              })}
-
-              {sortedNodes.length === 0 && (
+        <div className="flex-1 overflow-hidden">
+          <VirtualTable
+            rows={sortedNodes}
+            rowHeight={44}
+            bufferRows={20}
+            containerHeight="100%"
+            tableClassName="w-full text-left text-sm whitespace-nowrap"
+            renderHeader={() => (
+              <thead className="bg-gray-800/95 backdrop-blur text-gray-300 z-10 shadow-sm border-b border-gray-700">
                 <tr>
-                  <td colSpan="6" className="text-center py-12 text-gray-500">
-                    No files found matching "{searchQuery}"
+                  <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('file_path')}>
+                    File Path <SortIcon columnKey="file_path" />
+                  </th>
+                  <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('language')}>
+                    Language <SortIcon columnKey="language" />
+                  </th>
+                  <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('line_count')}>
+                    Lines <SortIcon columnKey="line_count" />
+                  </th>
+                  <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('outgoing_count')}>
+                    Imports (Outgoing) <SortIcon columnKey="outgoing_count" />
+                  </th>
+                  <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('incoming_count')}>
+                    Dependents (Incoming) <SortIcon columnKey="incoming_count" />
+                  </th>
+                  <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('complexity_score')}>
+                    Complexity Score <SortIcon columnKey="complexity_score" />
+                  </th>
+                </tr>
+              </thead>
+            )}
+            renderRow={(node) => {
+              const isHighComplex = node.complexity_score > p90Complexity;
+              const isHighIncoming = node.incoming_count > p90Incoming;
+              const isSelected = selectedNode && (selectedNode.id || selectedNode.file_path) === (node.id || node.file_path);
+
+              let rowClass = 'hover:bg-gray-800/60 cursor-pointer transition-colors';
+              let textFade = 'text-gray-300';
+              let metaFade = 'text-gray-500';
+
+              if (isHighComplex && isHighIncoming) {
+                rowClass = 'bg-red-900/30 hover:bg-red-900/50 cursor-pointer transition-colors';
+                textFade = 'text-red-100 font-medium';
+                metaFade = 'text-red-300';
+              } else if (isHighComplex || isHighIncoming) {
+                rowClass = 'bg-yellow-900/20 hover:bg-yellow-900/40 cursor-pointer transition-colors';
+                textFade = 'text-yellow-100';
+                metaFade = 'text-yellow-300/80';
+              }
+
+              if (isSelected) {
+                rowClass = `${rowClass} ring-1 ring-inset ring-sky-400/70 bg-sky-500/10`;
+              }
+
+              return (
+                <tr key={node.id || node.file_path} onClick={() => onNodeSelect(node.id || node.file_path)} className={rowClass} style={{ height: 44 }}>
+                  <td className={`px-6 py-3 font-mono text-xs ${textFade}`}>{node.file_path}</td>
+                  <td className={`px-6 py-3 ${metaFade}`}>{formatLanguage(node.language)}</td>
+                  <td className={`px-6 py-3 ${metaFade}`}>{node.line_count}</td>
+                  <td className={`px-6 py-3 ${metaFade}`}>{node.outgoing_count}</td>
+                  <td className={`px-6 py-3 ${metaFade}`}>{node.incoming_count}</td>
+                  <td className={`px-6 py-3 font-medium ${textFade}`}>
+                    {Number(node.complexity_score).toFixed(2)}
                   </td>
                 </tr>
-              )}
-            </tbody>
-          </table>
+              );
+            }}
+          />
+          {sortedNodes.length === 0 && (
+            <div className="flex items-center justify-center py-12 text-gray-500 text-sm">
+              No files found matching &quot;{searchQuery}&quot;
+            </div>
+          )}
         </div>
       </div>
 
@@ -500,6 +503,13 @@ export default function RepoView() {
     }
     return () => clearTimeout(timeoutId); // Clean up the polling timeout on unmount
   }, [repo?.status, fetchRepo]);
+
+  // Release large data arrays when navigating away to prevent memory leaks
+  useEffect(() => {
+    return () => {
+      setAnalysisData({ nodes: [], edges: [], issues: [] });
+    };
+  }, []);
 
   const handleReindex = async () => {
     if (!session?.access_token) return;

@@ -3,7 +3,8 @@ import * as d3 from 'd3';
 
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 4;
-const PRETICK_COUNT = 300;
+const PRETICK_FULL = 300;
+const PRETICK_CLUSTERED = 150;
 
 function getNodeAtPoint(nodes, point) {
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
@@ -114,6 +115,8 @@ export function useGraphSimulation({
     }));
       const localLinks = edges.map((edge) => ({ ...edge }));
 
+    const pretickCount = nodes.length < 100 ? PRETICK_CLUSTERED : PRETICK_FULL;
+
     // Tightly pack clusters
     const simulation = d3.forceSimulation(localNodes)
       .force('link', d3.forceLink(localLinks).id((node) => node.graphId).distance((link) => {
@@ -129,7 +132,7 @@ export function useGraphSimulation({
       .force('collide', d3.forceCollide().radius((node) => node.radius + 35).iterations(3))
       .stop();
 
-    for (let tick = 0; tick < PRETICK_COUNT; tick += 1) {
+    for (let tick = 0; tick < pretickCount; tick += 1) {
       simulation.tick();
     }
 
@@ -241,14 +244,46 @@ export function useGraphSimulation({
 
         localNodes.forEach((node) => {
           context.globalAlpha = getNodeOpacity(node.graphId);
-          context.fillStyle = getNodeFill(node);
-          context.beginPath();
-          context.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
-          context.fill();
 
-          context.strokeStyle = getNodeStroke(node);
-          context.lineWidth = getNodeStrokeWidth(node);
-          context.stroke();
+          if (node.isCluster) {
+            // Cluster node: dashed border, semi-transparent fill, hexagonal feel
+            context.fillStyle = node.fill;
+            context.globalAlpha *= 0.35;
+            context.beginPath();
+            context.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
+            context.fill();
+            context.globalAlpha = getNodeOpacity(node.graphId);
+
+            // Dashed ring
+            context.setLineDash([4, 3]);
+            context.strokeStyle = node.fill;
+            context.lineWidth = 2;
+            context.stroke();
+            context.setLineDash([]);
+
+            // Inner count badge
+            context.fillStyle = '#f8fafc';
+            context.font = 'bold 11px ui-sans-serif, system-ui, sans-serif';
+            context.textAlign = 'center';
+            context.textBaseline = 'middle';
+            context.fillText(String(node.childCount), node.x, node.y);
+
+            // Directory label below
+            const dirLabel = node.file_path.split('/').pop() || node.file_path;
+            context.fillStyle = 'rgba(248, 250, 252, 0.7)';
+            context.font = '10px ui-sans-serif, system-ui, sans-serif';
+            context.fillText(dirLabel, node.x, node.y + node.radius + 14);
+          } else {
+            // Standard file node
+            context.fillStyle = getNodeFill(node);
+            context.beginPath();
+            context.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
+            context.fill();
+
+            context.strokeStyle = getNodeStroke(node);
+            context.lineWidth = getNodeStrokeWidth(node);
+            context.stroke();
+          }
         });
 
         context.globalAlpha = 1;
@@ -318,6 +353,12 @@ export function useGraphSimulation({
 
       return () => {
         simulation.stop();
+        // Explicitly release d3-force graph copies for GC
+        localNodes.length = 0;
+        localLinks.length = 0;
+        // Clear canvas GPU texture memory
+        const ctx = canvas.getContext('2d');
+        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
         canvasSelection.on('.zoom', null);
         canvasSelection.on('click', null);
         canvasSelection.on('contextmenu', null);
@@ -384,17 +425,47 @@ export function useGraphSimulation({
       .attr('opacity', (node) => getNodeOpacity(node.graphId))
       .style('cursor', 'pointer');
 
-    // Circle
+    // Circle — different rendering for clusters vs regular nodes
     nodeGroups.append('circle')
       .attr('r', (node) => node.radius)
-      .attr('fill', (node) => getNodeFill(node))
-      .attr('stroke', (node) => getNodeStroke(node))
-      .attr('stroke-width', (node) => getNodeStrokeWidth(node))
-      .attr('filter', 'url(#node-shadow)');
+      .attr('fill', (node) => {
+        if (node.isCluster) {
+          const baseFill = getNodeFill(node);
+          // Semi-transparent fill for clusters
+          return baseFill;
+        }
+        return getNodeFill(node);
+      })
+      .attr('fill-opacity', (node) => (node.isCluster ? 0.25 : 1))
+      .attr('stroke', (node) => {
+        if (node.isCluster) return node.fill;
+        return getNodeStroke(node);
+      })
+      .attr('stroke-width', (node) => (node.isCluster ? 2 : getNodeStrokeWidth(node)))
+      .attr('stroke-dasharray', (node) => (node.isCluster ? '5,3' : 'none'))
+      .attr('filter', (node) => (node.isCluster ? 'none' : 'url(#node-shadow)'));
+
+    // Child count badge for cluster nodes
+    nodeGroups.filter((node) => node.isCluster)
+      .append('text')
+      .text((node) => node.childCount)
+      .attr('x', 0)
+      .attr('y', 0)
+      .attr('text-anchor', 'middle')
+      .attr('dominant-baseline', 'central')
+      .attr('fill', '#f8fafc')
+      .attr('font-size', '11px')
+      .attr('font-weight', '700')
+      .attr('font-family', 'ui-sans-serif, system-ui, sans-serif')
+      .attr('pointer-events', 'none');
 
     // File name label
     nodeGroups.append('text')
       .text((node) => {
+        if (node.isCluster) {
+          const dirName = node.file_path.split('/').pop() || node.file_path;
+          return `${dirName}/`;
+        }
         const parts = node.file_path.split('/');
         return parts.pop(); // basename only
       })
@@ -481,6 +552,9 @@ export function useGraphSimulation({
 
     return () => {
       simulation.stop();
+      // Explicitly release d3-force graph copies for GC
+      localNodes.length = 0;
+      localLinks.length = 0;
       svg.on('.zoom', null);
       svg.on('click', null);
     };
