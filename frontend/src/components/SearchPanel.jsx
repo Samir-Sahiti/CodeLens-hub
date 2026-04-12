@@ -242,6 +242,16 @@ export default function SearchPanel({ repoId }) {
   const answerRef      = useRef(null);
   const abortRef       = useRef(null);
 
+  // Abort in-flight SSE stream on unmount to prevent memory leaks
+  useEffect(() => {
+    return () => {
+      if (abortRef.current) {
+        abortRef.current.abort();
+        abortRef.current = null;
+      }
+    };
+  }, []);
+
   // Auto-scroll answer area as tokens arrive
   useEffect(() => {
     if (isStreaming && answerRef.current) {

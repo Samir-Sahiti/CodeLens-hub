@@ -90,8 +90,10 @@ async function getGithubFileContent(octokit, owner, name, sha) {
 const indexRepository = async ({ repoId, owner, name, token, extractPath, source }) => {
   try {
     console.log(`[indexer] Starting indexing for repoId: ${repoId} (source: ${source})`);
+    console.time(`[indexer] Total pipeline (${repoId})`);
 
     // 1. fetch files & 2. filter
+    console.time(`[indexer] Phase 1: File discovery (${repoId})`);
     let pendingFiles = [];
     if (source === 'github') {
       pendingFiles = await fetchGithubFiles(owner, name, token);
@@ -100,6 +102,8 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     }
 
     const getAllFilesSet = new Set(pendingFiles.map(f => f.path));
+    console.timeEnd(`[indexer] Phase 1: File discovery (${repoId})`);
+    console.log(`[indexer] Discovered ${pendingFiles.length} files to index.`);
 
     // octokit instance for github fetching inside pLimit
     const octokit = source === 'github' ? new Octokit({ auth: token }) : null;
@@ -140,8 +144,10 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     }
 
     const parsedFiles = [];
+    let parsedCount = 0;
 
     // 3. parse (with concurrency) and 4. resolve imports
+    console.time(`[indexer] Phase 2: Parsing (${repoId})`);
     await Promise.all(
       pendingFiles.map(file =>
         limit(async () => {
@@ -157,12 +163,17 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
             // Parse file directly, passing namespaceMap for C# resolution
             const parsed = parseFile(file.path, file.content, isCSharpRepo ? namespaceMap : getAllFilesSet);
             parsedFiles.push(parsed);
+            parsedCount += 1;
+            if (parsedCount % 100 === 0) {
+              console.log(`[indexer] Parsed ${parsedCount}/${pendingFiles.length} files...`);
+            }
           } catch (err) {
             console.warn(`[indexer] Failed to process ${file.path}: ${err.message}`);
           }
         })
       )
     );
+    console.timeEnd(`[indexer] Phase 2: Parsing (${repoId})`);
 
     // 5. dedupe nodes (in memory)
     const nodeMap = new Map();
@@ -216,6 +227,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     const uniqueNodes = Array.from(nodeMap.values());
 
     // 6. bulk insert nodes
+    console.time(`[indexer] Phase 3: DB writes (${repoId})`);
     const nodeChunks = chunkArray(uniqueNodes, 500);
     for (const chunk of nodeChunks) {
       const { error } = await supabaseAdmin
@@ -261,6 +273,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
         .upsert(chunk, { onConflict: 'repo_id,file_path', ignoreDuplicates: false }); // false to DO UPDATE
       if (error) throw new Error(`Database error updating metrics: ${error.message}`);
     }
+    console.timeEnd(`[indexer] Phase 3: DB writes (${repoId})`);
 
     // 9. issue detection
     const issues = [];
@@ -391,51 +404,58 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
         
         console.log(`[indexer] Generated ${allExtractedChunks.length} raw chunks. Proceeding to OpenAI.`);
         
-        // 10c. Batch API vectors (Respecting limit constraints)
-        const batches = chunkArray(allExtractedChunks, 20);
+        // 10c. Batch API vectors — batch size of 100 (OpenAI supports up to 2048 inputs)
+        console.time(`[indexer] Phase 5: Embedding (${repoId})`);
+        const batches = chunkArray(allExtractedChunks, 100);
         const mappedPayloads = [];
 
-        for (const batch of batches) {
-          try {
-            const res = await openai.embeddings.create({
-              input: batch.map(c => c.content),
-              model: "text-embedding-3-small"
-            });
-            
-            for (let i = 0; i < batch.length; i++) {
-              mappedPayloads.push({
-                repo_id: batch[i].repo_id,
-                file_path: batch[i].file_path,
-                start_line: batch[i].start_line,
-                end_line: batch[i].end_line,
-                content: batch[i].content,
-                embedding: res.data[i].embedding
-              });
-            }
-          } catch (batchErr) {
-            console.warn(`[indexer] Batch embed failed: ${batchErr.message}. Falling back to per-chunk.`);
-            
-            // File-level rescue sequence (Iterating natively without breaking context limits)
-            for (const singleChunk of batch) {
+        // Process embedding batches with concurrency limit of 5
+        const embedLimit = pLimit(5);
+        await Promise.all(
+          batches.map((batch, batchIdx) =>
+            embedLimit(async () => {
               try {
-                const singleRes = await openai.embeddings.create({
-                  input: singleChunk.content,
+                const res = await openai.embeddings.create({
+                  input: batch.map(c => c.content),
                   model: "text-embedding-3-small"
                 });
-                mappedPayloads.push({
-                  repo_id: singleChunk.repo_id,
-                  file_path: singleChunk.file_path,
-                  start_line: singleChunk.start_line,
-                  end_line: singleChunk.end_line,
-                  content: singleChunk.content,
-                  embedding: singleRes.data[0].embedding
-                });
-              } catch (singleErr) {
-                 console.warn(`[indexer] Failed to embed chunk in ${singleChunk.file_path}: ${singleErr.message}`);
+
+                for (let i = 0; i < batch.length; i++) {
+                  mappedPayloads.push({
+                    repo_id: batch[i].repo_id,
+                    file_path: batch[i].file_path,
+                    start_line: batch[i].start_line,
+                    end_line: batch[i].end_line,
+                    content: batch[i].content,
+                    embedding: res.data[i].embedding
+                  });
+                }
+              } catch (batchErr) {
+                console.warn(`[indexer] Batch ${batchIdx} embed failed: ${batchErr.message}. Falling back to per-chunk.`);
+
+                // Per-chunk fallback
+                for (const singleChunk of batch) {
+                  try {
+                    const singleRes = await openai.embeddings.create({
+                      input: singleChunk.content,
+                      model: "text-embedding-3-small"
+                    });
+                    mappedPayloads.push({
+                      repo_id: singleChunk.repo_id,
+                      file_path: singleChunk.file_path,
+                      start_line: singleChunk.start_line,
+                      end_line: singleChunk.end_line,
+                      content: singleChunk.content,
+                      embedding: singleRes.data[0].embedding
+                    });
+                  } catch (singleErr) {
+                    console.warn(`[indexer] Failed to embed chunk in ${singleChunk.file_path}: ${singleErr.message}`);
+                  }
+                }
               }
-            }
-          }
-        }
+            })
+          )
+        );
 
         // 10d. Commit bulk inserts correctly against standard JSON array loops mapping matching Schema objects
         if (mappedPayloads.length > 0) {
@@ -446,6 +466,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
            }
         }
         console.log(`[indexer] Completely finished semantic embeddings mappings. Saved ${mappedPayloads.length} vectors!`);
+        console.timeEnd(`[indexer] Phase 5: Embedding (${repoId})`);
         
       } catch (embeddingError) {
         console.warn(`[indexer] Global embedding step failed severely, isolating error entirely: ${embeddingError.message}`);
@@ -462,6 +483,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       })
       .eq('id', repoId);
 
+    console.timeEnd(`[indexer] Total pipeline (${repoId})`);
     console.log(`[indexer] Successfully finished indexing for repoId: ${repoId}`);
 
   } catch (error) {
