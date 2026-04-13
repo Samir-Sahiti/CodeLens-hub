@@ -895,6 +895,24 @@ Assign labels: `epic/infra`, `epic/auth`, `epic/dashboard`, `epic/graph`, `epic/
 
 ---
 
+US-026: AI Code Review Panel
+
+**As a** developer
+**I want to** paste a code snippet and get an AI review that considers my actual codebase
+**So that** I know whether the code is well-written and whether it integrates cleanly with what already exists
+
+**Acceptance Criteria**
+- [ ] Code Review panel accessible from the repo sidebar nav
+- [ ] Textarea for pasting a code snippet (up to ~200 lines)
+- [ ] Optional context field: "What is this code supposed to do?"
+- [ ] On submit, sends the snippet + top 5 semantically similar chunks from the indexed codebase to Claude
+- [ ] Claude responds with: a quality assessment, specific improvement suggestions, and a compatibility note ("This pattern matches how auth is handled in src/middleware/auth.js" or "This introduces a new pattern that conflicts with...")
+- [ ] Response streams in like the Search panel
+- [ ] A "Clean up this code" quick action that asks Claude to rewrite the snippet following patterns it found in the repo
+
+**Note**
+> Reuse the SSE streaming infrastructure from `searchController.js`. The system prompt should be: "You are reviewing a code snippet for a developer. You have context from their existing codebase below. Assess code quality, suggest improvements, and specifically note whether this code is consistent with the patterns and conventions you see in their codebase."
+
 ### US-027: Context-aware sidebar navigation
 
 **Labels:** `epic/dashboard`
