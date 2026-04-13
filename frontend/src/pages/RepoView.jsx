@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import DependencyGraph from '../components/DependencyGraph';
 import SearchPanel from '../components/SearchPanel';
+import CodeReviewPanel from '../components/CodeReviewPanel';
 import VirtualTable from '../components/VirtualTable';
 
 function formatLanguage(str) {
@@ -77,8 +78,8 @@ const TabButton = ({ active, label, onClick, badge }) => (
     onClick={onClick}
     className={`
       flex items-center gap-2 whitespace-nowrap border-b-2 py-4 px-1 text-sm font-medium transition-colors
-      ${active 
-        ? 'border-indigo-500 text-indigo-400' 
+      ${active
+        ? 'border-indigo-500 text-indigo-400'
         : 'border-transparent text-gray-400 hover:border-gray-700 hover:text-gray-200'
       }
     `}
@@ -99,14 +100,12 @@ function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [sortConfig, setSortConfig] = useState({ key: 'complexity_score', direction: 'desc' });
 
-  // 1. Filter first
   const filteredNodes = nodes.filter(n => n.file_path.toLowerCase().includes(searchQuery.toLowerCase()));
 
-  // 2. Then Sort
   const sortedNodes = [...filteredNodes].sort((a, b) => {
     const valA = a[sortConfig.key] || 0;
     const valB = b[sortConfig.key] || 0;
-    
+
     if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
     if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
     return 0;
@@ -117,11 +116,10 @@ function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact }) {
       if (prev.key === key) {
         return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
       }
-      return { key, direction: 'desc' }; // default starting sort is desc
+      return { key, direction: 'desc' };
     });
   };
 
-  // 3. 90th Percentile Calculation (dynamically computed against FULL repo, not filtered active view)
   const calc90th = (arr, key) => {
     if (!arr || arr.length === 0) return 0;
     const sortedVals = arr.map(n => n[key] || 0).sort((a, b) => a - b);
@@ -130,20 +128,18 @@ function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact }) {
   };
 
   const p90Complexity = calc90th(nodes, 'complexity_score');
-  const p90Incoming = calc90th(nodes, 'incoming_count');
+  const p90Incoming   = calc90th(nodes, 'incoming_count');
 
-  // Summary counts across whole repo
   let criticalCount = 0;
-  let atRiskCount = 0;
+  let atRiskCount   = 0;
 
   nodes.forEach(n => {
-    const isHighComplex = n.complexity_score > p90Complexity;
+    const isHighComplex  = n.complexity_score > p90Complexity;
     const isHighIncoming = n.incoming_count > p90Incoming;
     if (isHighComplex && isHighIncoming) criticalCount++;
     else if (isHighComplex || isHighIncoming) atRiskCount++;
   });
 
-  // UI Helpers
   const SortIcon = ({ columnKey }) => {
     if (sortConfig.key !== columnKey) return <span className="ml-2 text-gray-600 font-mono">↕</span>;
     return <span className="ml-2 text-indigo-400 font-mono">{sortConfig.direction === 'asc' ? '↑' : '↓'}</span>;
@@ -199,13 +195,13 @@ function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact }) {
               </thead>
             )}
             renderRow={(node) => {
-              const isHighComplex = node.complexity_score > p90Complexity;
+              const isHighComplex  = node.complexity_score > p90Complexity;
               const isHighIncoming = node.incoming_count > p90Incoming;
-              const isSelected = selectedNode && (selectedNode.id || selectedNode.file_path) === (node.id || node.file_path);
+              const isSelected     = selectedNode && (selectedNode.id || selectedNode.file_path) === (node.id || node.file_path);
 
-              let rowClass = 'hover:bg-gray-800/60 cursor-pointer transition-colors';
-              let textFade = 'text-gray-300';
-              let metaFade = 'text-gray-500';
+              let rowClass  = 'hover:bg-gray-800/60 cursor-pointer transition-colors';
+              let textFade  = 'text-gray-300';
+              let metaFade  = 'text-gray-500';
 
               if (isHighComplex && isHighIncoming) {
                 rowClass = 'bg-red-900/30 hover:bg-red-900/50 cursor-pointer transition-colors';
@@ -325,10 +321,10 @@ function IssuesPanel({ nodes, issues, onNodeSelect }) {
 
   const getBadgeStyles = (severity) => {
     switch (severity?.toLowerCase()) {
-      case 'high': return 'bg-red-500/20 text-red-400 ring-1 ring-inset ring-red-500/30';
+      case 'high':   return 'bg-red-500/20 text-red-400 ring-1 ring-inset ring-red-500/30';
       case 'medium': return 'bg-orange-500/20 text-orange-400 ring-1 ring-inset ring-orange-500/30';
-      case 'low': return 'bg-yellow-500/20 text-yellow-400 ring-1 ring-inset ring-yellow-500/30';
-      default: return 'bg-gray-500/20 text-gray-400 ring-1 ring-inset ring-gray-500/30';
+      case 'low':    return 'bg-yellow-500/20 text-yellow-400 ring-1 ring-inset ring-yellow-500/30';
+      default:       return 'bg-gray-500/20 text-gray-400 ring-1 ring-inset ring-gray-500/30';
     }
   };
 
@@ -336,7 +332,7 @@ function IssuesPanel({ nodes, issues, onNodeSelect }) {
     const resolvedIds = issue.file_paths
       .map(path => nodeMap.get(path))
       .filter(Boolean);
-    
+
     if (resolvedIds.length > 0) {
       onNodeSelect(resolvedIds);
     }
@@ -355,8 +351,8 @@ function IssuesPanel({ nodes, issues, onNodeSelect }) {
             </h2>
             <div className="grid gap-4">
               {groupIssues.map((issue, idx) => (
-                <div 
-                  key={issue.id || `${type}-${idx}`} 
+                <div
+                  key={issue.id || `${type}-${idx}`}
                   onClick={() => handleIssueClick(issue)}
                   className="flex flex-col bg-gray-900/50 hover:bg-gray-800/80 border border-gray-800 hover:border-gray-700 rounded-lg p-5 cursor-pointer transition-all duration-200"
                 >
@@ -387,20 +383,19 @@ function IssuesPanel({ nodes, issues, onNodeSelect }) {
 export default function RepoView() {
   const { repoId } = useParams();
   const { session } = useAuth();
-  
-  const [repo, setRepo] = useState(null);
+
+  const [repo, setRepo]         = useState(null);
   const [activeTab, setActiveTab] = useState('graph');
-  
+
   const [selectedNodeId, setSelectedNodeId] = useState(null);
   const [impactSourcePath, setImpactSourcePath] = useState(null);
-  
-  // Analysis Data state
-  const [analysisData, setAnalysisData] = useState({ nodes: [], edges: [], issues: [] });
+
+  const [analysisData, setAnalysisData]   = useState({ nodes: [], edges: [], issues: [] });
   const [hasFetchedData, setHasFetchedData] = useState(false);
   const [analysisError, setAnalysisError] = useState(null);
-  
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState(null);
+
+  const [isLoading, setIsLoading]     = useState(true);
+  const [error, setError]             = useState(null);
   const [isReindexing, setIsReindexing] = useState(false);
 
   const handleNodeSelect = useCallback((nodeIdOrIds, options = {}) => {
@@ -436,7 +431,6 @@ export default function RepoView() {
     setImpactSourcePath(null);
   }, []);
 
-  // Fetch the huge datasets automatically when ready
   const fetchAnalysisData = useCallback(async (force = false) => {
     if ((hasFetchedData && !force) || !session?.access_token) return;
     try {
@@ -444,19 +438,18 @@ export default function RepoView() {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (!res.ok) throw new Error('Failed to fetch analysis metadata');
-      
+
       const data = await res.json();
 
-      setAnalysisData({ 
-        nodes: data.nodes || [], 
-        edges: data.edges || [], 
-        issues: data.issues || [] 
+      setAnalysisData({
+        nodes:  data.nodes  || [],
+        edges:  data.edges  || [],
+        issues: data.issues || [],
       });
       setHasFetchedData(true);
       setAnalysisError(null);
     } catch (err) {
       console.error('Failed to fetch analysis datasets:', err);
-      // setAnalysisError('Failed to load internal repository analysis data maps. Try refreshing the page.');
     }
   }, [repoId, hasFetchedData, session?.access_token]);
 
@@ -467,17 +460,16 @@ export default function RepoView() {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (!res.ok) throw new Error('Failed to fetch repositories');
-      
+
       const data = await res.json();
       const currentRepo = data.repos?.find(r => String(r.id) === repoId);
-      
+
       if (!currentRepo) throw new Error('Repository not found');
-      
+
       setRepo(currentRepo);
-      
-      // Load tables immediately if it's already ready
+
       if (currentRepo.status === 'ready') {
-        fetchAnalysisData(true); // Force fetch on ready
+        fetchAnalysisData(true);
       }
     } catch (err) {
       console.error(err);
@@ -488,12 +480,10 @@ export default function RepoView() {
     }
   }, [session?.access_token, repoId, fetchAnalysisData]);
 
-  // Initial fetch
   useEffect(() => {
     fetchRepo();
   }, [fetchRepo]);
 
-  // Polling logic
   useEffect(() => {
     let timeoutId;
     if (repo?.status === 'pending' || repo?.status === 'indexing') {
@@ -501,10 +491,9 @@ export default function RepoView() {
         fetchRepo();
       }, 5000);
     }
-    return () => clearTimeout(timeoutId); // Clean up the polling timeout on unmount
+    return () => clearTimeout(timeoutId);
   }, [repo?.status, fetchRepo]);
 
-  // Release large data arrays when navigating away to prevent memory leaks
   useEffect(() => {
     return () => {
       setAnalysisData({ nodes: [], edges: [], issues: [] });
@@ -514,16 +503,16 @@ export default function RepoView() {
   const handleReindex = async () => {
     if (!session?.access_token) return;
     setIsReindexing(true);
-    setHasFetchedData(false); // reset so it re-fetches exactly what changed
+    setHasFetchedData(false);
     setImpactSourcePath(null);
-    
+
     try {
       const res = await fetch(`/api/repos/${repoId}/reindex`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (!res.ok) throw new Error('Failed to start re-indexing');
-      
+
       await fetchRepo();
     } catch (err) {
       console.error(err);
@@ -553,26 +542,25 @@ export default function RepoView() {
     );
   }
 
-  // Treat pending as indexing for UI purposes, as uploadRepo controller sets status to pending initially
   const isWorking = repo.status === 'pending' || repo.status === 'indexing';
 
   return (
     <div className="flex flex-col min-h-screen bg-gray-950 text-white">
-      
+
       {/* Header Container */}
       <div className="border-b border-gray-800 bg-gray-900/50 px-8 pt-6">
         <Link to="/dashboard" className="mb-4 inline-flex items-center text-sm font-medium text-gray-400 hover:text-white transition-colors">
           &larr; Dashboard
         </Link>
-        
+
         <div className="flex items-center justify-between pb-4">
           <div>
             <div className="flex items-center gap-3">
               <h1 className="text-2xl font-bold tracking-tight">{repo.name}</h1>
               <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ${
-                repo.status === 'ready' ? 'bg-green-500/10 text-green-400 ring-1 ring-inset ring-green-500/20' :
-                repo.status === 'failed' ? 'bg-red-500/10 text-red-400 ring-1 ring-inset ring-red-500/20' :
-                isWorking ? 'bg-blue-500/10 text-blue-400 ring-1 ring-inset ring-blue-500/20 animate-pulse' :
+                repo.status === 'ready'   ? 'bg-green-500/10 text-green-400 ring-1 ring-inset ring-green-500/20' :
+                repo.status === 'failed'  ? 'bg-red-500/10 text-red-400 ring-1 ring-inset ring-red-500/20' :
+                isWorking                 ? 'bg-blue-500/10 text-blue-400 ring-1 ring-inset ring-blue-500/20 animate-pulse' :
                 'bg-gray-500/10 text-gray-400 ring-1 ring-inset ring-gray-500/20'
               }`}>
                 {repo.status === 'pending' ? 'Indexing' : repo.status.charAt(0).toUpperCase() + repo.status.slice(1)}
@@ -582,28 +570,29 @@ export default function RepoView() {
               {repo.source === 'github' ? 'GitHub' : 'Uploaded ZIP'} • {repo.file_count || 0} files indexed
             </p>
           </div>
-          
+
           <button
-             onClick={handleReindex}
-             disabled={isWorking || isReindexing}
-             className="rounded-md bg-gray-800 px-4 py-2 text-sm font-medium hover:bg-gray-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={handleReindex}
+            disabled={isWorking || isReindexing}
+            className="rounded-md bg-gray-800 px-4 py-2 text-sm font-medium hover:bg-gray-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isReindexing ? 'Starting...' : 'Re-index'}
           </button>
         </div>
 
-        {/* Tab Bar Container */}
+        {/* Tab Bar — includes Review tab after Search */}
         {!isWorking && repo.status !== 'failed' && (
           <div className="mt-2 -mb-px flex gap-6">
-            <TabButton active={activeTab === 'graph'} label="Graph" onClick={() => setActiveTab('graph')} />
+            <TabButton active={activeTab === 'graph'}   label="Graph"   onClick={() => setActiveTab('graph')}   />
             <TabButton active={activeTab === 'metrics'} label="Metrics" onClick={() => setActiveTab('metrics')} />
-            <TabButton 
-              active={activeTab === 'issues'} 
-              label="Issues" 
-              onClick={() => setActiveTab('issues')} 
-              badge={analysisData.issues.length} 
+            <TabButton
+              active={activeTab === 'issues'}
+              label="Issues"
+              onClick={() => setActiveTab('issues')}
+              badge={analysisData.issues.length}
             />
             <TabButton active={activeTab === 'search'} label="Search" onClick={() => setActiveTab('search')} />
+            <TabButton active={activeTab === 'review'} label="Review" onClick={() => setActiveTab('review')} />
           </div>
         )}
       </div>
@@ -689,6 +678,11 @@ export default function RepoView() {
 
             <div className={activeTab === 'search' ? 'block h-full' : 'hidden'}>
               <SearchPanel repoId={repoId} />
+            </div>
+
+            {/* Review tab — CodeReviewPanel */}
+            <div className={activeTab === 'review' ? 'block h-full' : 'hidden'}>
+              <CodeReviewPanel repoId={repoId} />
             </div>
           </div>
         )}
