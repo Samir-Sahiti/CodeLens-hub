@@ -1,6 +1,7 @@
-import { useEffect, useState, useCallback, useMemo } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { useRepo } from '../context/RepoContext';
 import DependencyGraph from '../components/DependencyGraph';
 import SearchPanel from '../components/SearchPanel';
 import CodeReviewPanel from '../components/CodeReviewPanel';
@@ -20,6 +21,18 @@ function getFileBasename(filePath) {
   const normalizedPath = filePath.replace(/\\/g, '/');
   const parts = normalizedPath.split('/');
   return parts[parts.length - 1] || filePath;
+}
+
+function formatDate(ts) {
+  if (!ts) return null;
+  const d = new Date(ts);
+  const diff = Date.now() - d.getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return d.toLocaleDateString();
 }
 
 function buildImpactAnalysis(sourcePath, nodes, edges) {
@@ -71,29 +84,6 @@ function buildImpactAnalysis(sourcePath, nodes, edges) {
     transitiveIds: transitive.map(getGraphId),
   };
 }
-
-// Helper component for tabs
-const TabButton = ({ active, label, onClick, badge }) => (
-  <button
-    onClick={onClick}
-    className={`
-      flex items-center gap-2 whitespace-nowrap border-b-2 py-4 px-1 text-sm font-medium transition-colors
-      ${active
-        ? 'border-indigo-500 text-indigo-400'
-        : 'border-transparent text-gray-400 hover:border-gray-700 hover:text-gray-200'
-      }
-    `}
-  >
-    {label}
-    {badge !== undefined && badge > 0 && (
-      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
-        active ? 'bg-indigo-500/20 text-indigo-300' : 'bg-gray-800 text-gray-300'
-      }`}>
-        {badge}
-      </span>
-    )}
-  </button>
-);
 
 // --- Child Panels ---
 function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact }) {
@@ -218,7 +208,7 @@ function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact }) {
               }
 
               return (
-                <tr key={node.id || node.file_path} onClick={() => onNodeSelect(node.id || node.file_path)} className={rowClass} style={{ height: 44 }}>
+                <tr key={node.id || node.file_path} onClick={() => onNodeSelect(node.id || node.file_path, { openGraph: true })} className={rowClass} style={{ height: 44 }}>
                   <td className={`px-6 py-3 font-mono text-xs ${textFade}`}>{node.file_path}</td>
                   <td className={`px-6 py-3 ${metaFade}`}>{formatLanguage(node.language)}</td>
                   <td className={`px-6 py-3 ${metaFade}`}>{node.line_count}</td>
@@ -383,9 +373,11 @@ function IssuesPanel({ nodes, issues, onNodeSelect }) {
 export default function RepoView() {
   const { repoId } = useParams();
   const { session } = useAuth();
+  const { setRepo: setRepoCtx, setIssueCount } = useRepo();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab = searchParams.get('tab') || 'graph';
 
   const [repo, setRepo]         = useState(null);
-  const [activeTab, setActiveTab] = useState('graph');
 
   const [selectedNodeId, setSelectedNodeId] = useState(null);
   const [impactSourcePath, setImpactSourcePath] = useState(null);
@@ -401,9 +393,9 @@ export default function RepoView() {
   const handleNodeSelect = useCallback((nodeIdOrIds, options = {}) => {
     setSelectedNodeId(nodeIdOrIds);
     if (options.openGraph) {
-      setActiveTab('graph');
+      setSearchParams({ tab: 'graph' }, { replace: true });
     }
-  }, []);
+  }, [setSearchParams]);
 
   const selectedNode = useMemo(() => {
     if (Array.isArray(selectedNodeId) || !selectedNodeId) return null;
@@ -424,8 +416,8 @@ export default function RepoView() {
 
     setImpactSourcePath(sourcePath);
     setSelectedNodeId(sourceNode.id || sourceNode.file_path);
-    setActiveTab('graph');
-  }, [analysisData.nodes]);
+    setSearchParams({ tab: 'graph' }, { replace: true });
+  }, [analysisData.nodes, setSearchParams]);
 
   const handleClearImpactAnalysis = useCallback(() => {
     setImpactSourcePath(null);
@@ -450,6 +442,7 @@ export default function RepoView() {
       setAnalysisError(null);
     } catch (err) {
       console.error('Failed to fetch analysis datasets:', err);
+      setAnalysisError(err.message || 'Failed to load analysis data');
     }
   }, [repoId, hasFetchedData, session?.access_token]);
 
@@ -497,8 +490,37 @@ export default function RepoView() {
   useEffect(() => {
     return () => {
       setAnalysisData({ nodes: [], edges: [], issues: [] });
+      setRepoCtx(null);
+      setIssueCount(0);
     };
-  }, []);
+  }, [setRepoCtx, setIssueCount]);
+
+  // Sync repo and issue count into context so Layout's sidebar stays current
+  useEffect(() => {
+    setRepoCtx(repo);
+  }, [repo, setRepoCtx]);
+
+  useEffect(() => {
+    setIssueCount(analysisData.issues.length);
+  }, [analysisData.issues, setIssueCount]);
+
+  // When a repo transitions from indexing → ready, land on Metrics for a better
+  // "here's what we found" first impression rather than an empty graph.
+  const prevStatusRef = useRef(null);
+  useEffect(() => {
+    const prev = prevStatusRef.current;
+    prevStatusRef.current = repo?.status ?? null;
+    if ((prev === 'pending' || prev === 'indexing') && repo?.status === 'ready') {
+      setSearchParams((current) => {
+        if (!current.get('tab')) {
+          const next = new URLSearchParams(current);
+          next.set('tab', 'metrics');
+          return next;
+        }
+        return current;
+      }, { replace: true });
+    }
+  }, [repo?.status, setSearchParams]);
 
   const handleReindex = async () => {
     if (!session?.access_token) return;
@@ -548,12 +570,8 @@ export default function RepoView() {
     <div className="flex flex-col min-h-screen bg-gray-950 text-white">
 
       {/* Header Container */}
-      <div className="border-b border-gray-800 bg-gray-900/50 px-8 pt-6">
-        <Link to="/dashboard" className="mb-4 inline-flex items-center text-sm font-medium text-gray-400 hover:text-white transition-colors">
-          &larr; Dashboard
-        </Link>
-
-        <div className="flex items-center justify-between pb-4">
+      <div className="border-b border-gray-800 bg-gray-900/50 px-8 py-6">
+        <div className="flex items-center justify-between">
           <div>
             <div className="flex items-center gap-3">
               <h1 className="text-2xl font-bold tracking-tight">{repo.name}</h1>
@@ -567,7 +585,8 @@ export default function RepoView() {
               </span>
             </div>
             <p className="text-sm text-gray-400 mt-1">
-              {repo.source === 'github' ? 'GitHub' : 'Uploaded ZIP'} • {repo.file_count || 0} files indexed
+              {repo.source === 'github' ? 'GitHub' : 'Uploaded ZIP'} · {repo.file_count || 0} files
+              {repo.indexed_at && ` · last indexed ${formatDate(repo.indexed_at)}`}
             </p>
           </div>
 
@@ -579,22 +598,6 @@ export default function RepoView() {
             {isReindexing ? 'Starting...' : 'Re-index'}
           </button>
         </div>
-
-        {/* Tab Bar — includes Review tab after Search */}
-        {!isWorking && repo.status !== 'failed' && (
-          <div className="mt-2 -mb-px flex gap-6">
-            <TabButton active={activeTab === 'graph'}   label="Graph"   onClick={() => setActiveTab('graph')}   />
-            <TabButton active={activeTab === 'metrics'} label="Metrics" onClick={() => setActiveTab('metrics')} />
-            <TabButton
-              active={activeTab === 'issues'}
-              label="Issues"
-              onClick={() => setActiveTab('issues')}
-              badge={analysisData.issues.length}
-            />
-            <TabButton active={activeTab === 'search'} label="Search" onClick={() => setActiveTab('search')} />
-            <TabButton active={activeTab === 'review'} label="Review" onClick={() => setActiveTab('review')} />
-          </div>
-        )}
       </div>
 
       {/* Main Content Area */}
