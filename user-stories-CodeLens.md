@@ -1185,6 +1185,37 @@ US-026: AI Code Review Panel
 
 ---
 
+### US-038: Extended Language Support
+
+**Labels:** `epic/parsing`
+**Milestone:** Sprint 7 — Weeks 13–14
+
+---
+
+**As a** developer working in Go, Java, Rust, or Ruby
+**I want** CodeLens to parse and index my repository's files
+**So that** I can use the full dependency graph, issue detection, and AI search features regardless of the language I work in
+
+**Acceptance Criteria**
+- [ ] Go (`.go`) files parsed — `import` declarations extracted and resolved to repo-relative paths
+- [ ] Java (`.java`) files parsed — `import` statements and `package` declarations extracted; imports resolved via package-to-directory mapping
+- [ ] Rust (`.rs`) files parsed — `use` and `mod` declarations extracted; `mod foo` resolved to `foo.rs` or `foo/mod.rs`
+- [ ] Ruby (`.rb`) files parsed — `require_relative` calls extracted and resolved; `require` calls matched against repo files
+- [ ] Each new language has its own parser module under `backend/src/parsers/` following the same interface as existing parsers: `parse(filePath, content, allFilePaths) → { filePath, imports: string[], exports: string[] }`
+- [ ] Language colour scheme in the D3 graph updated: Go → cyan, Java → orange, Rust → red-orange, Ruby → red
+- [ ] Frontend language labels in `formatLanguage()` (RepoView.jsx) updated
+- [ ] `SUPPORTED_EXTENSIONS` array in the indexer updated to include `.go`, `.java`, `.rs`, `.rb`
+- [ ] Homepage language list updated to include the four new languages
+
+**Note**
+> Use Tree-sitter grammars: `tree-sitter-go`, `tree-sitter-java`, `tree-sitter-rust`, `tree-sitter-ruby` — all are available on npm. Add them to `backend/package.json`. Follow the exact same parser structure as `parseJavaScript.js` or `parsePython.js`. Wrap each file parse in try/catch and skip on failure — the pipeline must continue even if a single file fails. Import resolution for each language:
+> - **Go:** `import "mymodule/utils"` → find `utils/` directory or `utils.go` in repo root
+> - **Java:** `import com.example.MyClass` → look for `MyClass.java` anywhere in the repo tree
+> - **Rust:** `mod foo` → look for `foo.rs` or `foo/mod.rs` relative to current file; `use crate::foo::bar` → resolve within repo
+> - **Ruby:** `require_relative './helper'` → resolve relative to current file
+
+---
+
 ## 🏷️ Suggested GitHub Labels
 
 | Label | Color | Description |
@@ -1212,5 +1243,5 @@ US-026: AI Code Review Panel
 | Sprint 4 — AI Layer & Impact Analysis | Weeks 7–8 | US-017 → US-021 |
 | Sprint 5 — Polish & Stabilisation | Weeks 9–10 | US-022 → US-025, US-027 |
 | Sprint 6 — Advanced Integrations & Quality | Weeks 11–12 | US-026, US-028, US-032, US-033, US-035, US-036, US-037 |
-| Sprint 7 — DevOps & Deployment | Weeks 13–14 | US-029 → US-031 (US-030 depends on US-035) |
+| Sprint 7 — DevOps & Deployment | Weeks 13–14 | US-029 → US-031 (US-030 depends on US-035), US-038 |
 | Sprint 8 — Teams & Collaboration | Weeks 15–16 | US-034 |
