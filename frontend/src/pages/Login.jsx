@@ -107,44 +107,62 @@ export default function Login() {
 
       {/* Feature Grid */}
       <section className="relative z-10 mx-auto max-w-7xl px-4 pb-24 sm:px-6 lg:px-8">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          
-          {/* Feature 1 */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+
+          {/* Feature 1 — Dependency Graph */}
           <div className="rounded-xl border border-slate-800 bg-[#0d1326] p-8 transition-colors hover:border-slate-700">
             <svg className="mb-5 h-8 w-8 text-indigo-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 6a7.5 7.5 0 107.5 7.5h-7.5V6z" />
               <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 10.5H21A7.5 7.5 0 0013.5 3v7.5z" />
             </svg>
             <h3 className="font-['DM_Mono',monospace] text-xl font-medium text-white mb-2">Dependency Graph</h3>
-            <p className="text-slate-400 leading-relaxed">Visual, interactive map of how your files connect.</p>
+            <p className="text-slate-400 leading-relaxed">Interactive force-directed graph of every file and how they connect. Zoom, pan, and click to explore.</p>
           </div>
 
-          {/* Feature 2 */}
+          {/* Feature 2 — Issue Detection */}
           <div className="rounded-xl border border-slate-800 bg-[#0d1326] p-8 transition-colors hover:border-slate-700">
             <svg className="mb-5 h-8 w-8 text-pink-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
             </svg>
             <h3 className="font-['DM_Mono',monospace] text-xl font-medium text-white mb-2">Issue Detection</h3>
-            <p className="text-slate-400 leading-relaxed">Automatically flags circular dependencies, god files, and dead code.</p>
+            <p className="text-slate-400 leading-relaxed">Automatically flags circular dependencies, god files, high coupling, and dead code — with severity ratings.</p>
           </div>
 
-          {/* Feature 3 */}
+          {/* Feature 3 — Change Impact */}
           <div className="rounded-xl border border-slate-800 bg-[#0d1326] p-8 transition-colors hover:border-slate-700">
             <svg className="mb-5 h-8 w-8 text-amber-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" d="M15.362 5.214A8.252 8.252 0 0112 21 8.25 8.25 0 016.038 7.048 8.287 8.287 0 009 9.6a8.983 8.983 0 013.361-6.866 8.21 8.21 0 003 2.48z" />
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 18a3.75 3.75 0 00.495-7.467 5.99 5.99 0 00-1.925 3.546 5.974 5.974 0 01-2.133-1A3.75 3.75 0 0012 18z" />
             </svg>
             <h3 className="font-['DM_Mono',monospace] text-xl font-medium text-white mb-2">Change Impact</h3>
-            <p className="text-slate-400 leading-relaxed">Select any file and see its blast radius before you touch it.</p>
+            <p className="text-slate-400 leading-relaxed">Select any file and instantly see its blast radius — direct and transitive dependents highlighted on the graph.</p>
           </div>
 
-          {/* Feature 4 */}
+          {/* Feature 4 — Natural Language Search */}
           <div className="rounded-xl border border-slate-800 bg-[#0d1326] p-8 transition-colors hover:border-slate-700">
             <svg className="mb-5 h-8 w-8 text-emerald-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
             </svg>
             <h3 className="font-['DM_Mono',monospace] text-xl font-medium text-white mb-2">Natural Language Search</h3>
-            <p className="text-slate-400 leading-relaxed">Ask questions about your codebase in plain English.</p>
+            <p className="text-slate-400 leading-relaxed">Ask anything about your codebase in plain English. RAG-powered answers with cited file and line references.</p>
+          </div>
+
+          {/* Feature 5 — AI Code Review */}
+          <div className="rounded-xl border border-slate-800 bg-[#0d1326] p-8 transition-colors hover:border-slate-700">
+            <svg className="mb-5 h-8 w-8 text-violet-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" />
+            </svg>
+            <h3 className="font-['DM_Mono',monospace] text-xl font-medium text-white mb-2">AI Code Review</h3>
+            <p className="text-slate-400 leading-relaxed">Paste a snippet and get a review that considers your actual codebase patterns — not just generic best practices.</p>
+          </div>
+
+          {/* Feature 6 — File Metrics */}
+          <div className="rounded-xl border border-slate-800 bg-[#0d1326] p-8 transition-colors hover:border-slate-700">
+            <svg className="mb-5 h-8 w-8 text-cyan-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
+            </svg>
+            <h3 className="font-['DM_Mono',monospace] text-xl font-medium text-white mb-2">File Metrics</h3>
+            <p className="text-slate-400 leading-relaxed">Sortable complexity table with risk highlighting — find your most critical and at-risk files at a glance.</p>
           </div>
 
         </div>
