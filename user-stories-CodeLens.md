@@ -1007,6 +1007,7 @@ US-026: AI Code Review Panel
 
 **Note**
 > Use standard Node.js setup actions with caching for `node_modules` to keep build times low.
+> **Prerequisite:** US-035 (Automated Test Suite) must be completed first. Without it, the pipeline only runs lint.
 
 ---
 
@@ -1104,6 +1105,86 @@ US-026: AI Code Review Panel
 
 ---
 
+## 🧪 EPIC: Quality & Developer Experience
+
+---
+
+### US-035: Automated Test Suite
+
+**Labels:** `epic/infra`
+**Milestone:** Sprint 6 — Weeks 11–12
+
+---
+
+**As a** developer
+**I want** an automated test suite covering parsers, services, and key UI components
+**So that** regressions are caught before they reach production and the CI/CD pipeline (US-030) has real tests to run
+
+**Acceptance Criteria**
+- [ ] Vitest configured in both `frontend/` and `backend/` with `npm test` scripts
+- [ ] Backend unit tests for: each Tree-sitter parser (JS/TS, Python, C#), import path resolution, issue detection (circular deps, god files, dead code, high coupling), and embedding chunking logic
+- [ ] Backend integration tests for: `POST /api/repos`, `POST /api/repos/:id/reindex`, `GET /api/repos/:id/analysis`, `POST /api/search/:id`, `POST /api/review/:id` (mocking Supabase + external APIs)
+- [ ] Frontend component tests for: DependencyGraph (renders nodes/edges), MetricsPanel (sort, filter, risk highlighting), IssuesPanel (grouping, severity badges), SearchPanel (empty state, streaming display), CodeReviewPanel (mode toggle, validation)
+- [ ] Coverage target: ≥70% line coverage on `backend/src/services/` and `backend/src/parsers/`
+- [ ] All tests pass in under 60 seconds
+
+**Note**
+> Use Vitest for both frontend and backend — it's Vite-native, fast, and has a Jest-compatible API. Frontend tests use `@testing-library/react` + `jsdom`. Backend integration tests mock the Supabase client and external API calls (OpenAI, Anthropic, GitHub) to avoid real network calls. This story is a **prerequisite for US-030** (CI/CD) — without it, the pipeline only runs lint.
+
+---
+
+### US-036: Global Toast & Error Handling
+
+**Labels:** `epic/dashboard`
+**Milestone:** Sprint 6 — Weeks 11–12
+
+---
+
+**As a** developer using CodeLens
+**I want** errors and success feedback to appear as polished, non-blocking toasts instead of browser `alert()` dialogs
+**So that** the app feels production-grade and I never lose context when something goes wrong
+
+**Acceptance Criteria**
+- [ ] A `<ToastProvider>` context + `useToast()` hook mounted at the app root
+- [ ] Toast variants: `success` (green), `error` (red), `warning` (amber), `info` (blue)
+- [ ] Toasts appear bottom-right, stack vertically, auto-dismiss after 5 seconds, dismissible with ✕
+- [ ] All 3 existing `alert()` calls replaced with `toast.error()` (ConnectGitHubModal, Dashboard, RepoView)
+- [ ] A React error boundary wrapping the app catches unhandled render errors and shows a recovery UI
+- [ ] API errors from `fetch()` in Dashboard, RepoView, ConnectGitHubModal, and UploadRepoModal surface as toasts instead of inline error blocks where appropriate
+- [ ] Toasts animate in/out (slide + fade)
+
+**Note**
+> No third-party toast library — build a lightweight `Toast.jsx` component with a `ToastProvider` context that manages a toast queue. Each toast is an object `{ id, type, message, duration }`. The provider renders a fixed-position container in the bottom-right corner. Use Tailwind transitions for the slide/fade animation. The error boundary should offer a "Reload page" button and optionally log the error to the console.
+
+---
+
+### US-037: Repository File Browser
+
+**Labels:** `epic/graph` `epic/ai`
+**Milestone:** Sprint 6 — Weeks 11–12
+
+---
+
+**As a** developer exploring a codebase
+**I want** to browse the repository's file tree and read source code directly within CodeLens
+**So that** I don't have to leave the app to understand what a file actually contains
+
+**Acceptance Criteria**
+- [ ] New "Files" tab added to the repo sidebar navigation (between Metrics and Issues)
+- [ ] Left panel: collapsible directory tree built from `graph_nodes` file paths
+- [ ] Right panel: syntax-highlighted source code viewer (using `react-syntax-highlighter`, already a dependency)
+- [ ] File content fetched from `code_chunks` table — concatenated chunks for the selected file, ordered by `start_line`
+- [ ] Backend endpoint: `GET /api/repos/:repoId/file?path=src/index.js` returns full file content from stored chunks
+- [ ] Clicking a file in the tree loads its content; active file highlighted in the tree
+- [ ] Line numbers displayed; clicking a line number copies `filename:lineNumber` to clipboard
+- [ ] If a file has no stored chunks (unsupported language), show a "No indexed content for this file" message
+- [ ] File tree shows language icons (coloured dots matching the graph's language colour scheme)
+
+**Note**
+> The directory tree is built entirely from the `graph_nodes` file paths — split each path by `/` and build a nested tree structure client-side. No extra API call needed for the tree itself. The file content endpoint queries `code_chunks WHERE repo_id = $1 AND file_path = $2 ORDER BY start_line ASC` and concatenates the `content` fields. If no chunks exist for a file, return a 404 with a descriptive message. Reuse the syntax highlighter theme from `SharedAnswerComponents.jsx` for visual consistency.
+
+---
+
 ## 🏷️ Suggested GitHub Labels
 
 | Label | Color | Description |
@@ -1130,6 +1211,6 @@ US-026: AI Code Review Panel
 | Sprint 3 — Visualisation & Metrics | Weeks 5–6 | US-013 → US-016 |
 | Sprint 4 — AI Layer & Impact Analysis | Weeks 7–8 | US-017 → US-021 |
 | Sprint 5 — Polish & Stabilisation | Weeks 9–10 | US-022 → US-025, US-027 |
-| Sprint 6 — Advanced Integrations | Weeks 11–12 | US-026, US-028, US-032, US-033 |
-| Sprint 7 — DevOps & Deployment | Weeks 13–14 | US-029 → US-031 |
+| Sprint 6 — Advanced Integrations & Quality | Weeks 11–12 | US-026, US-028, US-032, US-033, US-035, US-036, US-037 |
+| Sprint 7 — DevOps & Deployment | Weeks 13–14 | US-029 → US-031 (US-030 depends on US-035) |
 | Sprint 8 — Teams & Collaboration | Weeks 15–16 | US-034 |
