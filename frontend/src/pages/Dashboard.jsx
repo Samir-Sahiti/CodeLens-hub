@@ -3,6 +3,71 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import ConnectGitHubModal from '../components/ConnectGitHubModal';
 import UploadRepoModal from '../components/UploadRepoModal';
+import CreateTeamModal from '../components/CreateTeamModal';
+
+function StatusBadge({ status }) {
+  switch (status) {
+    case 'ready':
+      return <span className="inline-flex items-center rounded-full bg-green-500/10 px-2 py-1 text-xs font-medium text-green-400 ring-1 ring-inset ring-green-500/20">Ready</span>;
+    case 'failed':
+      return <span className="inline-flex items-center rounded-full bg-red-500/10 px-2 py-1 text-xs font-medium text-red-400 ring-1 ring-inset ring-red-500/20">Failed</span>;
+    case 'indexing':
+      return <span className="inline-flex items-center rounded-full bg-blue-500/10 px-2 py-1 text-xs font-medium text-blue-400 ring-1 ring-inset ring-blue-500/20 animate-pulse">Indexing</span>;
+    default:
+      return <span className="inline-flex items-center rounded-full bg-gray-500/10 px-2 py-1 text-xs font-medium text-gray-400 ring-1 ring-inset ring-gray-500/20">Pending</span>;
+  }
+}
+
+function RepoCard({ repo, onRetry }) {
+  return (
+    <Link
+      key={repo.id}
+      to={`/repo/${repo.id}`}
+      className="group relative flex flex-col justify-between rounded-xl border border-gray-800 bg-gray-900 p-6 transition hover:border-gray-700 hover:bg-gray-800/80 hover:shadow-lg"
+    >
+      <div className="mb-4 flex items-start justify-between">
+        <div>
+          <h2 className="text-xl font-semibold text-gray-100 group-hover:text-indigo-400 transition-colors">
+            {repo.name}
+          </h2>
+          <p className="text-sm text-gray-500 mt-1">
+            {repo.source === 'github' ? 'GitHub' : 'Upload'} • {repo.file_count || 0} files
+            {repo.shared && repo.team_name && (
+              <span className="ml-2 inline-flex items-center rounded-full bg-violet-500/10 px-2 py-0.5 text-xs font-medium text-violet-400 ring-1 ring-inset ring-violet-500/20">
+                {repo.team_name}
+              </span>
+            )}
+          </p>
+        </div>
+        <div className="flex flex-col items-end gap-1.5">
+          <StatusBadge status={repo.status} />
+          {repo.auto_sync_enabled && (
+            <span className="inline-flex items-center rounded-full bg-indigo-500/10 px-2 py-0.5 text-xs font-medium text-indigo-400 ring-1 ring-inset ring-indigo-500/20">
+              Auto-sync
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between border-t border-gray-800/50 pt-4 mt-2">
+        <span className="text-xs text-gray-500">
+          {repo.indexed_at
+            ? `Indexed on ${new Date(repo.indexed_at).toLocaleDateString()}`
+            : `Added on ${new Date(repo.created_at).toLocaleDateString()}`}
+        </span>
+
+        {repo.status === 'failed' && !repo.shared && (
+          <button
+            onClick={(e) => onRetry(e, repo.id)}
+            className="rounded bg-red-900/40 px-3 py-1 text-xs font-semibold text-red-300 hover:bg-red-800/60 transition"
+          >
+            Retry
+          </button>
+        )}
+      </div>
+    </Link>
+  );
+}
 
 export default function Dashboard() {
   const { session } = useAuth();
@@ -12,6 +77,8 @@ export default function Dashboard() {
   const [error, setError] = useState(null);
   const [isConnectModalOpen, setIsConnectModalOpen] = useState(false);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
+  const [isCreateTeamOpen, setIsCreateTeamOpen] = useState(false);
+  const [teamCreatedMsg, setTeamCreatedMsg] = useState(null);
 
   const fetchRepos = useCallback(async () => {
     if (!session?.access_token) return;
@@ -79,19 +146,6 @@ export default function Dashboard() {
     }
   };
 
-  const StatusBadge = ({ status }) => {
-    switch (status) {
-      case 'ready':
-        return <span className="inline-flex items-center rounded-full bg-green-500/10 px-2 py-1 text-xs font-medium text-green-400 ring-1 ring-inset ring-green-500/20">Ready</span>;
-      case 'failed':
-        return <span className="inline-flex items-center rounded-full bg-red-500/10 px-2 py-1 text-xs font-medium text-red-400 ring-1 ring-inset ring-red-500/20">Failed</span>;
-      case 'indexing':
-        return <span className="inline-flex items-center rounded-full bg-blue-500/10 px-2 py-1 text-xs font-medium text-blue-400 ring-1 ring-inset ring-blue-500/20 animate-pulse">Indexing</span>;
-      default: // pending
-        return <span className="inline-flex items-center rounded-full bg-gray-500/10 px-2 py-1 text-xs font-medium text-gray-400 ring-1 ring-inset ring-gray-500/20">Pending</span>;
-    }
-  };
-
   if (isLoading) {
     return (
       <div className="flex h-full items-center justify-center p-8">
@@ -104,21 +158,33 @@ export default function Dashboard() {
     <div className="min-h-screen bg-gray-950 p-8 text-white">
       <div className="mb-8 flex items-center justify-between">
         <h1 className="text-3xl font-bold tracking-tight">Your Repositories</h1>
-        <div className="flex gap-4">
+        <div className="flex gap-3">
           <button
-             onClick={() => setIsUploadModalOpen(true)}
-             className="rounded-md bg-gray-800 px-4 py-2 text-sm font-semibold text-white hover:bg-gray-700 transition"
+            onClick={() => setIsCreateTeamOpen(true)}
+            className="rounded-md border border-gray-700 bg-gray-900 px-4 py-2 text-sm font-semibold text-gray-300 hover:bg-gray-800 transition"
+          >
+            Create Team
+          </button>
+          <button
+            onClick={() => setIsUploadModalOpen(true)}
+            className="rounded-md bg-gray-800 px-4 py-2 text-sm font-semibold text-white hover:bg-gray-700 transition"
           >
             Upload Repository
           </button>
           <button
-             onClick={() => setIsConnectModalOpen(true)}
-             className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 transition shadow-sm"
+            onClick={() => setIsConnectModalOpen(true)}
+            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 transition shadow-sm"
           >
             Connect GitHub
           </button>
         </div>
       </div>
+
+      {teamCreatedMsg && (
+        <div className="mb-6 rounded-lg border border-green-800 bg-green-900/30 px-5 py-3 text-sm text-green-300">
+          {teamCreatedMsg}
+        </div>
+      )}
 
       {error && (
         <div className="mb-6 rounded-md bg-red-900/50 p-4 border border-red-800 text-red-200">
@@ -139,44 +205,33 @@ export default function Dashboard() {
           </div>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {repos.map(repo => (
-            <Link
-              key={repo.id}
-              to={`/repo/${repo.id}`}
-              className="group relative flex flex-col justify-between rounded-xl border border-gray-800 bg-gray-900 p-6 transition hover:border-gray-700 hover:bg-gray-800/80 hover:shadow-lg"
-            >
-              <div className="mb-4 flex items-start justify-between">
-                <div>
-                  <h2 className="text-xl font-semibold text-gray-100 group-hover:text-indigo-400 transition-colors">
-                    {repo.name}
-                  </h2>
-                  <p className="text-sm text-gray-500 mt-1">
-                    {repo.source === 'github' ? 'GitHub' : 'Upload'} • {repo.file_count || 0} files
-                  </p>
+        <>
+          {/* Own repos */}
+          {(() => {
+            const ownedRepos = repos.filter(r => !r.shared);
+            const sharedRepos = repos.filter(r => r.shared);
+            return (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {ownedRepos.map(repo => (
+                    <RepoCard key={repo.id} repo={repo} onRetry={handleRetry} />
+                  ))}
                 </div>
-                <StatusBadge status={repo.status} />
-              </div>
 
-              <div className="flex items-center justify-between border-t border-gray-800/50 pt-4 mt-2">
-                <span className="text-xs text-gray-500">
-                  {repo.indexed_at 
-                    ? `Indexed on ${new Date(repo.indexed_at).toLocaleDateString()}`
-                    : `Added on ${new Date(repo.created_at).toLocaleDateString()}`}
-                </span>
-                
-                {repo.status === 'failed' && (
-                  <button
-                    onClick={(e) => handleRetry(e, repo.id)}
-                    className="rounded bg-red-900/40 px-3 py-1 text-xs font-semibold text-red-300 hover:bg-red-800/60 transition"
-                  >
-                    Retry
-                  </button>
+                {sharedRepos.length > 0 && (
+                  <div className="mt-10">
+                    <h2 className="mb-4 text-lg font-semibold text-gray-300">Team Repositories</h2>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {sharedRepos.map(repo => (
+                        <RepoCard key={repo.id} repo={repo} onRetry={handleRetry} />
+                      ))}
+                    </div>
+                  </div>
                 )}
-              </div>
-            </Link>
-          ))}
-        </div>
+              </>
+            );
+          })()}
+        </>
       )}
 
       <ConnectGitHubModal
@@ -190,6 +245,18 @@ export default function Dashboard() {
         isOpen={isUploadModalOpen}
         onClose={() => setIsUploadModalOpen(false)}
         onConnected={fetchRepos}
+      />
+
+      <CreateTeamModal
+        isOpen={isCreateTeamOpen}
+        onClose={() => setIsCreateTeamOpen(false)}
+        onCreated={(team, count) => {
+          fetchRepos();
+          setTeamCreatedMsg(
+            `Team "${team.name}" created with ${count} collaborator${count !== 1 ? 's' : ''} added. They will see the shared repository when they sign in.`
+          );
+          setTimeout(() => setTeamCreatedMsg(null), 8000);
+        }}
       />
     </div>
   );

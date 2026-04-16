@@ -32,4 +32,10 @@ router.post('/:repoId/reindex', requireAuth, repoController.reindexRepo);
 // Delete a repo and its index
 router.delete('/:repoId', requireAuth, repoController.deleteRepo);
 
+// Update mutable repo fields (e.g. auto_sync_enabled)
+router.patch('/:repoId', requireAuth, repoController.updateRepo);
+
+// Generate (or regenerate) a webhook secret for a GitHub repo — secret shown once
+router.get('/:repoId/webhook', requireAuth, repoController.generateWebhook);
+
 module.exports = router;

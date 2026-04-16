@@ -29,6 +29,22 @@ const upsertProfile = async (req, res) => {
     return res.status(500).json({ error: 'Failed to save profile' });
   }
 
+  // Auto-join teams: if any team_members rows reference this GitHub username
+  // but have no user_id yet, backfill them now so the new user instantly sees
+  // shared repos on their dashboard.
+  if (github_username) {
+    const { error: teamJoinErr } = await supabaseAdmin
+      .from('team_members')
+      .update({ user_id: userId })
+      .eq('github_username', github_username)
+      .is('user_id', null);
+
+    if (teamJoinErr) {
+      // Non-fatal — log and continue
+      console.error('[upsertProfile] team auto-join failed:', teamJoinErr);
+    }
+  }
+
   res.json({ ok: true });
 };
 
