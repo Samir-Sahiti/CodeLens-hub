@@ -340,6 +340,7 @@ export default function DependencyGraph({
   onNodeSelect,
   onAnalyseImpact,
   onClearImpactAnalysis,
+  repoName,
 }) {
   const containerRef = useRef(null);
   const svgRef = useRef(null);
@@ -348,6 +349,50 @@ export default function DependencyGraph({
   const [contextMenu, setContextMenu] = useState(null);
   const [clusteringEnabled, setClusteringEnabled] = useState(true);
   const [expandedClusters, setExpandedClusters] = useState(new Set());
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+
+  const exportFilename = repoName ? repoName.replace(/[^\w.-]/g, '_') : 'graph';
+
+  const exportSVG = () => {
+    const svgEl = svgRef.current;
+    if (!svgEl) return;
+    const serializer = new XMLSerializer();
+    const svgStr = serializer.serializeToString(svgEl);
+    const blob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${exportFilename}-graph.svg`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setExportMenuOpen(false);
+  };
+
+  const exportPNG = async () => {
+    setExportMenuOpen(false);
+    let canvas;
+    if (renderMode === 'canvas') {
+      canvas = canvasRef.current;
+      if (!canvas) return;
+    } else {
+      const svgEl = svgRef.current;
+      if (!svgEl) return;
+      const svgStr = new XMLSerializer().serializeToString(svgEl);
+      const blob = new Blob([svgStr], { type: 'image/svg+xml' });
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      await new Promise((resolve) => { img.onload = resolve; img.src = url; });
+      canvas = document.createElement('canvas');
+      canvas.width = svgEl.clientWidth * 2;
+      canvas.height = svgEl.clientHeight * 2;
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+    }
+    const a = document.createElement('a');
+    a.href = canvas.toDataURL('image/png');
+    a.download = `${exportFilename}-graph.png`;
+    a.click();
+  };
 
   const issueNodePaths = useMemo(() => {
     const pathSet = new Set();
@@ -482,13 +527,16 @@ export default function DependencyGraph({
   }, [toastVisible]);
 
   useEffect(() => {
-    if (!contextMenu) return undefined;
+    if (!contextMenu && !exportMenuOpen) return undefined;
 
-    const handleOutsideClick = () => setContextMenu(null);
+    const handleOutsideClick = () => {
+      setContextMenu(null);
+      setExportMenuOpen(false);
+    };
     window.addEventListener('pointerdown', handleOutsideClick);
 
     return () => window.removeEventListener('pointerdown', handleOutsideClick);
-  }, [contextMenu]);
+  }, [contextMenu, exportMenuOpen]);
 
   const { resetView } = useGraphSimulation({
     containerRef,
@@ -575,6 +623,34 @@ export default function DependencyGraph({
                 Collapse all
               </button>
             )}
+            <div className="relative">
+              <button
+                onClick={() => setExportMenuOpen((v) => !v)}
+                className="rounded-full border border-gray-700 bg-gray-950/80 px-3 py-1 text-xs font-medium text-gray-400 transition hover:border-gray-500 hover:text-gray-200"
+              >
+                Export image
+              </button>
+              {exportMenuOpen && (
+                <div
+                  className="absolute right-0 top-full z-30 mt-1 min-w-36 rounded-xl border border-gray-700 bg-gray-950/95 p-1.5 shadow-2xl shadow-black/50 backdrop-blur"
+                  onPointerDown={(e) => e.stopPropagation()}
+                >
+                  <button
+                    onClick={exportSVG}
+                    disabled={renderMode === 'canvas'}
+                    className="block w-full rounded-lg px-3 py-2 text-left text-sm text-gray-100 transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Export as SVG
+                  </button>
+                  <button
+                    onClick={exportPNG}
+                    className="block w-full rounded-lg px-3 py-2 text-left text-sm text-gray-100 transition hover:bg-gray-800"
+                  >
+                    Export as PNG
+                  </button>
+                </div>
+              )}
+            </div>
             <button
               onClick={resetView}
               className="rounded-full border border-gray-700 bg-gray-950/80 px-4 py-2 text-sm font-medium text-gray-100 transition hover:border-gray-500 hover:bg-gray-900"

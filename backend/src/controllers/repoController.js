@@ -1,6 +1,7 @@
 /**
- * Repository controller 
+ * Repository controller
  */
+const crypto = require('crypto');
 const { supabaseAdmin } = require('../db/supabase');
 const indexer = require('../services/indexer');
 
@@ -74,20 +75,64 @@ const uploadRepo = async (req, res) => {
   res.json({ ok: true, repo });
 };
 
-/** GET /api/repos — list repos belonging to the authenticated user */
+/** GET /api/repos — list repos owned by the user + repos shared via teams */
 const listRepos = async (req, res) => {
-  const { data, error } = await supabaseAdmin
+  // Own repos
+  const { data: ownedRepos, error: ownedErr } = await supabaseAdmin
     .from('repositories')
     .select('*')
     .eq('user_id', req.user.id)
     .order('created_at', { ascending: false });
 
-  if (error) {
-    console.error('[listRepos] Error:', error);
+  if (ownedErr) {
+    console.error('[listRepos] Error fetching own repos:', ownedErr);
     return res.status(500).json({ error: 'Failed to fetch repositories' });
   }
 
-  res.json({ repos: data });
+  // Team-shared repos: first get team IDs the user belongs to, then fetch repos
+  const { data: memberships } = await supabaseAdmin
+    .from('team_members')
+    .select('team_id')
+    .eq('user_id', req.user.id);
+
+  const teamIds = (memberships || []).map((m) => m.team_id);
+
+  let teamRepoRows = [];
+  let teamErr = null;
+  if (teamIds.length > 0) {
+    const { data, error } = await supabaseAdmin
+      .from('team_repositories')
+      .select('repo_id, repositories(*), teams(name)')
+      .in('team_id', teamIds);
+    teamRepoRows = data || [];
+    teamErr = error;
+  }
+
+  if (teamErr) {
+    console.error('[listRepos] Error fetching team repos:', teamErr);
+    // Non-fatal: return own repos only
+    return res.json({ repos: ownedRepos || [] });
+  }
+
+  const ownedIds = new Set((ownedRepos || []).map((r) => r.id));
+  const sharedRepos = (teamRepoRows || [])
+    .filter((row) => row.repositories && !ownedIds.has(row.repositories.id))
+    .map((row) => ({
+      ...row.repositories,
+      shared: true,
+      team_name: row.teams?.name || null,
+    }));
+
+  // Deduplicate shared repos (a repo can be in multiple teams)
+  const sharedById = new Map();
+  sharedRepos.forEach((r) => sharedById.set(r.id, r));
+
+  const repos = [
+    ...(ownedRepos || []),
+    ...Array.from(sharedById.values()),
+  ];
+
+  res.json({ repos });
 };
 
 /** GET /api/repos/:repoId/status — polling endpoint for indexing progress */
@@ -185,17 +230,45 @@ const reindexRepo = async (req, res) => {
   res.json({ ok: true, message: 'Re-indexing started' });
 };
 
+/**
+ * Checks if the current user can access a given repo — either as owner or team member.
+ */
+async function canAccessRepo(repoId, userId) {
+  // Owner check
+  const { data: owned } = await supabaseAdmin
+    .from('repositories')
+    .select('id')
+    .eq('id', repoId)
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (owned) return true;
+
+  // Team membership check
+  const { data: memberships } = await supabaseAdmin
+    .from('team_members')
+    .select('team_id')
+    .eq('user_id', userId);
+  const teamIds = (memberships || []).map((m) => m.team_id);
+  if (teamIds.length === 0) return false;
+
+  const { data: teamRepo } = await supabaseAdmin
+    .from('team_repositories')
+    .select('repo_id')
+    .eq('repo_id', repoId)
+    .in('team_id', teamIds)
+    .maybeSingle();
+
+  return !!teamRepo;
+}
+
 /** GET /api/repos/:repoId/analysis — fetch nodes, edges, and issues in a single request */
 const getAnalysisData = async (req, res) => {
   const { repoId } = req.params;
   console.log(`[getAnalysisData] Fetching analysis data for repoId: ${repoId} for user: ${req.user.id}`);
-  
-  const { data: repo, error: fetchError } = await supabaseAdmin
-    .from('repositories')
-    .select('id')
-    .eq('id', repoId)
-    .eq('user_id', req.user.id)
-    .single();
+
+  const allowed = await canAccessRepo(repoId, req.user.id);
+  const repo = allowed ? { id: repoId } : null;
+  const fetchError = allowed ? null : new Error('not found');
 
   if (fetchError || !repo) {
     return res.status(404).json({ error: 'Repository not found or unauthorized' });
@@ -229,4 +302,72 @@ const getAnalysisData = async (req, res) => {
   }
 };
 
-module.exports = { connectRepo, uploadRepo, listRepos, getStatus, reindexRepo, deleteRepo, getAnalysisData };
+/**
+ * PATCH /api/repos/:repoId — update mutable repo fields (auto_sync_enabled)
+ */
+const updateRepo = async (req, res) => {
+  const { repoId } = req.params;
+  const { auto_sync_enabled } = req.body;
+
+  if (typeof auto_sync_enabled !== 'boolean') {
+    return res.status(400).json({ error: 'auto_sync_enabled must be a boolean' });
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from('repositories')
+    .update({ auto_sync_enabled })
+    .eq('id', repoId)
+    .eq('user_id', req.user.id)
+    .select()
+    .single();
+
+  if (error || !data) {
+    console.error('[updateRepo]', error);
+    return res.status(404).json({ error: 'Repository not found or unauthorized' });
+  }
+
+  res.json({ ok: true, repo: data });
+};
+
+/**
+ * GET /api/repos/:repoId/webhook — generate (or regenerate) a webhook secret.
+ * Returns the secret exactly once — store it immediately as it cannot be retrieved again.
+ */
+const generateWebhook = async (req, res) => {
+  const { repoId } = req.params;
+
+  // Verify ownership
+  const { data: repo, error: fetchError } = await supabaseAdmin
+    .from('repositories')
+    .select('id, source')
+    .eq('id', repoId)
+    .eq('user_id', req.user.id)
+    .single();
+
+  if (fetchError || !repo) {
+    return res.status(404).json({ error: 'Repository not found or unauthorized' });
+  }
+
+  if (repo.source !== 'github') {
+    return res.status(400).json({ error: 'Webhooks are only supported for GitHub repositories' });
+  }
+
+  const secret = crypto.randomBytes(32).toString('hex');
+
+  const { error: updateError } = await supabaseAdmin
+    .from('repositories')
+    .update({ webhook_secret: secret })
+    .eq('id', repoId);
+
+  if (updateError) {
+    console.error('[generateWebhook]', updateError);
+    return res.status(500).json({ error: 'Failed to save webhook secret' });
+  }
+
+  const backendUrl = process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 3001}`;
+  const webhookUrl = `${backendUrl}/api/webhooks/github`;
+
+  res.json({ ok: true, webhookUrl, secret });
+};
+
+module.exports = { connectRepo, uploadRepo, listRepos, getStatus, reindexRepo, deleteRepo, getAnalysisData, updateRepo, generateWebhook };
