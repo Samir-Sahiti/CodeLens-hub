@@ -18,7 +18,7 @@ const client = new OpenAI({
  * @param {string} query
  * @returns {{ answer: string, sources: string[] }}
  */
-const searchCodebase = async (repoId, query) => {
+const searchCodebase = async (_repoId, _query) => {
   // TODO: US-019 — logic for embedding retrieval and gpt-4-turbo call
   throw new Error('RAG pipeline not yet fully implemented');
 };

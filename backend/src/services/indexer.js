@@ -44,11 +44,9 @@ const startLocalIndexing = async (repoId, zipFilePath, repoName) => {
 
     // Check if zip contains supported files
     let hasSupportedFiles = false;
-    let fileCount = 0;
 
     for (const entry of zipEntries) {
       if (!entry.isDirectory) {
-        fileCount++;
         const ext = path.extname(entry.entryName).toLowerCase();
         if (VALID_EXTENSIONS.has(ext)) {
           hasSupportedFiles = true;

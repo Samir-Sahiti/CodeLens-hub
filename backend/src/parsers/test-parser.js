@@ -1,4 +1,4 @@
-const { parseFile, parseRepository } = require('./repositoryParser');
+const { parseFile: _parseFile, parseRepository } = require('./repositoryParser');
 
 const mockFiles = [
   {
