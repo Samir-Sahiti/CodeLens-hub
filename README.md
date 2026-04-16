@@ -4,171 +4,176 @@
 
 ---
 
-## Problem
+## Features
 
-When developers join a new team or work with an unfamiliar codebase, they spend days — sometimes weeks — manually tracing through hundreds of files just to understand how things connect. There is no efficient way to get a structural overview of a project, identify which files are risky to change, or understand the downstream impact of a modification before making it.
+### Interactive Dependency Graph
+Analyzes the repository and builds a visual, force-directed dependency graph. Nodes represent files, edges show how they relate. Supports both SVG rendering (small repos) and Canvas rendering (large repos with 300+ files), with clustering for very large graphs. Export the current graph view as PNG or SVG.
 
-Existing tools like GitHub and IDEs offer file browsers and search, but they are passive — they show you files, they do not explain relationships, flag risk, or answer questions about the system as a whole. Developers are left to build a mental model of the codebase manually, every single time.
+### Architectural Issue Detection
+Automatically detects structural problems: circular dependencies, god files, high coupling, and dead code. Issues are highlighted on the graph and grouped in a dedicated Issues panel.
 
----
+### File Metrics & Complexity Analysis
+Each file's lines of code, import/dependent count, and complexity score are surfaced in a sortable Metrics table. Critical and at-risk files are colour-coded for instant triage.
 
-## Solution
+### Change Impact Analysis (Blast Radius)
+Select any file to see exactly which other files would be affected by a change — direct and transitive dependents highlighted live on the graph and exportable as JSON.
 
-CodeLens analyzes a repository and gives developers an immediate, structured understanding of how the system is built. A developer connects a GitHub repository or uploads a project, and CodeLens indexes the entire codebase — mapping files, functions, dependencies, and relationships into a navigable knowledge layer.
+### Natural Language Code Search
+RAG-powered search over the indexed codebase. Queries like "How does authentication work?" return context-aware, streamed answers with source references. Powered by OpenAI embeddings and Groq LLM.
 
-Rather than replacing the developer's judgment, CodeLens augments it. It surfaces what matters: which files are critical, which are risky, what breaks if something changes, and where structural problems are hiding.
+### AI Code Review
+Paste a code snippet or describe a change and get a structured review — bug detection, security flags, and improvement suggestions — powered by Anthropic Claude.
 
----
+### GitHub Webhook Auto-sync
+Connect a GitHub webhook so the dependency graph and AI search index automatically re-index on every push to the default branch — no manual re-indexing required.
 
-## Key Features
-
-### 1. Codebase Structure Mapping — Interactive Dependency Graph
-Analyzes the repository and builds a visual, interactive dependency graph. Nodes represent files and modules, edges show how they relate. Developers can explore the architecture visually and understand the system at a glance rather than reading through files sequentially.
-
-### 2. Architectural Issue Detection
-Automatically detects structural problems including circular dependencies, tightly coupled modules, oversized god files, and potentially dead or unused code. Risk areas are highlighted directly on the graph so developers can prioritise what to address.
-
-### 3. File Impact & Complexity Analysis
-Presents each file's metrics in a clear table: number of dependencies, how many other files depend on it, and complexity indicators. This helps developers immediately identify critical files (high usage), risky files (high complexity + high usage), and low-value or unused files.
-
-### 4. Change Impact Analysis
-Before making a modification, a developer can select any file and see its blast radius — exactly which other parts of the system would be affected. This prevents unintended side effects and gives developers confidence when working in unfamiliar areas of the codebase.
-
-### 5. Intelligent Code Search
-A natural language search interface powered by a RAG (Retrieval-Augmented Generation) architecture. The codebase is chunked and indexed semantically, so queries like "How does authentication work?" or "Where is the payment logic?" return context-aware explanations with direct links to relevant code — not just keyword matches.
-
----
-
-## Target Users
-
-- **Software Developers** — working with large, complex, or unfamiliar codebases on a daily basis
-- **Engineering Teams & Tech Leads** — reviewing changes, onboarding new members, and maintaining architectural quality
-- **Software Architects** — analyzing dependencies, planning refactors, and identifying structural risk across a system
+### Team Organizations
+Create a Team backed by your GitHub repository's collaborator list. Collaborators automatically see the shared indexed repository on their dashboard the first time they sign into CodeLens — no duplicate indexing.
 
 ---
 
 ## Tech Stack
 
-### Frontend
-- **Framework**: React 18, built with Vite for optimal HMR and lightning-fast builds
-- **Styling**: Tailwind CSS for a modern, utility-first design system
-- **Visualisation**: D3.js (Force-Directed Graph) for interactive, physics-based dependency plotting
-- **Routing**: React Router DOM
-
-### Backend
-- **Environment**: Node.js + Express.js handling REST API layers and async indexing pipelines
-- **Code Parsing**: Tree-sitter for robust, cross-language Abstract Syntax Tree (AST) generation. Currently supports JavaScript, TypeScript, TSX, Python, and C#.
-- **Version Control API**: GitHub REST API (Octokit) for securely pulling repository file trees and raw source code
-
-### Database & Authentication
-- **Operational DB**: Supabase (PostgreSQL) storing indexed repo metadata, nodes, edges, and issues
-- **Authentication**: Supabase Auth handling secure sign-ins and JWT session management
-- **Vector Storage**: `pgvector` extension for storing and performing similarity searches on code embeddings
-
-### AI Integration (RAG Pipeline)
-- **Embeddings**: OpenAI API (`text-embedding-3-small` or equivalent) to generate semantic vectors for code chunks
-- **LLM Reasoning**: Anthropic Claude API / OpenAI GPT-4 to explain code structures and answer natural language queries based on retrieved context
-
-### Infrastructure
-- **Containerisation**: Docker & Docker Compose for reproducible local environments and streamlined service execution
+| Layer | Tech |
+|---|---|
+| Frontend | React 18, Vite, Tailwind CSS, D3.js v7, React Router 6 |
+| Backend | Node.js 20, Express 4 |
+| Database | PostgreSQL 15 (Supabase) + pgvector |
+| Auth | Supabase Auth, GitHub OAuth |
+| AST Parsing | Tree-sitter (JS, TS, TSX, Python, C#) |
+| Embeddings | OpenAI `text-embedding-3-small` (1536-dim) |
+| LLM / RAG | Groq API |
+| AI Code Review | Anthropic Claude (`@anthropic-ai/sdk`) |
+| GitHub Integration | Octokit |
+| Containerisation | Docker, Docker Compose |
+| CI/CD | GitHub Actions → GitHub Container Registry |
 
 ---
 
 ## Project Structure
 
 ```
-codelens/
-├── frontend/               # React + D3.js client
-│   ├── public/
-│   └── src/
-│       ├── components/     # Reusable UI components
-│       │   ├── graph/      # D3.js dependency graph components
-│       │   ├── search/     # Natural language search UI
-│       │   └── ui/         # General UI primitives
-│       ├── pages/          # Top-level route pages
-│       ├── hooks/          # Custom React hooks
-│       ├── utils/          # Helper functions
-│       └── lib/            # API client, Supabase client
+CodeLens-hub/
+├── frontend/src/
+│   ├── components/     # DependencyGraph, SearchPanel, CodeReviewPanel,
+│   │                   # CreateTeamModal, Layout, etc.
+│   ├── pages/          # Login, Dashboard, RepoView
+│   ├── context/        # AuthContext, RepoContext
+│   ├── hooks/          # useGraphSimulation (D3 physics)
+│   └── lib/            # supabase.js client
 │
-├── backend/                # Node.js + Express API
-│   └── src/
-│       ├── routes/         # Express route definitions
-│       ├── controllers/    # Request handlers
-│       ├── services/       # Core business logic
-│       ├── parsers/        # Tree-sitter AST parsing per language
-│       ├── ai/             # RAG pipeline, Claude API integration
-│       ├── db/             # Supabase queries and schema helpers
-│       └── middleware/     # Auth, error handling, validation
+├── backend/src/
+│   ├── index.js        # Express setup + route mounting
+│   ├── routes/         # repo, auth, search, analysis, review, webhooks, teams
+│   ├── controllers/    # repoController, webhookController, teamController, …
+│   ├── services/       # indexer.js, indexerService.js
+│   ├── parsers/        # Tree-sitter AST parsers per language
+│   ├── ai/             # ragService.js
+│   ├── db/             # Supabase admin client
+│   └── middleware/     # requireAuth, errorHandler
 │
-├── docs/                   # Project documentation
-├── scripts/                # Dev and utility scripts
-├── docker-compose.yml
-├── .env.example
+├── scripts/
+│   ├── setup.sh                 # Idempotent bootstrap
+│   ├── 001_initial_schema.sql   # Core DB schema
+│   ├── 002_webhooks.sql         # webhook_secret, auto_sync_enabled columns
+│   └── 003_teams.sql            # teams, team_members, team_repositories + RLS
+│
+├── .github/workflows/
+│   ├── ci.yml                   # Lint + test on push / PR
+│   └── cd.yml                   # Build & push Docker images to GHCR on main
+│
+├── docker-compose.yml           # Local development (hot-reload)
+├── docker-compose.prod.yml      # Production (no mounts, non-root containers)
+├── DEPLOYMENT.md                # Step-by-step production hosting guide
 └── README.md
 ```
 
 ---
 
-## Development Roadmap
-
-The project follows an Agile methodology across five two-week sprints.
-
-| Sprint | Weeks | Focus | Goal |
-|--------|-------|-------|------|
-| 1 | 1–2 | Foundation | Project setup, Supabase config, GitHub API integration, basic file upload. User can connect a repo and have it indexed. |
-| 2 | 3–4 | Core Analysis Engine | Tree-sitter AST parsing, dependency extraction, graph data model. System produces a structured dependency map. |
-| 3 | 5–6 | Visualisation & Metrics | D3.js interactive graph, complexity metrics table, architectural issue detection. Developers can visually explore the codebase and see flagged risk areas. |
-| 4 | 7–8 | AI Layer & Impact Analysis | RAG pipeline, natural language search interface, change impact analysis. Developers can ask questions and simulate blast radius. |
-| 5 | 9–10 | Polish & Stabilisation | UI refinement, performance optimisation, bug fixing, stress-testing the RAG pipeline. Demo-ready product. |
-
----
-
-## Getting Started
+## Getting Started (Local)
 
 ### Prerequisites
 
-- **Node.js 18+** — [nodejs.org](https://nodejs.org)
-- **Docker Desktop** — for running the local Postgres instance
-- **Git Bash / WSL / macOS/Linux terminal** — to run `setup.sh`
-- **Supabase project** — create one free at [supabase.com](https://supabase.com)
-- **GitHub OAuth App** — register at GitHub → Settings → Developer settings → OAuth Apps
-- **Anthropic API key** — for Claude code search (Sprint 4)
-- **OpenAI API key** — for embedding generation (`text-embedding-3-small`)
+- **Node.js 20+**
+- **Docker Desktop** — for local Postgres (or use an existing Supabase project)
+- **Supabase project** — [supabase.com](https://supabase.com)
+- **GitHub OAuth App** — GitHub → Settings → Developer settings → OAuth Apps
 
-### One-time database setup
-
-Before running the app, apply the database migration:
-
-1. In your Supabase dashboard go to **Database → Extensions** and enable **`vector`** (pgvector)
-2. Open **SQL Editor → New query**, paste the contents of [`scripts/001_initial_schema.sql`](scripts/001_initial_schema.sql), and click **Run**
-
-### Local setup
+### 1. Clone and bootstrap
 
 ```bash
-# Clone the repository
-git clone https://github.com/your-org/codelens-hub.git
-cd codelens-hub
+git clone https://github.com/Samir-Sahiti/CodeLens-hub.git
+cd CodeLens-hub
 
-# Bootstrap — installs deps and copies .env.example → .env (idempotent)
+# Installs deps and copies .env.example → .env
 bash scripts/setup.sh
+```
 
-# Fill in your credentials in .env
-# Required: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY,
-#           VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY,
-#           GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET,
-#           ANTHROPIC_API_KEY, OPENAI_API_KEY
+### 2. Configure environment
 
-# Start local Postgres
-docker-compose up -d
+Fill in `.env` with your credentials:
 
-# In terminal 1 — start the Express API (localhost:3001)
+```
+SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
+VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY
+GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_CALLBACK_URL
+OPENAI_API_KEY        # embeddings
+GROQ_API_KEY          # RAG LLM responses
+```
+
+### 3. Apply database migrations
+
+In your Supabase dashboard → **SQL Editor**, run these in order:
+
+1. `scripts/001_initial_schema.sql`
+2. `scripts/002_webhooks.sql`
+3. `scripts/003_teams.sql`
+
+Also enable the **`vector`** extension under Database → Extensions.
+
+### 4. Run the app
+
+```bash
+# Terminal 1 — Express API (localhost:3001)
 cd backend && npm run dev
 
-# In terminal 2 — start the Vite dev server (localhost:3000)
+# Terminal 2 — Vite dev server (localhost:3000)
 cd frontend && npm run dev
 ```
 
-The frontend proxies all `/api/*` and `/auth/*` requests to the backend automatically — no CORS configuration needed in development.
+The frontend proxies all `/api/*` requests to the backend — no CORS config needed in development.
+
+### Or with Docker
+
+```bash
+docker-compose up -d
+```
+
+---
+
+## Production Deployment
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for a full step-by-step guide covering:
+- Supabase production project setup
+- GitHub OAuth App configuration
+- Backend on Render, frontend on Vercel
+- CI/CD via GitHub Actions → GHCR
+- CORS verification and branch protection
+
+---
+
+## API Routes
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Health check |
+| `*` | `/api/auth/*` | GitHub OAuth + profile sync |
+| `*` | `/api/repos/*` | Connect repos, upload ZIPs, re-index, webhook config |
+| `*` | `/api/search/*` | RAG code search (SSE streaming) |
+| `*` | `/api/analysis/*` | Dependency graph, metrics, issues, impact |
+| `*` | `/api/review/*` | AI code review |
+| `POST` | `/api/webhooks/github` | GitHub push event receiver |
+| `*` | `/api/teams/*` | Team CRUD + collaborator sync |
 
 ---
 
