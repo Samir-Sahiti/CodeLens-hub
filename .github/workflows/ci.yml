@@ -21,8 +21,11 @@ jobs:
           node-version: 20
 
       # ── Frontend ────────────────────────────────────────────────────────────
+      # npm ci requires a lockfile built on the same platform (Linux-specific
+      # optional deps from jsdom are absent from the Windows-generated lockfile).
+      # npm install reads package.json and installs correct versions on any OS.
       - name: Install frontend dependencies
-        run: npm ci
+        run: npm install
         working-directory: frontend
 
       - name: Lint frontend
