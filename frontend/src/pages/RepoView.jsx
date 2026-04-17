@@ -812,7 +812,7 @@ export default function RepoView() {
                 onNodeSelect={handleNodeSelect}
                 onAnalyseImpact={handleStartImpactAnalysis}
                 onClearImpactAnalysis={handleClearImpactAnalysis}
-                onChatWithFile={(node) => setChatFilePath(node.file_path)}
+                onChatWithFile={(filePath) => setChatFilePath(filePath)}
                 repoName={repo?.name}
               />
             </div>

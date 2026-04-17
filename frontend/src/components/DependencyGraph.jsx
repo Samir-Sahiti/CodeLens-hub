@@ -90,7 +90,7 @@ function GraphDetailsPanel({ node, onChatWithFile }) {
           </div>
 
           <button
-            onClick={() => onChatWithFile?.(node)}
+            onClick={() => onChatWithFile?.(node.file_path)}
             className="mt-5 rounded-xl border border-indigo-500/30 bg-indigo-500/10 px-4 py-3 text-sm font-semibold text-indigo-200 transition hover:bg-indigo-500/20"
           >
             Chat with this file
@@ -706,7 +706,7 @@ export default function DependencyGraph({
             </button>
             <button
               onClick={() => {
-                onChatWithFile?.(contextMenu.node);
+                onChatWithFile?.(contextMenu.node.file_path);
                 setContextMenu(null);
               }}
               className="block w-full rounded-lg px-3 py-2 text-left text-sm text-indigo-300 transition hover:bg-gray-800"
