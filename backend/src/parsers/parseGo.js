@@ -31,7 +31,6 @@ const parseGo = (filePath, content, allFiles) => {
     const tree = parser.parse(content);
 
     const imports = new Set();
-    const exports = new Set();
 
     const query = new Parser.Query(Go, queryStr);
     const matches = query.matches(tree.rootNode);
@@ -41,7 +40,7 @@ const parseGo = (filePath, content, allFiles) => {
         if (capture.name === 'import_path') {
           let rawPath = capture.node.text;
           if ((rawPath.startsWith('"') && rawPath.endsWith('"')) ||
-              (rawPath.startsWith('\`') && rawPath.endsWith('\`'))) {
+              (rawPath.startsWith('`') && rawPath.endsWith('`'))) {
             rawPath = rawPath.slice(1, -1);
           }
           const resolved = resolveGoImport(rawPath, allFiles);
