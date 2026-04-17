@@ -41,8 +41,10 @@ jobs:
       - name: Install backend build tools
         run: sudo apt-get update && sudo apt-get install -y python3 make g++
 
+      # Same reason as frontend: Windows-generated lockfile lacks Linux-specific
+      # optional deps (from vitest/esbuild). npm install resolves correctly on any OS.
       - name: Install backend dependencies
-        run: npm ci
+        run: npm install
         working-directory: backend
 
       - name: Lint backend
