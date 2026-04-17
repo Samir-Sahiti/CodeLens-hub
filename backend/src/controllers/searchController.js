@@ -18,8 +18,13 @@ const { OpenAI }     = require('openai');
 const Anthropic      = require('@anthropic-ai/sdk');
 const { supabaseAdmin } = require('../db/supabase');
 
-const openai    = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const _openai    = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const _anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+function _proxy(real, key) {
+  return new Proxy(real, { get(_t, p) { const a = globalThis[key] || real; const v = a[p]; return typeof v === 'function' ? v.bind(a) : v; } });
+}
+const openai    = _proxy(_openai,    '__CODELENS_OPENAI__');
+const anthropic = _proxy(_anthropic, '__CODELENS_ANTHROPIC__');
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -38,4 +38,7 @@ router.patch('/:repoId', requireAuth, repoController.updateRepo);
 // Generate (or regenerate) a webhook secret for a GitHub repo — secret shown once
 router.get('/:repoId/webhook', requireAuth, repoController.generateWebhook);
 
+// Fetch concatenated source content for a file from code_chunks
+router.get('/:repoId/file', requireAuth, repoController.getFileContent);
+
 module.exports = router;

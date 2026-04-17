@@ -50,7 +50,7 @@ function GraphToast({ message, visible }) {
   );
 }
 
-function GraphDetailsPanel({ node }) {
+function GraphDetailsPanel({ node, onChatWithFile }) {
   return (
     <aside
       className={`w-72 shrink-0 rounded-2xl border border-gray-800 bg-gray-900/80 p-5 shadow-2xl shadow-black/20 transition-all duration-300 ${
@@ -88,6 +88,13 @@ function GraphDetailsPanel({ node }) {
               </div>
             </div>
           </div>
+
+          <button
+            onClick={() => onChatWithFile?.(node)}
+            className="mt-5 rounded-xl border border-indigo-500/30 bg-indigo-500/10 px-4 py-3 text-sm font-semibold text-indigo-200 transition hover:bg-indigo-500/20"
+          >
+            Chat with this file
+          </button>
 
           <div className="mt-auto pt-5 text-xs text-gray-500">
             Double-click any node to copy its file path.
@@ -340,6 +347,7 @@ export default function DependencyGraph({
   onNodeSelect,
   onAnalyseImpact,
   onClearImpactAnalysis,
+  onChatWithFile,
   repoName,
 }) {
   const containerRef = useRef(null);
@@ -697,6 +705,15 @@ export default function DependencyGraph({
               Analyse impact
             </button>
             <button
+              onClick={() => {
+                onChatWithFile?.(contextMenu.node);
+                setContextMenu(null);
+              }}
+              className="block w-full rounded-lg px-3 py-2 text-left text-sm text-indigo-300 transition hover:bg-gray-800"
+            >
+              Chat with this file
+            </button>
+            <button
               onClick={async () => {
                 try {
                   await navigator.clipboard.writeText(contextMenu.node.file_path);
@@ -718,7 +735,7 @@ export default function DependencyGraph({
       {impactAnalysis ? (
         <ImpactAnalysisPanel impactAnalysis={impactAnalysis} onClearImpactAnalysis={onClearImpactAnalysis} />
       ) : (
-        <GraphDetailsPanel node={selectedNode} />
+        <GraphDetailsPanel node={selectedNode} onChatWithFile={onChatWithFile} />
       )}
     </div>
   );
