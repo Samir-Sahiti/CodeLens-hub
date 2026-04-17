@@ -13,6 +13,7 @@ const authRoutes     = require('./routes/auth');
 const reviewRoutes   = require('./routes/review');
 const webhookRoutes  = require('./routes/webhooks');
 const teamRoutes     = require('./routes/teams');
+const fileChatRoutes = require('./routes/fileChat');
 const errorHandler   = require('./middleware/errorHandler');
 
 const app = express();
@@ -33,7 +34,8 @@ app.use('/api/analysis', analysisRoutes);
 app.use('/api/review',   reviewRoutes);
 // Webhook routes use express.raw per-route (mounted before global express.json parses them)
 app.use('/api/webhooks', webhookRoutes);
-app.use('/api/teams',    teamRoutes);
+app.use('/api/teams',     teamRoutes);
+app.use('/api/file-chat', fileChatRoutes);
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 

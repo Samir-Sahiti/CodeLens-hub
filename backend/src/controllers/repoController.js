@@ -3,7 +3,10 @@
  */
 const crypto = require('crypto');
 const { supabaseAdmin } = require('../db/supabase');
-const indexer = require('../services/indexer');
+const _indexer = require('../services/indexer');
+const indexer = new Proxy({}, {
+  get: (_t, prop) => (globalThis.__CODELENS_INDEXER__ || _indexer)[prop],
+});
 
 /** POST /api/repos — connect a GitHub repo and trigger indexing */
 const connectRepo = async (req, res) => {
@@ -370,4 +373,53 @@ const generateWebhook = async (req, res) => {
   res.json({ ok: true, webhookUrl, secret });
 };
 
-module.exports = { connectRepo, uploadRepo, listRepos, getStatus, reindexRepo, deleteRepo, getAnalysisData, updateRepo, generateWebhook };
+/**
+ * GET /api/repos/:repoId/file?path=src/index.js
+ * Returns concatenated source content from code_chunks for a given file.
+ */
+const getFileContent = async (req, res) => {
+  const { repoId } = req.params;
+  const filePath   = req.query.path;
+
+  if (!filePath) {
+    return res.status(400).json({ error: 'path query param is required' });
+  }
+
+  const allowed = await canAccessRepo(repoId, req.user.id);
+  if (!allowed) {
+    return res.status(404).json({ error: 'Repository not found or unauthorized' });
+  }
+
+  // Fetch language from graph_nodes for the syntax highlighter
+  const { data: node } = await supabaseAdmin
+    .from('graph_nodes')
+    .select('language')
+    .eq('repo_id', repoId)
+    .eq('file_path', filePath)
+    .maybeSingle();
+
+  // Concatenate chunks in line order
+  const { data: chunks, error } = await supabaseAdmin
+    .from('code_chunks')
+    .select('content, start_line')
+    .eq('repo_id', repoId)
+    .eq('file_path', filePath)
+    .order('start_line', { ascending: true });
+
+  if (error) {
+    console.error('[getFileContent]', error);
+    return res.status(500).json({ error: 'Failed to fetch file content' });
+  }
+
+  if (!chunks || chunks.length === 0) {
+    return res.status(404).json({ error: 'No indexed content for this file' });
+  }
+
+  res.json({
+    content:  chunks.map((c) => c.content).join(''),
+    filePath,
+    language: node?.language || null,
+  });
+};
+
+module.exports = { connectRepo, uploadRepo, listRepos, getStatus, reindexRepo, deleteRepo, getAnalysisData, updateRepo, generateWebhook, getFileContent };

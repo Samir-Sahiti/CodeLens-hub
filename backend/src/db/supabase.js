@@ -22,14 +22,30 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !SUPABASE_SERVICE_ROLE_KEY) {
 }
 
 /** Anon client – RLS enforced */
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const _supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 /** Admin client – RLS bypassed (server-side only) */
-const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+const _supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: {
     autoRefreshToken: false,
     persistSession:   false,
   },
 });
+
+// Proxies let tests inject mocks via globalThis at any point after module load.
+// Controllers destructure these references once; the proxy intercepts each
+// property access at call time so the active client is always correct.
+function makeProxy(realClient, globalKey) {
+  return new Proxy(realClient, {
+    get(_target, prop) {
+      const active = globalThis[globalKey] || realClient;
+      const val = active[prop];
+      return typeof val === 'function' ? val.bind(active) : val;
+    },
+  });
+}
+
+const supabase      = makeProxy(_supabase,      '__CODELENS_SUPABASE_ANON__');
+const supabaseAdmin = makeProxy(_supabaseAdmin, '__CODELENS_SUPABASE_ADMIN__');
 
 module.exports = { supabase, supabaseAdmin };

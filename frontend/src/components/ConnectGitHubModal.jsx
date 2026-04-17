@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { Octokit } from 'octokit';
+import { useToast } from './Toast';
 
 export default function ConnectGitHubModal({ isOpen, onClose, existingRepos, onConnected }) {
+  const toast = useToast();
   const [githubToken, setGithubToken] = useState(null);
   const [isTokenMissing, setIsTokenMissing] = useState(false);
   const [repos, setRepos] = useState([]);
@@ -106,12 +108,12 @@ export default function ConnectGitHubModal({ isOpen, onClose, existingRepos, onC
       });
 
       if (!res.ok) throw new Error('Failed to connect repository');
-      
+
       onConnected();
       onClose();
     } catch (err) {
       console.error(err);
-      alert(err.message);
+      toast.error(err.message);
     } finally {
       setIsConnecting(null);
     }

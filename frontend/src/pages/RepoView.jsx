@@ -6,6 +6,9 @@ import DependencyGraph from '../components/DependencyGraph';
 import SearchPanel from '../components/SearchPanel';
 import CodeReviewPanel from '../components/CodeReviewPanel';
 import VirtualTable from '../components/VirtualTable';
+import FileChatPanel from '../components/FileChatPanel';
+import FileBrowser from '../components/FileBrowser';
+import { useToast } from '../components/Toast';
 
 function formatLanguage(str) {
   if (!str) return 'Unknown';
@@ -522,6 +525,7 @@ export default function RepoView() {
   const { repoId } = useParams();
   const { session } = useAuth();
   const { setRepo: setRepoCtx, setIssueCount } = useRepo();
+  const toast = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab = searchParams.get('tab') || 'graph';
 
@@ -529,6 +533,7 @@ export default function RepoView() {
 
   const [selectedNodeId, setSelectedNodeId] = useState(null);
   const [impactSourcePath, setImpactSourcePath] = useState(null);
+  const [chatFilePath, setChatFilePath] = useState(null);
 
   const [analysisData, setAnalysisData]   = useState({ nodes: [], edges: [], issues: [] });
   const [hasFetchedData, setHasFetchedData] = useState(false);
@@ -686,7 +691,7 @@ export default function RepoView() {
       await fetchRepo();
     } catch (err) {
       console.error(err);
-      alert(err.message);
+      toast.error(err.message);
       setIsReindexing(false);
     }
   };
@@ -807,6 +812,7 @@ export default function RepoView() {
                 onNodeSelect={handleNodeSelect}
                 onAnalyseImpact={handleStartImpactAnalysis}
                 onClearImpactAnalysis={handleClearImpactAnalysis}
+                onChatWithFile={(node) => setChatFilePath(node.file_path)}
                 repoName={repo?.name}
               />
             </div>
@@ -845,9 +851,22 @@ export default function RepoView() {
                 onRepoUpdated={fetchRepo}
               />
             </div>
+
+            {/* Files tab — repository file browser */}
+            <div className={activeTab === 'files' ? 'block h-full' : 'hidden'}>
+              <FileBrowser repoId={repoId} nodes={analysisData.nodes} />
+            </div>
           </div>
         )}
       </div>
+
+      {/* File chat panel — slides in from right, scoped to selected file */}
+      <FileChatPanel
+        repoId={repoId}
+        filePath={chatFilePath}
+        open={!!chatFilePath}
+        onClose={() => setChatFilePath(null)}
+      />
     </div>
   );
 }

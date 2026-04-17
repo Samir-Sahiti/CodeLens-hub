@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import ConnectGitHubModal from '../components/ConnectGitHubModal';
 import UploadRepoModal from '../components/UploadRepoModal';
 import CreateTeamModal from '../components/CreateTeamModal';
+import { useToast } from '../components/Toast';
 
 function StatusBadge({ status }) {
   switch (status) {
@@ -72,6 +73,7 @@ function RepoCard({ repo, onRetry }) {
 export default function Dashboard() {
   const { session } = useAuth();
   const navigate = useNavigate();
+  const toast = useToast();
   const [repos, setRepos] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -142,7 +144,7 @@ export default function Dashboard() {
       await fetchRepos();
     } catch (err) {
       console.error(err);
-      alert(err.message);
+      toast.error(err.message);
     }
   };
 
