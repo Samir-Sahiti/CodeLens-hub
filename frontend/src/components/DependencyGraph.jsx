@@ -6,6 +6,10 @@ const LANGUAGE_COLORS = {
   typescript: '#60a5fa',
   python: '#facc15',
   c_sharp: '#a78bfa',
+  go: '#06b6d4',
+  java: '#f97316',
+  rust: '#ea580c',
+  ruby: '#ef4444',
   unknown: '#94a3b8',
 };
 
@@ -15,6 +19,10 @@ function formatLanguage(language) {
   if (language === 'typescript') return 'TypeScript';
   if (language === 'python') return 'Python';
   if (language === 'c_sharp') return 'C#';
+  if (language === 'go') return 'Go';
+  if (language === 'java') return 'Java';
+  if (language === 'rust') return 'Rust';
+  if (language === 'ruby') return 'Ruby';
   return language.charAt(0).toUpperCase() + language.slice(1);
 }
 
@@ -23,6 +31,10 @@ function GraphLegend() {
     { label: 'JS / TS', color: LANGUAGE_COLORS.javascript },
     { label: 'Python', color: LANGUAGE_COLORS.python },
     { label: 'C#', color: LANGUAGE_COLORS.c_sharp },
+    { label: 'Go', color: LANGUAGE_COLORS.go },
+    { label: 'Java', color: LANGUAGE_COLORS.java },
+    { label: 'Rust', color: LANGUAGE_COLORS.rust },
+    { label: 'Ruby', color: LANGUAGE_COLORS.ruby },
     { label: 'Unknown', color: LANGUAGE_COLORS.unknown },
   ];
 
