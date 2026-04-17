@@ -16,7 +16,9 @@ ENV VITE_API_PROXY_TARGET=$VITE_API_PROXY_TARGET
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci
+# npm install (not npm ci) because the Windows-generated lockfile lacks
+# Linux-specific optional deps (jsdom/vitest platform packages).
+RUN npm install
 
 COPY . .
 

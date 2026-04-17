@@ -12,8 +12,10 @@ WORKDIR /app
 
 COPY package*.json ./
 
-# Install ALL deps (including dev) for native compilation
-RUN npm ci
+# Install ALL deps (including dev) for native compilation.
+# Using npm install because the committed lockfile was generated on Windows
+# and lacks Linux-specific optional deps (vitest/esbuild platform packages).
+RUN npm install
 
 COPY . .
 
@@ -32,7 +34,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install production deps only — native modules get recompiled here
-RUN npm ci --omit=dev
+RUN npm install --omit=dev
 
 # Copy application source from builder stage
 COPY --from=builder /app/src ./src
