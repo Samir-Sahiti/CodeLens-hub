@@ -179,6 +179,10 @@ export default function Login() {
             <span className="font-['DM_Mono',monospace] text-lg text-slate-400">TypeScript</span>
             <span className="font-['DM_Mono',monospace] text-lg text-slate-400">Python</span>
             <span className="font-['DM_Mono',monospace] text-lg text-slate-400">C#</span>
+            <span className="font-['DM_Mono',monospace] text-lg text-slate-400">Go</span>
+            <span className="font-['DM_Mono',monospace] text-lg text-slate-400">Java</span>
+            <span className="font-['DM_Mono',monospace] text-lg text-slate-400">Rust</span>
+            <span className="font-['DM_Mono',monospace] text-lg text-slate-400">Ruby</span>
           </div>
         </div>
       </section>

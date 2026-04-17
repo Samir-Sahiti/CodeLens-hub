@@ -8,7 +8,7 @@ const pLimit = require('p-limit');
 const fs = require('fs/promises');
 const path = require('path');
 
-const VALID_EXTENSIONS = new Set(['.js', '.jsx', '.ts', '.tsx', '.py', '.cs']);
+const VALID_EXTENSIONS = new Set(['.js', '.jsx', '.ts', '.tsx', '.py', '.cs', '.go', '.java', '.rs', '.rb']);
 
 function chunkArray(arr, size) {
   const chunks = [];
@@ -194,6 +194,10 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       else if (['.ts', '.tsx'].includes(ext)) language = 'typescript';
       else if (ext === '.py') language = 'python';
       else if (ext === '.cs') language = 'c_sharp';
+      else if (ext === '.go') language = 'go';
+      else if (ext === '.java') language = 'java';
+      else if (ext === '.rs') language = 'rust';
+      else if (ext === '.rb') language = 'ruby';
 
       nodeMap.set(file.filePath, {
         repo_id: repoId,

@@ -16,6 +16,10 @@ function formatLanguage(str) {
   if (str === 'typescript') return 'TypeScript';
   if (str === 'python') return 'Python';
   if (str === 'c_sharp') return 'C#';
+  if (str === 'go') return 'Go';
+  if (str === 'java') return 'Java';
+  if (str === 'rust') return 'Rust';
+  if (str === 'ruby') return 'Ruby';
   return str.charAt(0).toUpperCase() + str.slice(1);
 }
 

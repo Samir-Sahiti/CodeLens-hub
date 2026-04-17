@@ -6,7 +6,10 @@ const Python = require('tree-sitter-python');
 const CSharp = require('tree-sitter-c-sharp');
 
 const path = require('path');
-
+const { parseGo } = require('./parseGo');
+const { parseJava } = require('./parseJava');
+const { parseRust } = require('./parseRust');
+const { parseRuby } = require('./parseRuby');
 const LANGUAGE_MAP = {
   '.js': JavaScript,
   '.jsx': TSX,
@@ -189,6 +192,12 @@ const getLanguageKey = (ext) => {
 const parseFile = (filePath, source, allFiles = new Set()) => {
   try {
     const ext = path.extname(filePath).toLowerCase();
+
+    if (ext === '.go') return parseGo(filePath, source, allFiles);
+    if (ext === '.java') return parseJava(filePath, source, allFiles);
+    if (ext === '.rs') return parseRust(filePath, source, allFiles);
+    if (ext === '.rb') return parseRuby(filePath, source, allFiles);
+
     const language = LANGUAGE_MAP[ext];
     const queryKey = getLanguageKey(ext);
     const queryStr = QUERIES[queryKey];
