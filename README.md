@@ -74,9 +74,7 @@ CodeLens-hub/
 │
 ├── scripts/
 │   ├── setup.sh                 # Idempotent bootstrap
-│   ├── 001_initial_schema.sql   # Core DB schema
-│   ├── 002_webhooks.sql         # webhook_secret, auto_sync_enabled columns
-│   └── 003_teams.sql            # teams, team_members, team_repositories + RLS
+│   └── schema.sql               # Full DB schema — tables, RLS policies, indexes
 │
 ├── .github/workflows/
 │   ├── ci.yml                   # Lint + test on push / PR
@@ -123,11 +121,9 @@ GROQ_API_KEY          # RAG LLM responses
 
 ### 3. Apply database migrations
 
-In your Supabase dashboard → **SQL Editor**, run these in order:
+In your Supabase dashboard → **SQL Editor**, run:
 
-1. `scripts/001_initial_schema.sql`
-2. `scripts/002_webhooks.sql`
-3. `scripts/003_teams.sql`
+1. `scripts/schema.sql`
 
 Also enable the **`vector`** extension under Database → Extensions.
 

@@ -2,7 +2,7 @@
 
 Each story below is formatted as a GitHub Issue. Copy each one into GitHub Issues directly.
 
-Assign labels: `epic/infra`, `epic/auth`, `epic/dashboard`, `epic/graph`, `epic/parsing`, `epic/ai`, `epic/search`, `epic/impact`
+Assign labels: `epic/infra`, `epic/auth`, `epic/dashboard`, `epic/graph`, `epic/parsing`, `epic/ai`, `epic/search`, `epic/impact`, `epic/security`, `epic/analytics`
 
 ---
 
@@ -552,7 +552,7 @@ Assign labels: `epic/infra`, `epic/auth`, `epic/dashboard`, `epic/graph`, `epic/
 > "Critical" and "at-risk" thresholds should be relative to the repo — use the 90th percentile of the repo's own distribution for both complexity and incoming_count. Never use hardcoded numbers.
 > The `outgoing_count` and `incoming_count` values are already stored on `graph_nodes` from the indexing step — no extra computation needed at render time.
 > Clicking a row: update shared `selectedNodeId` state (lifted to the repo page), switch to the "Graph" tab, auto-pan the graph and highlight the selected node.
-> Complexity score formula for Sprint 3: `line_count × (outgoing_count / total_nodes_in_repo)`. Mark with `// TODO: replace with cyclomatic complexity in Sprint 5`.
+> Complexity score formula for Sprint 3: `line_count × (outgoing_count / total_nodes_in_repo)`. Mark with `// TODO: replace with cyclomatic complexity in Sprint 9`.
 
 ---
 
@@ -1216,6 +1216,444 @@ US-026: AI Code Review Panel
 
 ---
 
+## 🔧 EPIC: Technical Debt & Hardening
+
+---
+
+### US-039: Move GitHub access token to Supabase Vault
+
+**Labels:** `epic/infra` `epic/auth` `database`
+**Milestone:** Sprint 9 — Weeks 17–18
+
+---
+
+**As a** developer concerned about credential security
+**I want** GitHub access tokens stored encrypted in Supabase Vault instead of plaintext on the `profiles` table
+**So that** a database breach does not immediately leak every user's GitHub credentials
+
+**Acceptance Criteria**
+- [ ] Supabase Vault enabled on the project
+- [ ] A new `github_token_secret_id` column (UUID) added to `profiles` that references the Vault secret
+- [ ] Backend OAuth callback writes tokens via `vault.create_secret()` instead of directly into the column
+- [ ] Backend GitHub service retrieves tokens via the `vault.decrypted_secrets` view at request time only — tokens are never held in memory beyond the single request
+- [ ] Tokens never appear in application logs — add a redaction helper used by all loggers
+- [ ] One-time idempotent migration script backfills existing plaintext tokens into Vault, writes the secret ID back to the row, then nulls the `github_access_token` column
+- [ ] After backfill is verified, the `github_access_token` column is dropped
+- [ ] The `TODO` comment in `schema.sql` and in the US-001 note is resolved
+
+**Note**
+> Reference: https://supabase.com/docs/guides/database/vault. Vault uses pgsodium under the hood. Only the service role key should be used to read `vault.decrypted_secrets` — never expose that view via RLS. Wrap the backfill in a `DO $$ ... $$` block that skips rows already migrated (`WHERE github_token_secret_id IS NULL AND github_access_token IS NOT NULL`) so it is safe to re-run. After the column is dropped, update `schema.sql` to remove the field and leave a migration note explaining the history.
+
+---
+
+### US-040: Real cyclomatic complexity calculation
+
+**Labels:** `epic/parsing`
+**Milestone:** Sprint 9 — Weeks 17–18
+
+---
+
+**As a** developer reviewing repository metrics
+**I want** the complexity score to reflect actual cyclomatic complexity computed from the AST, not a line-count approximation
+**So that** the metrics table and issue detection flag genuinely complex files instead of just large ones
+
+**Acceptance Criteria**
+- [ ] A shared `calculateComplexity(tree, language)` helper computes cyclomatic complexity per function from a Tree-sitter parse tree
+- [ ] Complexity per function = count of decision points + 1: `if`, `else if`, `case`, `for`, `while`, `do`, `&&`, `||`, `? :`, `catch`, and language-specific equivalents
+- [ ] File-level complexity = sum of per-function complexities (or 1 if the file has no functions)
+- [ ] `graph_nodes.complexity_score` stores this value — the placeholder formula is removed
+- [ ] High-coupling and god-file issue detection thresholds re-tuned against the new distribution and documented
+- [ ] The `// TODO: replace with cyclomatic complexity in Sprint 9` comment from US-015 is removed
+- [ ] The Metrics table risk highlighting (90th percentile logic) works unchanged because the column type and range are compatible
+- [ ] README and CLAUDE.md updated to describe the new metric and its rationale
+
+**Note**
+> Language-specific decision-point node types:
+> - **JS/TS:** `if_statement`, `else_clause`, `for_statement`, `while_statement`, `do_statement`, `switch_case`, `ternary_expression`, `catch_clause`, plus `binary_expression` where the operator is `&&` or `||`
+> - **Python:** `if_statement`, `elif_clause`, `for_statement`, `while_statement`, `except_clause`, `boolean_operator`, `conditional_expression`
+> - **C#:** `if_statement`, `else_clause`, `for_statement`, `while_statement`, `do_statement`, `switch_section`, `conditional_expression`, `catch_clause`, `conditional_access_expression`
+> Keep the logic in one shared helper so parsers added in US-038 (Go, Java, Rust, Ruby) plug in by providing a node-type map.
+
+---
+
+### US-041: Migrate pgvector index from IVFFlat to HNSW
+
+**Labels:** `epic/infra` `database`
+**Milestone:** Sprint 9 — Weeks 17–18
+
+---
+
+**As a** developer searching large repositories
+**I want** the pgvector index on `code_chunks` to use HNSW instead of IVFFlat
+**So that** semantic search returns results with lower latency and higher recall as the corpus grows
+
+**Acceptance Criteria**
+- [ ] pgvector extension is verified at version ≥ 0.5.0 (HNSW requires it)
+- [ ] Migration drops the existing IVFFlat index on `code_chunks.embedding`
+- [ ] A new HNSW index is created: `CREATE INDEX ON code_chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)`
+- [ ] A benchmark script added to `backend/scripts/benchmark-vector-search.js` measures query latency and recall@8 on a ≥10k-chunk repo before and after
+- [ ] `schema.sql` updated to reflect the new index definition
+- [ ] Before/after latency numbers added to the README
+- [ ] RAG search endpoint optionally sets `hnsw.ef_search` per request when higher recall is needed (`SET LOCAL hnsw.ef_search = 100`)
+
+**Note**
+> HNSW trades longer index build time and more memory for faster and more accurate queries — the right tradeoff for a read-heavy RAG workload. The `m` parameter controls graph connectivity (higher = better recall, more memory); `ef_construction` controls build-time effort. For 1536-dim embeddings, `m=16, ef_construction=64` is a good starting point. Since every repo is re-indexed from scratch and the table is small per repo, the migration is effectively zero-downtime — just run it.
+
+---
+
+### US-042: Rate limiting and AI cost controls
+
+**Labels:** `epic/infra` `epic/ai`
+**Milestone:** Sprint 9 — Weeks 17–18
+
+---
+
+**As a** project maintainer paying for OpenAI, Anthropic, and Groq API usage
+**I want** per-user rate limits and a daily token budget across all AI endpoints
+**So that** a single user or a runaway script cannot exhaust the API credits or take the service down
+
+**Acceptance Criteria**
+- [ ] New table `api_usage` with columns `{ id, user_id, endpoint, provider, prompt_tokens, completion_tokens, embedding_tokens, created_at }` and an index on `(user_id, created_at)`
+- [ ] Middleware on `/api/search/*`, `/api/review/*`, and the indexing embedding calls records actual token usage pulled from provider response bodies
+- [ ] A per-user daily token budget enforced across all providers combined — default 500k tokens/day, configurable via `MAX_DAILY_TOKENS_PER_USER` env var
+- [ ] A per-user rate limit: 30 requests/minute and 500 requests/hour on AI endpoints, enforced via a token-bucket strategy
+- [ ] When a limit is exceeded, the endpoint returns `429` with a JSON body `{ error, retryAfterSeconds }` and the user sees a clear toast
+- [ ] Admin-only `GET /api/admin/usage` endpoint returns aggregate usage across all users, gated by a hardcoded admin user-ID list from env
+- [ ] A small "Today: X / Y tokens" indicator on the user profile dropdown in the sidebar
+- [ ] `.env.example` documents the new variables: `MAX_DAILY_TOKENS_PER_USER`, `MAX_RPM`, `MAX_RPH`, `ADMIN_USER_IDS`
+
+**Note**
+> `express-rate-limit` covers the request-count limits cleanly — one limiter per endpoint group. Token budgets must persist across restarts, so store aggregates in Supabase and compute daily usage with a rolling `WHERE created_at > NOW() - INTERVAL '24 hours'` query. Token extraction per provider: OpenAI returns `usage.prompt_tokens` / `usage.completion_tokens`, Anthropic returns `usage.input_tokens` / `usage.output_tokens`, Groq follows the OpenAI format, embeddings return `usage.total_tokens`. Skip billing for vector similarity queries — those are free. The UI indicator is a small nice-to-have that also helps users self-regulate and makes the system feel transparent.
+
+---
+
+### US-043: Full file content storage for file browser accuracy
+
+**Labels:** `epic/infra` `database`
+**Milestone:** Sprint 9 — Weeks 17–18
+
+---
+
+**As a** developer browsing a file in the repository file browser
+**I want** to see the complete source file, not a reconstruction from indexed chunks with gaps between them
+**So that** the file browser actually shows what's in the repo instead of a misleading best-effort assembly
+
+**Acceptance Criteria**
+- [ ] New table `file_contents` with columns `{ id, repo_id, file_path, content, byte_size, created_at }` and `UNIQUE (repo_id, file_path)`
+- [ ] Indexing pipeline writes each file's full raw content to `file_contents` in addition to chunking it into `code_chunks`
+- [ ] The `GET /api/repos/:repoId/file?path=...` endpoint from US-037 reads from `file_contents` instead of concatenating chunks
+- [ ] A per-file size cap of 1 MB — files above the cap are stored with a truncation marker in their content and a `byte_size` that reflects the original
+- [ ] Re-indexing deletes the repo's existing `file_contents` rows before re-inserting (same pattern as `code_chunks`)
+- [ ] RLS on `file_contents` mirrors `code_chunks` — access is mediated through the `repositories` ownership check
+- [ ] Migration marks all existing repos as `status = 'pending'` so the user's next visit triggers a re-index that populates the new table (one-time inconvenience, clearly messaged in the UI)
+- [ ] `schema.sql` updated with the new table
+
+**Note**
+> This resolves a subtle bug in US-037: because chunking splits at function/class boundaries, everything between chunks (imports, top-level statements, comments, blank lines) is invisible in any "reconstructed" view. Storing the full content is the cleanest fix. The 1 MB cap is generous — very few source files exceed it. Storage impact is modest: a 1k-file repo averaging 10 KB per file is ~10 MB. Update `frontend/src/components/FileBrowser.jsx` to hit the new endpoint; the response shape is identical to the old chunk-concat version.
+
+---
+
+## 🔒 EPIC: Security
+
+---
+
+### US-044: Secret scanning during indexing
+
+**Labels:** `epic/security` `epic/parsing`
+**Milestone:** Sprint 10 — Weeks 19–20
+
+---
+
+**As a** developer indexing a repository
+**I want** CodeLens to scan every file for hardcoded secrets during indexing
+**So that** I immediately learn if my repo contains credentials that should never have been committed
+
+**Acceptance Criteria**
+- [ ] A `secretScanner` service in `backend/src/services/` runs against every file during indexing
+- [ ] Detects at minimum: AWS access keys and secret keys, GitHub personal access tokens, GitHub OAuth tokens, OpenAI keys (`sk-...`), Anthropic keys (`sk-ant-...`), Stripe live keys (`sk_live_`, `pk_live_`, `rk_live_`), Google API keys (`AIza...`), Slack tokens (`xox[baprs]-...`), JWT-shaped strings, RSA/OpenSSH private key blocks
+- [ ] Detects generic high-entropy strings (Shannon entropy > 4.5 over ≥20 chars) assigned to variables matching `*_key`, `*_secret`, `*_token`, `*_password`
+- [ ] New `issue_type` enum value `'hardcoded_secret'` added via migration
+- [ ] Each detection creates an `analysis_issues` row with `severity: 'high'`, `file_paths: [path]`, and a description containing the line number and the rule ID — **never** the secret value itself
+- [ ] Per-file scan wrapped in try/catch with a 2-second timeout to prevent ReDoS on malicious repos
+- [ ] Issues panel groups these under a "Hardcoded Secrets" section with a lock icon
+- [ ] A "Mark as false positive" action per issue persists the suppression in a new `issue_suppressions` table `{ repo_id, file_path, rule_id, line_number, created_by, created_at }` so re-indexing does not re-flag it
+- [ ] Rules defined in a JSON config at `backend/src/sast/secret-rules.json` so new patterns can be added without code changes
+
+**Note**
+> Gitleaks' ruleset (https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml) is the industry reference — port the regex patterns into a JS-compatible format. Absolutely do **not** include secret values in descriptions, logs, or error messages — only the rule ID and line number. Rule config example:
+> ```json
+> { "id": "aws_access_key", "pattern": "AKIA[0-9A-Z]{16}", "entropy": 0, "severity": "high" }
+> ```
+> The `issue_suppressions` table is reused by US-049 — design the columns to be rule-agnostic. (US-046 uses a separate per-repo `sast_disabled_rules` column for whole-rule toggles, which is a different concept from per-instance suppression.)
+
+---
+
+### US-045: Dependency vulnerability scanning (SCA)
+
+**Labels:** `epic/security` `epic/parsing`
+**Milestone:** Sprint 10 — Weeks 19–20
+
+---
+
+**As a** developer indexing a repository
+**I want** CodeLens to check my dependency manifests against the OSV vulnerability database
+**So that** I learn which of my dependencies have known CVEs and what versions fix them
+
+**Acceptance Criteria**
+- [ ] Indexing pipeline detects and parses: `package.json` + `package-lock.json` / `yarn.lock`, `requirements.txt`, `Pipfile.lock`, `go.mod`, `Cargo.lock`, `Gemfile.lock`, `*.csproj`
+- [ ] For each detected `(ecosystem, package, version)`, a batched query to the OSV.dev API (`https://api.osv.dev/v1/querybatch`) returns known vulnerabilities
+- [ ] New `issue_type` enum value `'vulnerable_dependency'` added via migration
+- [ ] Each vulnerability creates an `analysis_issues` row with severity derived from the CVSS score (`low < 4`, `medium 4–7`, `high > 7`), `file_paths: [manifest_path]`, and a description naming the CVE ID, affected package/version, the lowest fixed version, and a link to the OSV advisory
+- [ ] Issues panel groups these under "Vulnerable Dependencies"
+- [ ] A dedicated "Dependencies" tab on the repo page lists every detected package with its version and vulnerability status (clean / N issues)
+- [ ] OSV calls batched in groups of 100 and cached for 24 hours in a new `vulnerability_cache` table keyed on `(ecosystem, name, version)` to avoid rate limits across users/repos
+- [ ] If OSV is unreachable, indexing completes successfully and logs a warning — SCA is best-effort and never blocks the pipeline
+
+**Note**
+> OSV.dev is free, requires no API key, and covers npm, PyPI, Go, RubyGems, crates.io, NuGet, and Maven. The batch endpoint accepts up to 1000 queries per request. Request shape:
+> ```json
+> { "queries": [{ "package": { "name": "express", "ecosystem": "npm" }, "version": "4.17.1" }] }
+> ```
+> For `package-lock.json`, flatten the full `dependencies` tree to catch transitive vulnerabilities. For `requirements.txt` without a lockfile, only direct deps can be checked and this limitation should be shown in the UI. Cache entries expire after 24 hours — a simple `created_at > NOW() - INTERVAL '24 hours'` filter is sufficient.
+
+---
+
+### US-046: Pattern-based SAST with AST queries
+
+**Labels:** `epic/security` `epic/parsing`
+**Milestone:** Sprint 10 — Weeks 19–20
+
+---
+
+**As a** developer indexing a repository
+**I want** CodeLens to run static security checks against dangerous code patterns via AST queries
+**So that** common vulnerability classes (eval injection, command injection, weak crypto, unsafe deserialization) get flagged without me running a separate tool
+
+**Acceptance Criteria**
+- [ ] A `sastEngine` service in `backend/src/services/` runs during indexing after AST parsing completes
+- [ ] Each rule is an AST query (Tree-sitter query string or small walker function) stored under `backend/src/sast/rules/<language>/`
+- [ ] Initial ruleset (minimum):
+  - [ ] **JS/TS:** `eval(...)`, `new Function(...)`, `dangerouslySetInnerHTML`, `child_process.exec`/`execSync` with template literals, `require()` with a non-literal argument, `document.write`
+  - [ ] **Python:** `eval()`, `exec()`, `pickle.loads()`/`pickle.load()`, `subprocess.*(shell=True)`, raw SQL built with `%` or f-string formatting, `yaml.load()` without `SafeLoader`
+  - [ ] **C#:** `Process.Start` with concatenated arguments, `SqlCommand` with string-concatenated SQL, use of `MD5`, `SHA1`, `DES`, `RC4`, `TripleDES`
+  - [ ] **Cross-language:** hardcoded IPv4 addresses, `http://` URLs in non-test source
+- [ ] New `issue_type` enum value `'insecure_pattern'` added via migration
+- [ ] Each detection creates an `analysis_issues` row with severity per the rule, `file_paths: [path]`, and a description citing the CWE where applicable
+- [ ] Issues panel groups these under "Insecure Code Patterns"
+- [ ] Rules can be disabled per-repo via a new `sast_disabled_rules TEXT[]` column on `repositories`
+- [ ] Each rule has metadata `{ id, name, severity, cwe, description, fixHint }` with the fix hint shown when an issue is expanded in the UI
+
+**Note**
+> Tree-sitter's built-in query language makes rule expression concise. Example JS rule for `eval()`:
+> ```
+> (call_expression
+>   function: (identifier) @fn
+>   (#eq? @fn "eval"))
+> ```
+> Semgrep's open-source ruleset (https://github.com/semgrep/semgrep-rules) is the gold standard for what patterns to port — start with 10–15 high-value rules per language rather than thousands. CWE references (https://cwe.mitre.org/) make the output feel professional: `eval()` → CWE-95, weak crypto → CWE-327, SQL concatenation → CWE-89. This is pattern matching, not taint analysis — false positives are expected and the per-repo rule-disable escape hatch keeps the tool usable.
+
+---
+
+### US-047: Attack surface mapping on the dependency graph
+
+**Labels:** `epic/security` `epic/graph`
+**Milestone:** Sprint 11 — Weeks 21–22
+
+---
+
+**As a** developer analysing a codebase's security posture
+**I want to** visualise which files are externally reachable "sources" and which are sensitive "sinks", with highlighted paths between them
+**So that** I can see at a glance which parts of my architecture form the attack surface and what sensitive operations they can reach
+
+**Acceptance Criteria**
+- [ ] Indexing pipeline classifies each file as `source`, `sink`, `both`, or `null`
+- [ ] **Source** heuristics (per language): files registering HTTP routes (Express, Koa, Flask, FastAPI, ASP.NET controllers), CLI entry points reading from `process.argv`/`sys.argv`/`Environment.GetCommandLineArgs`, files reading stdin
+- [ ] **Sink** heuristics: files executing SQL, shell commands, filesystem writes with dynamic paths, deserialization calls (`pickle.loads`, `JSON.parse` of input, XML deserialisers), outbound HTTP with dynamic URLs
+- [ ] A new `node_classification TEXT` column added to `graph_nodes` (nullable)
+- [ ] New "Attack Surface" toggle on the graph view: with it on, sources render with a red halo, sinks with an orange halo, neutral nodes dimmed
+- [ ] A "Show reachable paths" action on any source highlights every graph path that reaches a sink, with intermediate nodes in yellow
+- [ ] Per-source badge: "N paths reach a sink from this file"
+- [ ] Right-hand panel lists all `source → ... → sink` paths sorted by length ascending, capped at 50 with "... X more" expand
+- [ ] If the graph has zero sources or zero sinks, a positive empty state: "No externally reachable endpoints detected — or this repo is a library."
+
+**Note**
+> This is lightweight reachability analysis, not sound taint analysis — the goal is architectural visibility, not a proof of exploitability. Implementation: BFS from each source forward through the `graph_edges` adjacency map; mark any node reached, and record full paths that terminate at a sink. Classification reuses Tree-sitter queries built for US-046 — look for AST nodes matching `app.get`, `app.post`, `@app.route`, `@router.get`, `[HttpGet]` etc. For large graphs with many pairs, cap displayed paths at 50 and expose the full set via a JSON export (same pattern as US-021). This feature is genuinely differentiated — no mainstream SAST tool overlays attack surface on a dependency graph the way CodeLens can.
+
+---
+
+### US-048: AI security audit mode
+
+**Labels:** `epic/security` `epic/ai`
+**Milestone:** Sprint 11 — Weeks 21–22
+
+---
+
+**As a** developer worried about security issues I can't catch with pattern matching alone
+**I want** an AI-powered security audit that reviews my code with a security-focused system prompt and repo-specific context
+**So that** I get expert-grade explanations of subtle issues grounded in my actual codebase
+
+**Acceptance Criteria**
+- [ ] Code Review panel (US-026) extended with a mode toggle: "General" | "Security Audit"
+- [ ] Security mode uses a security-focused system prompt instructing Claude to assess for: injection vulnerabilities, auth/authz flaws, crypto misuse, secrets exposure, input validation gaps, error-handling information leaks, dependency risks, and logic flaws
+- [ ] Retrieval in security mode re-ranks retrieved chunks by co-occurrence with security-relevant keywords (`auth`, `password`, `token`, `crypto`, `sanitize`, `exec`, `eval`, `sql`)
+- [ ] Response is a streamed list of findings, each `{ severity, category, line_reference, explanation, suggested_fix, confidence }`
+- [ ] A new "Audit this file" action on the file details panel pre-fills the review panel with the file content in Security Audit mode
+- [ ] A whole-repo "Run security audit" action runs the audit against the top 20 files ranked by `incoming_count + complexity_score` and produces a summary report
+- [ ] The whole-repo audit is persisted in a new `security_audits` table `{ id, user_id, repo_id, findings_json, created_at }` so users can see history
+- [ ] Audit findings cross-link to deterministic `analysis_issues` rows (US-044 / US-046) that affect the same file — users see where AI and deterministic detection agree
+- [ ] Token usage counted against the user's daily budget from US-042
+
+**Note**
+> Reuse the SSE streaming from `searchController.js`. The confidence field is critical — users should know when Claude is certain vs. guessing. Suggested system prompt: "You are a security engineer reviewing code for vulnerabilities. Analyse the snippet in the context of the provided codebase excerpts. For each potential issue, identify the vulnerability type, cite the specific line, rate severity (low/medium/high), estimate confidence (low/medium/high), and suggest a concrete fix. If the code looks secure, say so explicitly — do not invent issues." The whole-repo audit is capped at 20 files to keep cost bounded; file selection surfaces the highest-leverage files rather than a random sample.
+
+---
+
+### US-049: Authentication coverage check
+
+**Labels:** `epic/security` `epic/parsing`
+**Milestone:** Sprint 11 — Weeks 21–22
+
+---
+
+**As a** developer building a web application
+**I want** CodeLens to flag route handlers that do not appear to enforce authentication
+**So that** I catch accidentally public endpoints before they ship
+
+**Acceptance Criteria**
+- [ ] Indexing pipeline identifies route-handler files — reuses the source classification from US-047
+- [ ] For each route handler, checks whether the file (a) transitively imports a file whose path or name suggests auth middleware (`auth`, `authn`, `authz`, `authenticate`, `requireAuth`, `middleware/auth*`, `guards/*`), or (b) contains in-file auth markers (`@login_required`, `@authorize`, `[Authorize]`, `passport.authenticate`, or a user-configured custom helper name)
+- [ ] Files registering routes with no detected auth coverage create an `analysis_issues` row of new type `'missing_auth'` with severity `medium` and a description naming the specific route paths that appear unprotected
+- [ ] Issues panel groups these under "Potentially Unauthenticated Routes"
+- [ ] Default allow-list (to reduce noise) covers: `/health`, `/healthz`, `/ping`, `/status`, `/metrics`, `/favicon.ico`, `/login`, `/signup`, `/register`, `/auth/*`, `/oauth/*`, `/.well-known/*`
+- [ ] Users can mark specific routes as "intentionally public" via the `issue_suppressions` table from US-044 — suppressions persist across re-indexing
+- [ ] False positive rate ≤30% on the Sprint 6 test repos — tune heuristics until it is
+
+**Note**
+> This is deliberately a heuristic and will have false positives. That is acceptable as long as the UI clearly labels findings as "Potentially" unauthenticated and the suppression workflow is fast. The detection is two-layered: (1) AST scan within the file for auth-ish identifiers, (2) graph traversal checking if any imported module has an auth-sounding name. If either succeeds, the route is considered covered. This story depends on US-047 for route detection — land them in the same sprint.
+
+---
+
+## 📊 EPIC: Analytics & Growth
+
+---
+
+### US-050: Git history hotspots
+
+**Labels:** `epic/analytics` `epic/graph`
+**Milestone:** Sprint 12 — Weeks 23–24
+
+---
+
+**As a** developer deciding where to invest refactoring effort
+**I want** to see which files change most frequently combined with their complexity
+**So that** I can identify true refactoring hotspots — files that are both fragile and actively evolving
+
+**Acceptance Criteria**
+- [ ] Indexing pipeline fetches the last 12 months of Git commit metadata for GitHub-connected repos (file paths and stats per commit — not full blobs)
+- [ ] New table `file_churn` stores `{ id, repo_id, file_path, commit_count, last_modified, unique_authors, lines_changed }` with `UNIQUE (repo_id, file_path)`
+- [ ] A "Hotspots" toggle on the Metrics tab sorts the table by `hotspot_score = normalize(commit_count) × normalize(complexity_score)` descending
+- [ ] Graph view gains a "Hotspot" colour mode: nodes coloured on a green→yellow→red gradient by `hotspot_score` normalised against the repo's own distribution
+- [ ] Issues panel gains a "Refactoring Candidates" section listing the top 10 hotspots with churn and complexity numbers
+- [ ] Upload-source repos show a helpful message: "Hotspot analysis requires Git history — connect this project via GitHub to enable."
+- [ ] Re-indexing a GitHub repo refreshes the churn data
+- [ ] Webhook-triggered re-indexes (US-028) incrementally update churn for changed files only rather than recomputing from scratch
+
+**Note**
+> Adam Tornhill's "Code as a Crime Scene" idea — files that change often *and* are complex are where bugs cluster and where refactoring pays off most. Use Octokit's `listCommits` with `since = 12 months ago`, paginated; for each commit use `getCommit` to extract per-file `additions`/`deletions`. Cap at the 1000 most recent commits to avoid hammering the GitHub API. The normalised gradient combined with force-directed layout makes clusters of hot, complex files visually jump out — it's striking demo material.
+
+---
+
+### US-051: Architectural diff between branches or commits
+
+**Labels:** `epic/analytics` `epic/graph`
+**Milestone:** Sprint 12 — Weeks 23–24
+
+---
+
+**As a** developer reviewing a pull request
+**I want** to see how the architecture changes between two Git refs — which nodes and edges are added, removed, or modified
+**So that** I can spot structural regressions (new circular deps, expanded blast radius, new god files) before merging
+
+**Acceptance Criteria**
+- [ ] A "Compare" button on the repo page opens a diff modal
+- [ ] User selects two refs: base (default `main`) and head (default the current branch or a selected PR)
+- [ ] Backend runs a parsing-only indexing pipeline for both refs — stores results in a scratch table (`diff_indexes`) so the primary index is not disturbed
+- [ ] Diff computation produces: added nodes, removed nodes, added edges, removed edges, new issues, resolved issues, per-file complexity deltas
+- [ ] Graph view renders the diff: added in green, removed in red (dashed), changed in amber, unchanged dimmed
+- [ ] Summary panel: "+12 files, −3 files, +47 edges, −8 edges, 2 new issues (1 circular dep, 1 god file), 1 issue resolved"
+- [ ] Results cached keyed on `(repo_id, base_sha, head_sha)` in a `diff_cache` table — re-opening the same diff is instant
+- [ ] Webhook (US-028) on PR `opened` and `synchronize` events precomputes the diff against the PR base so reviewers find it ready
+- [ ] Optional stretch: a GitHub App posts a summary comment on the PR linking to the full visualisation in CodeLens
+
+**Note**
+> This turns CodeLens from passive exploration into active code review and is one of the highest-leverage analytics features. Fetch the tree at a specific ref via `GET /repos/{owner}/{repo}/git/trees/{tree_sha}?recursive=1`, then fetch blobs as needed. Skip embeddings for diff indexes — they aren't needed for structural diffing, which saves time and OpenAI spend. The PR bot is a stretch goal; for Sprint 12 the in-app modal is the must-have.
+
+---
+
+### US-052: Code duplication detection via embeddings
+
+**Labels:** `epic/analytics` `epic/ai`
+**Milestone:** Sprint 12 — Weeks 23–24
+
+---
+
+**As a** developer looking to reduce maintenance cost
+**I want** CodeLens to find semantically similar code chunks across my repo
+**So that** I can identify copy-pasted logic and extract it into shared utilities
+
+**Acceptance Criteria**
+- [ ] After indexing completes, a duplication detection job finds pairs of `code_chunks` (in the same repo) with cosine similarity > 0.92 spanning at least 10 lines each
+- [ ] For repos with ≤5000 chunks, uses an all-pairs comparison; for larger repos, uses a pgvector k-NN self-query (top 5 neighbours per chunk) to keep runtime bounded
+- [ ] Pairs stored in a new `duplication_candidates` table `{ id, repo_id, chunk_a_id, chunk_b_id, similarity }`
+- [ ] Pairs grouped into clusters via union-find (if A~B and B~C, all three form one cluster)
+- [ ] New "Duplication" section on the Issues tab lists clusters with: severity based on cluster size and total lines spanned, the file paths + line ranges, and a short excerpt
+- [ ] Clicking a cluster opens a side-by-side syntax-highlighted view of all members
+- [ ] An "Ask AI to extract shared utility" action sends the cluster to Claude and streams back a proposed refactor into the review panel
+- [ ] Duplication data is cleared and recomputed on re-index — no stale data
+
+**Note**
+> Embedding similarity catches near-duplicates that textual hashing misses — e.g. two functions that do the same thing with different variable names. The 0.92 threshold is conservative; tune empirically. The scalable-mode SQL:
+> ```sql
+> SELECT a.id, b.id, 1 - (a.embedding <=> b.embedding) AS similarity
+> FROM code_chunks a
+> JOIN LATERAL (
+>   SELECT id, embedding FROM code_chunks
+>   WHERE repo_id = a.repo_id AND id != a.id
+>   ORDER BY a.embedding <=> embedding
+>   LIMIT 5
+> ) b ON true
+> WHERE a.repo_id = $1 AND 1 - (a.embedding <=> b.embedding) > 0.92;
+> ```
+> Union-find is a dozen lines of code. The AI refactor action reuses the existing review pipeline and counts against the US-042 token budget.
+
+---
+
+### US-053: Test coverage overlay on the dependency graph
+
+**Labels:** `epic/analytics` `epic/graph`
+**Milestone:** Sprint 12 — Weeks 23–24
+
+---
+
+**As a** developer assessing test health
+**I want** to see which source files are referenced by tests overlaid on the dependency graph
+**So that** I can spot untested critical files and prioritise where to write tests
+
+**Acceptance Criteria**
+- [ ] Indexing pipeline identifies test files by path convention: `*.test.{js,ts,tsx,jsx}`, `*.spec.{js,ts,tsx,jsx}`, `test_*.py`, `*_test.go`, `*Test.java`, `*Tests.cs`, and directory conventions `__tests__/`, `tests/`, `spec/`, `test/`
+- [ ] For each test file, the existing parsers (US-009, US-010, US-011, US-038) resolve imports — any source file imported by a test file is marked "covered"
+- [ ] A new `has_test_coverage BOOLEAN DEFAULT FALSE` column on `graph_nodes` populated during indexing
+- [ ] A "Coverage" toggle on the graph view: covered nodes in green, uncovered in red, test files themselves in a distinct muted style
+- [ ] A "Coverage gaps" section on the Metrics tab lists uncovered source files sorted by `incoming_count × complexity_score` descending — highest-leverage gaps first
+- [ ] Summary line: "X of Y source files are referenced by at least one test (Z% by file)"
+- [ ] If a `coverage.xml`, `coverage.json`, or LCOV file is present in the repo, parse it and use the real line-coverage percentages instead of the heuristic
+- [ ] Uncovered files with high complexity or high `incoming_count` (above 90th percentile) create a new issue type `'untested_critical_file'` with severity `medium`
+
+**Note**
+> This is "is this file referenced by any test" coverage, not line-level — but the heuristic version is genuinely useful because it scales to any language without running a test runner. The LCOV upgrade path is an easy bolt-on: `lcov-parse` on npm handles it in a few lines. The combination with hotspots from US-050 is especially powerful — untested + high-churn + high-complexity = exactly where production incidents come from. Consider a later "Risk Matrix" story that visualises all three dimensions together.
+
+---
+
 ## 🏷️ Suggested GitHub Labels
 
 | Label | Color | Description |
@@ -1228,6 +1666,8 @@ US-026: AI Code Review Panel
 | `epic/ai` | `#D97706` | AI integration and RAG pipeline |
 | `epic/search` | `#0D9488` | Natural language search feature |
 | `epic/impact` | `#DC2626` | Change impact analysis feature |
+| `epic/security` | `#B91C1C` | Security scanning, vulnerability detection, SAST |
+| `epic/analytics` | `#9333EA` | Analytics, hotspots, diffs, coverage, growth features |
 | `devops` | `#FCA5A5` | DevOps, CI/CD, and Hosting |
 | `database` | `#1D4ED8` | Database schema and migrations |
 
@@ -1245,3 +1685,7 @@ US-026: AI Code Review Panel
 | Sprint 6 — Advanced Integrations & Quality | Weeks 11–12 | US-026, US-028, US-032, US-033, US-035, US-036, US-037 |
 | Sprint 7 — DevOps & Deployment | Weeks 13–14 | US-029 → US-031 (US-030 depends on US-035), US-038 |
 | Sprint 8 — Teams & Collaboration | Weeks 15–16 | US-034 |
+| Sprint 9 — Technical Debt & Hardening | Weeks 17–18 | US-039 → US-043 |
+| Sprint 10 — Security Suite (Part 1) | Weeks 19–20 | US-044 → US-046 |
+| Sprint 11 — Security Suite (Part 2) | Weeks 21–22 | US-047 → US-049 |
+| Sprint 12 — Analytics & Growth | Weeks 23–24 | US-050 → US-053 |

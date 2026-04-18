@@ -19,7 +19,7 @@ CodeLens is a full-stack web app that helps developers understand large, unfamil
 | Backend | Node.js 20, Express 4 |
 | Database | PostgreSQL 15 (Supabase) + pgvector extension |
 | Auth | Supabase Auth, GitHub OAuth |
-| AST Parsing | Tree-sitter (JS, TS, TSX, Python, C#) |
+| AST Parsing | Tree-sitter (JS, TS, TSX, Python, C#, Go, Java, Rust, Ruby) |
 | Embeddings | OpenAI `text-embedding-3-small` (1536-dim) |
 | LLM/RAG | Groq API |
 | GitHub integration | Octokit |
@@ -85,7 +85,7 @@ CodeLens-hub/
 │
 ├── scripts/
 │   ├── setup.sh                 # Idempotent bootstrap
-│   └── 001_initial_schema.sql   # DB schema migration
+│   └── schema.sql               # Full DB schema (tables, RLS, indexes)
 │
 └── docker-compose.yml           # postgres + backend + frontend
 ```

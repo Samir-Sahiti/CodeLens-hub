@@ -1,5 +1,5 @@
 -- =============================================================================
--- CodeLens Hub – Initial Schema Migration
+-- CodeLens Hub – Full Schema
 -- Run this in the Supabase SQL Editor (Dashboard → SQL Editor → New query)
 -- PRE-REQUISITE: Enable the pgvector extension first via
 --   Dashboard → Database → Extensions → enable "vector"
@@ -43,25 +43,38 @@ CREATE POLICY "Users can only access their own profile"
 -- =============================================================================
 
 CREATE TABLE repositories (
-  id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id        UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  name           TEXT        NOT NULL,
-  full_name      TEXT,
-  source         repo_source NOT NULL DEFAULT 'github',
-  status         repo_status NOT NULL DEFAULT 'pending',
-  github_url     TEXT,
-  default_branch TEXT        DEFAULT 'main',
-  file_count     INT         DEFAULT 0,
-  indexed_at     TIMESTAMPTZ,
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id          UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  name             TEXT        NOT NULL,
+  full_name        TEXT,
+  source           repo_source NOT NULL DEFAULT 'github',
+  status           repo_status NOT NULL DEFAULT 'pending',
+  github_url       TEXT,
+  default_branch   TEXT        DEFAULT 'main',
+  file_count       INT         DEFAULT 0,
+  indexed_at       TIMESTAMPTZ,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  webhook_secret    TEXT,
+  auto_sync_enabled BOOLEAN    NOT NULL DEFAULT false
 );
 
 ALTER TABLE repositories ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "Users can only access their own repos"
-  ON repositories
-  FOR ALL
-  USING (auth.uid() = user_id);
+-- Replaced by the broader team-access policy below.
+-- CREATE POLICY "Users can only access their own repos" ...
+
+CREATE POLICY "Users can access own repos or team-shared repos"
+  ON repositories FOR ALL
+  USING (
+    auth.uid() = user_id
+    OR id IN (
+      SELECT repo_id
+      FROM   team_repositories
+      WHERE  team_id IN (
+        SELECT team_id FROM team_members WHERE user_id = auth.uid()
+      )
+    )
+  );
 
 -- =============================================================================
 -- GRAPH NODES
@@ -140,5 +153,74 @@ CREATE TABLE analysis_issues (
 CREATE INDEX ON analysis_issues (repo_id);
 
 -- =============================================================================
--- END OF MIGRATION
+-- TEAMS / ORGANIZATIONS
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS teams (
+  id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  name       TEXT        NOT NULL,
+  created_by UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS team_members (
+  id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  team_id         UUID        NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+  user_id         UUID        REFERENCES auth.users(id) ON DELETE SET NULL,
+  github_username TEXT        NOT NULL,
+  role            TEXT        NOT NULL DEFAULT 'member'
+                              CHECK (role IN ('owner', 'member')),
+  joined_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (team_id, github_username)
+);
+
+CREATE INDEX IF NOT EXISTS team_members_user_id_idx ON team_members (user_id);
+CREATE INDEX IF NOT EXISTS team_members_team_id_idx ON team_members (team_id);
+
+CREATE TABLE IF NOT EXISTS team_repositories (
+  id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  team_id UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+  repo_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+  UNIQUE (team_id, repo_id)
+);
+
+CREATE INDEX IF NOT EXISTS team_repositories_team_id_idx ON team_repositories (team_id);
+CREATE INDEX IF NOT EXISTS team_repositories_repo_id_idx ON team_repositories (repo_id);
+
+-- ── Row Level Security ────────────────────────────────────────────────────────
+
+ALTER TABLE teams             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE team_members      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE team_repositories ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Team members can view their teams"
+  ON teams FOR SELECT
+  USING (
+    id IN (
+      SELECT team_id FROM team_members WHERE user_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "Team owners can manage their teams"
+  ON teams FOR ALL
+  USING (created_by = auth.uid());
+
+CREATE POLICY "Team members can view members of their teams"
+  ON team_members FOR SELECT
+  USING (
+    team_id IN (
+      SELECT team_id FROM team_members WHERE user_id = auth.uid()
+    )
+  );
+
+CREATE POLICY "Team members can view team repositories"
+  ON team_repositories FOR SELECT
+  USING (
+    team_id IN (
+      SELECT team_id FROM team_members WHERE user_id = auth.uid()
+    )
+  );
+
+-- =============================================================================
+-- END OF SCHEMA
 -- =============================================================================

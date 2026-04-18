@@ -26,10 +26,8 @@ This guide covers everything needed to deploy CodeLens publicly with HTTPS.
 ## Step 1 — Production Supabase project
 
 1. Go to [supabase.com](https://supabase.com) → New project
-2. Once created, open the SQL Editor and run **both** migrations in order:
-   - `scripts/001_initial_schema.sql`
-   - `scripts/002_webhooks.sql`
-   - `scripts/003_teams.sql`
+2. Once created, open the SQL Editor and run the schema:
+   - `scripts/schema.sql`
 3. Navigate to **Authentication → Providers → GitHub** and enable GitHub OAuth
 4. Copy the following values (Settings → API):
    - `SUPABASE_URL`
