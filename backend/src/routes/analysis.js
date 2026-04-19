@@ -12,6 +12,9 @@ router.get('/:repoId/metrics', requireAuth, analysisController.getMetrics);
 // Get architectural issues (circular deps, god files, dead code, etc.)
 router.get('/:repoId/issues', requireAuth, analysisController.getIssues);
 
+// Suppress a specific issue (false positive)
+router.post('/:repoId/issues/suppress', requireAuth, analysisController.suppressIssue);
+
 // Change impact analysis — blast radius for a specific file
 router.get('/:repoId/impact/:filePath(*)', requireAuth, analysisController.getImpact);
 

@@ -1,5 +1,6 @@
 const { parseFile } = require('../parsers/repositoryParser');
 const { extractChunksFromFile } = require('../parsers/chunkParser');
+const { scanFileForSecrets } = require('./secretScanner');
 const { OpenAI } = require('openai');
 const { supabaseAdmin } = require('../db/supabase');
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -109,6 +110,14 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     const octokit = source === 'github' ? new Octokit({ auth: token }) : null;
 
     const limit = pLimit(10);
+    const issues = [];
+
+    // Fetch existing suppressions for this repo BEFORE scanning
+    const { data: suppressions } = await supabaseAdmin
+      .from('issue_suppressions')
+      .select('file_path, rule_id, line_number')
+      .eq('repo_id', repoId);
+    const suppSet = new Set(suppressions?.map(s => `${s.file_path}:${s.rule_id}:${s.line_number}`) || []);
 
     // 2.5 Optional Pre-pass for C# Namespaces (US-011)
     const namespaceMap = new Map();
@@ -163,6 +172,24 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
             // Parse file directly, passing namespaceMap for C# resolution
             const parsed = parseFile(file.path, file.content, isCSharpRepo ? namespaceMap : getAllFilesSet);
             parsedFiles.push(parsed);
+
+            // Secret scanning (US-044)
+            try {
+              const secretIssues = await scanFileForSecrets(file.path, file.content);
+              const validSecrets = secretIssues.filter(is => {
+                const key = `${file.path}:${is._meta.rule_id}:${is._meta.line_number}`;
+                return !suppSet.has(key);
+              });
+
+              validSecrets.forEach(is => {
+                delete is._meta;
+                is.repo_id = repoId;
+                issues.push(is);
+              });
+            } catch (scanErr) {
+              console.warn(`[indexer] Secret scan failed for ${file.path}: ${scanErr.message}`);
+            }
+
             parsedCount += 1;
             if (parsedCount % 100 === 0) {
               console.log(`[indexer] Parsed ${parsedCount}/${pendingFiles.length} files...`);
@@ -280,7 +307,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     console.timeEnd(`[indexer] Phase 3: DB writes (${repoId})`);
 
     // 9. issue detection
-    const issues = [];
+    // (issues array initialized earlier to collect secret scan results)
 
     // Circular dependency detection
     const adjacencyList = new Map();
