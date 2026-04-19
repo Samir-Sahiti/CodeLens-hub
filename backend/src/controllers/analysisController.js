@@ -1,7 +1,4 @@
-/**
- * Analysis controller stubs
- * Full implementation across Sprints 2–3 (US-005 through US-007).
- */
+const { supabase, supabaseAdmin } = require('../db/supabase');
 
 /** GET /api/analysis/:repoId/graph — dependency graph nodes + edges */
 const getDependencyGraph = async (req, res) => {
@@ -17,8 +14,38 @@ const getMetrics = async (req, res) => {
 
 /** GET /api/analysis/:repoId/issues — architectural issues (circular deps, god files, etc.) */
 const getIssues = async (req, res) => {
-  // TODO: Sprint 3 — query analysis_issues table
-  res.status(501).json({ error: 'Not implemented' });
+  const { repoId } = req.params;
+  const { data, error } = await supabaseAdmin
+    .from('analysis_issues')
+    .select('*')
+    .eq('repo_id', repoId);
+    
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+};
+
+/** POST /api/analysis/:repoId/issues/suppress — mark an issue as a false positive */
+const suppressIssue = async (req, res) => {
+  const { repoId } = req.params;
+  const { file_path, rule_id, line_number } = req.body;
+  const userId = req.user.id;
+
+  // 1. Insert into suppressions table
+  const { error: suppError } = await supabase
+    .from('issue_suppressions')
+    .insert({ repo_id: repoId, file_path, rule_id, line_number, created_by: userId });
+
+  if (suppError) return res.status(500).json({ error: suppError.message });
+
+  // 2. Delete the active issue from analysis_issues so it disappears immediately
+  await supabaseAdmin
+    .from('analysis_issues')
+    .delete()
+    .match({ repo_id: repoId, type: 'hardcoded_secret' })
+    .contains('file_paths', [file_path])
+    .ilike('description', `%Rule ID: ${rule_id}%`);
+
+  res.status(200).json({ success: true });
 };
 
 /** GET /api/analysis/:repoId/impact/:filePath — blast-radius BFS from a file */
@@ -27,4 +54,4 @@ const getImpact = async (req, res) => {
   res.status(501).json({ error: 'Not implemented' });
 };
 
-module.exports = { getDependencyGraph, getMetrics, getIssues, getImpact };
+module.exports = { getDependencyGraph, getMetrics, getIssues, suppressIssue, getImpact };
