@@ -9,6 +9,7 @@ const indexer = require('../services/indexer');
 
 /**
  * POST /api/webhooks/github
+ * POST /api/webhooks/github
  *
  * Receives a GitHub push event, validates the HMAC-SHA256 signature,
  * and triggers re-indexing if the push is to the repo's default branch.
@@ -17,8 +18,8 @@ const indexer = require('../services/indexer');
  */
 const handleGitHubPush = async (req, res) => {
   const signature = req.headers['x-hub-signature-256'];
-  const event     = req.headers['x-github-event'];
-  const rawBody   = req.body; // Buffer (set by express.raw middleware on this route)
+  const event = req.headers['x-github-event'];
+  const rawBody = req.body; // Buffer (set by express.raw middleware on this route)
 
   // Only process push events
   if (event !== 'push') {
@@ -33,7 +34,7 @@ const handleGitHubPush = async (req, res) => {
   }
 
   const fullName = payload?.repository?.full_name;
-  const ref      = payload?.ref;
+  const ref = payload?.ref;
 
   if (!fullName || !ref) {
     return res.status(400).json({ error: 'Missing repository.full_name or ref in payload' });
@@ -65,7 +66,7 @@ const handleGitHubPush = async (req, res) => {
 
   const isValid = crypto.timingSafeEqual(
     Buffer.from(signature, 'utf8'),
-    Buffer.from(expected,  'utf8')
+    Buffer.from(expected, 'utf8')
   );
 
   if (!isValid) {
