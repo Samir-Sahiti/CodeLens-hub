@@ -119,15 +119,11 @@ export default function Dashboard() {
   }, [fetchRepos]);
 
   useEffect(() => {
-    let timeoutId;
     const isWorking = repos.some(r => r.status === 'pending' || r.status === 'indexing');
-    if (isWorking) {
-      timeoutId = setTimeout(() => {
-        fetchRepos();
-      }, 5000);
-    }
-    return () => clearTimeout(timeoutId);
-  }, [repos, fetchRepos]);
+    if (!isWorking) return;
+    const id = setInterval(fetchRepos, 3000);
+    return () => clearInterval(id);
+  }, [repos.map(r => r.status).join(','), fetchRepos]);
 
   const handleRetry = async (e, repoId) => {
     e.preventDefault(); // prevent link navigation

@@ -2,6 +2,7 @@ const { parseFile } = require('../parsers/repositoryParser');
 const { extractChunksFromFile } = require('../parsers/chunkParser');
 const { scanFileForSecrets } = require('./secretScanner');
 const { scanFileForInsecurePatterns } = require('./sastEngine'); // US-046
+const { recordUsage } = require('./usageTracker'); // US-042
 const { OpenAI } = require('openai');
 const { supabaseAdmin } = require('../db/supabase');
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -93,6 +94,14 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
   try {
     console.log(`[indexer] Starting indexing for repoId: ${repoId} (source: ${source})`);
     console.time(`[indexer] Total pipeline (${repoId})`);
+
+    // Fetch repo owner for usage tracking (US-042)
+    const { data: repoMeta } = await supabaseAdmin
+      .from('repositories')
+      .select('user_id')
+      .eq('id', repoId)
+      .single();
+    const repoUserId = repoMeta?.user_id || null;
 
     // 1. fetch files & 2. filter
     console.time(`[indexer] Phase 1: File discovery (${repoId})`);
@@ -441,17 +450,43 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       }
     }
 
-    // 10. Extract Semantic Chunks and Embed Vectors (US-017)
+    // 10. Store full file contents (US-043) — independent of OpenAI key
+    await supabaseAdmin.from('file_contents').delete().eq('repo_id', repoId);
+    const FILE_SIZE_CAP = 1024 * 1024; // 1 MB
+    const fileContentRows = [];
+    for (const file of pendingFiles) {
+      if (!file.content) continue;
+      const raw = file.content;
+      const truncated = raw.length > FILE_SIZE_CAP;
+      fileContentRows.push({
+        repo_id:   repoId,
+        file_path: file.path,
+        content:   truncated ? raw.slice(0, FILE_SIZE_CAP) + '\n\n/* [CodeLens] File truncated at 1 MB */' : raw,
+        byte_size: Buffer.byteLength(raw, 'utf8'),
+      });
+    }
+    if (fileContentRows.length > 0) {
+      const fcBatches = chunkArray(fileContentRows, 200);
+      for (const batch of fcBatches) {
+        const { error: fcErr } = await supabaseAdmin
+          .from('file_contents')
+          .upsert(batch, { onConflict: 'repo_id,file_path', ignoreDuplicates: false });
+        if (fcErr) console.error(`[indexer] file_contents insert error: ${fcErr.message}`);
+      }
+    }
+    console.log(`[indexer] Stored ${fileContentRows.length} file contents.`);
+
+    // 11. Extract Semantic Chunks and Embed Vectors (US-017)
     if (!process.env.OPENAI_API_KEY) {
       console.log('[indexer] No OPENAI_API_KEY set — skipping embedding step.');
     } else {
       try {
         console.log(`[indexer] Starting semantic chunking and embedding for ${repoId}`);
 
-        // 10a. Wipe obsolete chunks natively
+        // Wipe obsolete chunks before re-embedding
         await supabaseAdmin.from('code_chunks').delete().eq('repo_id', repoId);
 
-        // 10b. Extract local raw chunks
+        // Extract local raw chunks
         const allExtractedChunks = [];
         for (const file of pendingFiles) {
           if (!file.content) continue;
@@ -476,6 +511,11 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
                   input: batch.map(c => c.content),
                   model: "text-embedding-3-small"
                 });
+
+                // Record embedding token usage (US-042)
+                if (repoUserId && res.usage?.total_tokens) {
+                  recordUsage({ userId: repoUserId, endpoint: 'indexer/embed', provider: 'openai', embeddingTokens: res.usage.total_tokens });
+                }
 
                 for (let i = 0; i < batch.length; i++) {
                   mappedPayloads.push({

@@ -4,9 +4,29 @@ import { useAuth } from '../context/AuthContext';
 import { useRepo } from '../context/RepoContext';
 import OnboardingModal from './OnboardingModal';
 
+function useTokenUsage(session) {
+  const [usage, setUsage] = useState(null);
+
+  useEffect(() => {
+    if (!session?.access_token) return;
+    let cancelled = false;
+    const fetch_ = () =>
+      fetch('/api/usage/today', { headers: { Authorization: `Bearer ${session.access_token}` } })
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (!cancelled && d) setUsage(d); })
+        .catch(() => {});
+    fetch_();
+    const id = setInterval(fetch_, 60_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [session?.access_token]);
+
+  return usage;
+}
+
 export default function Layout() {
-  const { user, signOut } = useAuth();
+  const { user, session, signOut } = useAuth();
   const { repo, issueCount } = useRepo();
+  const tokenUsage = useTokenUsage(session);
   const location = useLocation();
   const { repoId } = useParams();
   const [searchParams] = useSearchParams();
@@ -146,6 +166,25 @@ export default function Layout() {
               </span>
             </div>
           </div>
+
+          {/* Token usage indicator (US-042) */}
+          {tokenUsage && (
+            <div className="hidden lg:block mb-2 px-2">
+              <div className="flex justify-between text-xs text-gray-500 mb-1">
+                <span>Today</span>
+                <span>{(tokenUsage.used / 1000).toFixed(1)}K / {(tokenUsage.limit / 1000).toFixed(0)}K tokens</span>
+              </div>
+              <div className="h-1 w-full rounded-full bg-gray-800 overflow-hidden">
+                <div
+                  className={`h-full rounded-full transition-all ${
+                    tokenUsage.used / tokenUsage.limit > 0.9 ? 'bg-red-500' :
+                    tokenUsage.used / tokenUsage.limit > 0.7 ? 'bg-yellow-500' : 'bg-indigo-500'
+                  }`}
+                  style={{ width: `${Math.min(100, (tokenUsage.used / tokenUsage.limit) * 100).toFixed(1)}%` }}
+                />
+              </div>
+            </div>
+          )}
 
           {/* Show introduction again */}
           <button

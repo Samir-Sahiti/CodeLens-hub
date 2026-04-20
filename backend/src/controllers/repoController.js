@@ -196,7 +196,7 @@ const reindexRepo = async (req, res) => {
     return res.status(404).json({ error: 'Repository not found or unauthorized' });
   }
 
-  const tables = ['code_chunks', 'analysis_issues', 'graph_edges', 'graph_nodes'];
+  const tables = ['code_chunks', 'file_contents', 'analysis_issues', 'graph_edges', 'graph_nodes'];
 
   for (const table of tables) {
     const { error: deleteError } = await supabaseAdmin
@@ -236,8 +236,12 @@ const reindexRepo = async (req, res) => {
     }
 
     if (githubToken) {
-      indexer.startGitHubIndexing(repo.id, githubToken, repo.name);
+      // Use full_name (owner/repo) so the GitHub API call resolves correctly.
+      // Fall back to name for repos connected before full_name was populated.
+      const repoFullName = repo.full_name || repo.name;
+      indexer.startGitHubIndexing(repo.id, githubToken, repoFullName);
     } else {
+      console.error(`[reindexRepo] GitHub token not found in vault for user ${req.user.id} — profile.github_token_secret_id: ${profile?.github_token_secret_id ?? 'null'}. User must sign out and sign back in to re-sync their token.`);
       await supabaseAdmin.from('repositories').update({ status: 'failed' }).eq('id', repoId);
     }
   } else if (repo.source === 'upload') {
@@ -395,7 +399,8 @@ const generateWebhook = async (req, res) => {
 
 /**
  * GET /api/repos/:repoId/file?path=src/index.js
- * Returns concatenated source content from code_chunks for a given file.
+ * Returns full file content from file_contents (US-043), falling back to
+ * concatenated code_chunks for repos indexed before US-043 was deployed.
  */
 const getFileContent = async (req, res) => {
   const { repoId } = req.params;
@@ -418,7 +423,19 @@ const getFileContent = async (req, res) => {
     .eq('file_path', filePath)
     .maybeSingle();
 
-  // Concatenate chunks in line order
+  // Primary: full content from file_contents (US-043)
+  const { data: fc, error: fcErr } = await supabaseAdmin
+    .from('file_contents')
+    .select('content')
+    .eq('repo_id', repoId)
+    .eq('file_path', filePath)
+    .maybeSingle();
+
+  if (!fcErr && fc) {
+    return res.json({ content: fc.content, filePath, language: node?.language || null });
+  }
+
+  // Fallback: concatenate code_chunks (pre-US-043 repos)
   const { data: chunks, error } = await supabaseAdmin
     .from('code_chunks')
     .select('content, start_line')
