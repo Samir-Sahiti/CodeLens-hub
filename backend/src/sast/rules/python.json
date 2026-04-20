@@ -1,0 +1,56 @@
+[
+  {
+    "id": "py_eval",
+    "name": "Use of eval()",
+    "severity": "high",
+    "cwe": "CWE-95",
+    "description": "eval() executes arbitrary Python code — a direct code injection risk.",
+    "fixHint": "Use ast.literal_eval() for safe evaluation of literals.",
+    "query": "(call function: (identifier) @fn (#eq? @fn \"eval\"))"
+  },
+  {
+    "id": "py_exec",
+    "name": "Use of exec()",
+    "severity": "high",
+    "cwe": "CWE-95",
+    "description": "exec() executes arbitrary Python code dynamically.",
+    "fixHint": "Avoid dynamic code execution. Restructure to use static function calls.",
+    "query": "(call function: (identifier) @fn (#eq? @fn \"exec\"))"
+  },
+  {
+    "id": "py_pickle_loads",
+    "name": "Use of pickle.loads() or pickle.load()",
+    "severity": "high",
+    "cwe": "CWE-502",
+    "description": "Deserializing pickle data from untrusted sources allows arbitrary code execution.",
+    "fixHint": "Use JSON or another safe serialization format. Never unpickle data from untrusted sources.",
+    "query": "(call function: (attribute object: (identifier) @obj attribute: (identifier) @method (#eq? @obj \"pickle\") (#match? @method \"^loads?$\")))"
+  },
+  {
+    "id": "py_subprocess_shell_true",
+    "name": "subprocess with shell=True",
+    "severity": "high",
+    "cwe": "CWE-78",
+    "description": "shell=True passes the command to the shell interpreter, enabling command injection.",
+    "fixHint": "Pass a list of arguments to subprocess functions and remove shell=True.",
+    "query": "(call arguments: (argument_list (keyword_argument name: (identifier) @kw value: (true) (#eq? @kw \"shell\"))))"
+  },
+  {
+    "id": "py_sql_percent_format",
+    "name": "Raw SQL with % string formatting",
+    "severity": "high",
+    "cwe": "CWE-89",
+    "description": "Building SQL queries with % formatting allows SQL injection.",
+    "fixHint": "Use parameterised queries: cursor.execute(sql, params) with a tuple of values.",
+    "pattern": "execute\\s*\\(.*%.*\\)"
+  },
+  {
+    "id": "py_yaml_unsafe_load",
+    "name": "yaml.load() without SafeLoader",
+    "severity": "high",
+    "cwe": "CWE-502",
+    "description": "yaml.load() without an explicit Loader can deserialize and execute arbitrary Python objects.",
+    "fixHint": "Use yaml.safe_load() or pass Loader=yaml.SafeLoader explicitly.",
+    "pattern": "yaml\\.load\\s*\\([^)]*\\)"
+  }
+]

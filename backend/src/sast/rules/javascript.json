@@ -1,0 +1,56 @@
+[
+  {
+    "id": "js_eval",
+    "name": "Use of eval()",
+    "severity": "high",
+    "cwe": "CWE-95",
+    "description": "eval() executes arbitrary code from a string — a direct path to code injection.",
+    "fixHint": "Replace eval() with JSON.parse() for data or a dedicated parser.",
+    "query": "(call_expression function: (identifier) @fn (#eq? @fn \"eval\"))"
+  },
+  {
+    "id": "js_new_function",
+    "name": "Use of new Function()",
+    "severity": "high",
+    "cwe": "CWE-95",
+    "description": "new Function() constructs and executes code at runtime — equivalent risk to eval().",
+    "fixHint": "Use a static function or a safe expression evaluator library.",
+    "query": "(new_expression constructor: (identifier) @fn (#eq? @fn \"Function\"))"
+  },
+  {
+    "id": "js_dangerous_inner_html",
+    "name": "Use of dangerouslySetInnerHTML",
+    "severity": "high",
+    "cwe": "CWE-79",
+    "description": "dangerouslySetInnerHTML bypasses React's XSS protection and directly injects HTML.",
+    "fixHint": "Sanitize with DOMPurify before setting HTML, or use standard JSX rendering.",
+    "query": "(jsx_attribute (property_identifier) @attr (#eq? @attr \"dangerouslySetInnerHTML\"))"
+  },
+  {
+    "id": "js_exec_template_literal",
+    "name": "child_process exec with template literal",
+    "severity": "high",
+    "cwe": "CWE-78",
+    "description": "Executing shell commands built from template literals allows command injection.",
+    "fixHint": "Use execFile() or spawn() with an explicit argument array instead of a shell string.",
+    "query": "(call_expression function: (member_expression property: (property_identifier) @method (#match? @method \"^(exec|execSync|spawn|spawnSync)$\")) arguments: (arguments (template_string)))"
+  },
+  {
+    "id": "js_require_non_literal",
+    "name": "require() with non-literal argument",
+    "severity": "medium",
+    "cwe": "CWE-706",
+    "description": "Dynamic require() paths can lead to path traversal or unintended module loading.",
+    "fixHint": "Use a static string literal in require(). Whitelist allowed modules if dynamic loading is needed.",
+    "query": "(call_expression function: (identifier) @fn (#eq? @fn \"require\") arguments: (arguments (identifier)))"
+  },
+  {
+    "id": "js_document_write",
+    "name": "Use of document.write()",
+    "severity": "medium",
+    "cwe": "CWE-79",
+    "description": "document.write() can inject arbitrary HTML and is a vector for XSS.",
+    "fixHint": "Use createElement() and appendChild() instead.",
+    "query": "(call_expression function: (member_expression object: (identifier) @obj property: (property_identifier) @prop (#eq? @obj \"document\") (#eq? @prop \"write\")))"
+  }
+]
