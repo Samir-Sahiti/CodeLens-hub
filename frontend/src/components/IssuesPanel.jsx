@@ -27,9 +27,9 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, repoId }) {
     );
   }
 
-  // Added 'hardcoded_secret' to the group order
   const GROUP_ORDER = [
     { type: 'hardcoded_secret', label: 'Hardcoded Secrets' },
+    { type: 'insecure_pattern', label: 'Insecure Code Patterns' },
     { type: 'circular_dependency', label: 'Circular Dependencies' },
     { type: 'god_file', label: 'God Files' },
     { type: 'high_coupling', label: 'High Coupling' },
@@ -91,6 +91,46 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, repoId }) {
     }
   };
 
+  const handleDisableSastRule = async (e, issue) => {
+    e.stopPropagation();
+
+    // Extract rule_id from description — format: "[Line N] Rule Name: ... (CWE-NNN) — Fix: ..."
+    // The rule_id is embedded via the _meta that was deleted, so we match from known rule id patterns
+    // stored in the description prefix before the first colon after the line reference.
+    // Fallback: parse from "Rule ID: <id>" if present (secrets-style), else skip.
+    const ruleIdMatch = issue.description.match(/Rule ID: ([\w-]+)/);
+    if (!ruleIdMatch) {
+      console.error("Could not parse rule_id from insecure_pattern description.");
+      return;
+    }
+
+    const ruleId = ruleIdMatch[1];
+
+    try {
+      // Fetch current disabled rules first, then append
+      const repoRes = await fetch(`/api/repos/${repoId}/status`);
+      const repoData = await repoRes.json();
+      const currentDisabled = repoData.sast_disabled_rules || [];
+
+      if (currentDisabled.includes(ruleId)) return; // already disabled
+
+      const response = await fetch(`/api/repos/${repoId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sast_disabled_rules: [...currentDisabled, ruleId] })
+      });
+
+      if (!response.ok) throw new Error("Failed to disable rule");
+
+      // Remove all issues with this rule from UI immediately
+      setLocalIssues(prev =>
+        prev.filter(i => !(i.type === 'insecure_pattern' && i.description.includes(`Rule ID: ${ruleId}`)))
+      );
+    } catch (err) {
+      console.error("Failed to disable SAST rule", err);
+    }
+  };
+
   return (
     <div className="flex flex-col h-[40rem] overflow-auto bg-gray-950 rounded-xl space-y-8 p-1 relative">
       {GROUP_ORDER.map(({ type, label }) => {
@@ -100,8 +140,8 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, repoId }) {
         return (
           <div key={type} className="mb-8 last:mb-0">
             <h2 className="text-lg font-semibold text-gray-200 border-b border-gray-800 pb-2 mb-4 sticky top-0 bg-gray-950 z-10 flex items-center">
-              {/* Add lock icon specifically for hardcoded secrets */}
               {type === 'hardcoded_secret' && <span className="mr-2">🔒</span>}
+              {type === 'insecure_pattern' && <span className="mr-2">🛡️</span>}
               {label} <span className="text-gray-500 text-sm ml-2 font-normal">({groupIssues.length})</span>
             </h2>
             <div className="grid gap-4">
@@ -125,9 +165,19 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, repoId }) {
                         Mark as false positive
                       </button>
                     )}
+
+                    {/* Disable this rule button for insecure patterns */}
+                    {type === 'insecure_pattern' && (
+                      <button
+                        onClick={(e) => handleDisableSastRule(e, issue)}
+                        className="text-xs text-gray-400 hover:text-gray-200 underline transition-colors"
+                      >
+                        Disable this rule
+                      </button>
+                    )}
                   </div>
 
-                  <p className="text-gray-300 text-sm mb-4 leading-relaxed">
+                  <p className="text-gray-300 text-sm mb-4 leading-relaxed whitespace-pre-wrap">
                     {issue.description || 'No description available.'}
                   </p>
 

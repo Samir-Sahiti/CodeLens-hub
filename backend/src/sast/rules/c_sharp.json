@@ -1,0 +1,47 @@
+[
+  {
+    "id": "cs_process_start_concat",
+    "name": "Process.Start with string concatenation",
+    "severity": "high",
+    "cwe": "CWE-78",
+    "description": "Passing concatenated strings to Process.Start allows command injection.",
+    "fixHint": "Use ProcessStartInfo with explicit ArgumentList to avoid shell interpretation.",
+    "query": "(invocation_expression function: (member_access_expression name: (identifier) @method (#eq? @method \"Start\")) arguments: (argument_list (argument (binary_expression operator: \"+\"))))"
+  },
+  {
+    "id": "cs_sql_concat",
+    "name": "SqlCommand with string-concatenated SQL",
+    "severity": "high",
+    "cwe": "CWE-89",
+    "description": "Building SQL strings via concatenation allows SQL injection attacks.",
+    "fixHint": "Use parameterised queries with SqlParameter objects.",
+    "query": "(object_creation_expression type: (identifier) @type (#eq? @type \"SqlCommand\") arguments: (argument_list (argument (binary_expression operator: \"+\"))))"
+  },
+  {
+    "id": "cs_weak_crypto_md5",
+    "name": "Use of MD5",
+    "severity": "medium",
+    "cwe": "CWE-327",
+    "description": "MD5 is cryptographically broken and unsuitable for security-sensitive hashing.",
+    "fixHint": "Use SHA-256 via System.Security.Cryptography.SHA256.",
+    "pattern": "MD5"
+  },
+  {
+    "id": "cs_weak_crypto_sha1",
+    "name": "Use of SHA1",
+    "severity": "medium",
+    "cwe": "CWE-327",
+    "description": "SHA1 is considered weak for collision resistance.",
+    "fixHint": "Use SHA-256 via System.Security.Cryptography.SHA256.",
+    "pattern": "SHA1"
+  },
+  {
+    "id": "cs_weak_crypto_des",
+    "name": "Use of DES or TripleDES",
+    "severity": "high",
+    "cwe": "CWE-327",
+    "description": "DES and TripleDES have insufficient key sizes and known weaknesses.",
+    "fixHint": "Use AES-256 via System.Security.Cryptography.Aes.",
+    "pattern": "\\b(DES|TripleDES|RC4|RC2)\\b"
+  }
+]

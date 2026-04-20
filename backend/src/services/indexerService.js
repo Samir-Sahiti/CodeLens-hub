@@ -1,6 +1,7 @@
 const { parseFile } = require('../parsers/repositoryParser');
 const { extractChunksFromFile } = require('../parsers/chunkParser');
 const { scanFileForSecrets } = require('./secretScanner');
+const { scanFileForInsecurePatterns } = require('./sastEngine'); // US-046
 const { OpenAI } = require('openai');
 const { supabaseAdmin } = require('../db/supabase');
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -119,10 +120,18 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       .eq('repo_id', repoId);
     const suppSet = new Set(suppressions?.map(s => `${s.file_path}:${s.rule_id}:${s.line_number}`) || []);
 
+    // Fetch sast_disabled_rules for this repo (US-046)
+    const { data: repoConfig } = await supabaseAdmin
+      .from('repositories')
+      .select('sast_disabled_rules')
+      .eq('id', repoId)
+      .single();
+    const disabledSastRules = repoConfig?.sast_disabled_rules || [];
+
     // 2.5 Optional Pre-pass for C# Namespaces (US-011)
     const namespaceMap = new Map();
     const isCSharpRepo = pendingFiles.some(f => f.path.toLowerCase().endsWith('.cs'));
-    
+
     if (isCSharpRepo) {
       console.log(`[indexer] C# files detected. Running namespace pre-pass...`);
       await Promise.all(
@@ -188,6 +197,22 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
               });
             } catch (scanErr) {
               console.warn(`[indexer] Secret scan failed for ${file.path}: ${scanErr.message}`);
+            }
+
+            // SAST pattern scanning (US-046)
+            try {
+              const sastIssues = await scanFileForInsecurePatterns(
+                file.path,
+                file.content,
+                disabledSastRules
+              );
+              sastIssues.forEach(issue => {
+                issue.repo_id = repoId;
+                delete issue._meta;
+                issues.push(issue);
+              });
+            } catch (sastErr) {
+              console.warn(`[indexer] SAST scan failed for ${file.path}: ${sastErr.message}`);
             }
 
             parsedCount += 1;
@@ -421,10 +446,10 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     } else {
       try {
         console.log(`[indexer] Starting semantic chunking and embedding for ${repoId}`);
-        
+
         // 10a. Wipe obsolete chunks natively
         await supabaseAdmin.from('code_chunks').delete().eq('repo_id', repoId);
-        
+
         // 10b. Extract local raw chunks
         const allExtractedChunks = [];
         for (const file of pendingFiles) {
@@ -432,9 +457,9 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
           const fileChunks = extractChunksFromFile(file.path, file.content, repoId);
           allExtractedChunks.push(...fileChunks);
         }
-        
+
         console.log(`[indexer] Generated ${allExtractedChunks.length} raw chunks. Proceeding to OpenAI.`);
-        
+
         // 10c. Batch API vectors — batch size of 100 (OpenAI supports up to 2048 inputs)
         console.time(`[indexer] Phase 5: Embedding (${repoId})`);
         const batches = chunkArray(allExtractedChunks, 100);
@@ -498,7 +523,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
         }
         console.log(`[indexer] Completely finished semantic embeddings mappings. Saved ${mappedPayloads.length} vectors!`);
         console.timeEnd(`[indexer] Phase 5: Embedding (${repoId})`);
-        
+
       } catch (embeddingError) {
         console.warn(`[indexer] Global embedding step failed severely, isolating error entirely: ${embeddingError.message}`);
       }
