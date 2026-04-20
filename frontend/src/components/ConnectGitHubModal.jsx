@@ -16,7 +16,9 @@ export default function ConnectGitHubModal({ isOpen, onClose, existingRepos, onC
 
   const observerTarget = useRef(null);
 
-  // 1. Fetch the user's github_access_token from their profile
+  // 1. Get GitHub token from the active session's provider_token.
+  //    Supabase stores the OAuth provider token in the session — no DB read needed
+  //    and the plaintext column no longer exists (migrated to Vault in US-039).
   useEffect(() => {
     if (!isOpen) return;
     
@@ -24,17 +26,12 @@ export default function ConnectGitHubModal({ isOpen, onClose, existingRepos, onC
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) return;
 
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('github_access_token')
-        .eq('id', session.user.id)
-        .single();
-
-      if (error || !data?.github_access_token) {
+      const token = session.provider_token;
+      if (!token) {
         setIsTokenMissing(true);
         setIsLoading(false);
       } else {
-        setGithubToken(data.github_access_token);
+        setGithubToken(token);
       }
     };
     fetchToken();

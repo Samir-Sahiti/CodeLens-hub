@@ -19,6 +19,32 @@ const errorHandler   = require('./middleware/errorHandler');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// ── Log Redaction (US-039) ────────────────────────────────────────────────────
+const originalLog = console.log;
+const originalError = console.error;
+const originalWarn = console.warn;
+
+const redact = (args) => {
+  return args.map(arg => {
+    if (typeof arg === 'string') {
+      return arg.replace(/(ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{36,}/g, '[REDACTED_GITHUB_TOKEN]');
+    }
+    if (arg && typeof arg === 'object') {
+      try {
+        let str = JSON.stringify(arg);
+        if (str.match(/(ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{36,}/)) {
+           return JSON.parse(str.replace(/(ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{36,}/g, '[REDACTED_GITHUB_TOKEN]'));
+        }
+      } catch (e) { /* ignore circular references, etc. */ }
+    }
+    return arg;
+  });
+};
+
+console.log = (...args) => originalLog.apply(console, redact(args));
+console.error = (...args) => originalError.apply(console, redact(args));
+console.warn = (...args) => originalWarn.apply(console, redact(args));
+
 // ── Middleware ────────────────────────────────────────────────────────────────
 app.use(helmet());
 app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:3000' }));

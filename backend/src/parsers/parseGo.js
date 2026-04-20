@@ -1,5 +1,6 @@
 const Parser = require('tree-sitter');
 const Go = require('tree-sitter-go');
+const { calculateComplexity } = require('./complexity');
 
 const queryStr = `
   (import_spec path: (interpreted_string_literal) @import_path)
@@ -29,6 +30,7 @@ const parseGo = (filePath, content, allFiles) => {
     const parser = new Parser();
     parser.setLanguage(Go);
     const tree = parser.parse(content);
+    const complexity = calculateComplexity(tree, 'go');
 
     const imports = new Set();
 
@@ -58,11 +60,12 @@ const parseGo = (filePath, content, allFiles) => {
     return {
       filePath,
       imports: Array.from(imports),
-      exports: []
+      exports: [],
+      complexity
     };
   } catch (err) {
     console.warn(`[Parser] Failed to parse Go ${filePath}: ${err.message}`);
-    return { filePath, imports: [], exports: [] };
+    return { filePath, imports: [], exports: [], complexity: 1 };
   }
 };
 

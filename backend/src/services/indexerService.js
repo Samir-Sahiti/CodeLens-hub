@@ -258,7 +258,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
         line_count: lineCount,
         outgoing_count: 0,
         incoming_count: 0,
-        complexity_score: 0
+        complexity_score: file.complexity || 1
       });
 
       for (const imp of file.imports) {
@@ -317,7 +317,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       const inC = incomingMap[node.file_path] || 0;
       node.outgoing_count = outC;
       node.incoming_count = inC;
-      node.complexity_score = node.line_count * (outC / totalNodes);
+      // US-040: Using true cyclomatic complexity from AST tree
       return node;
     });
 
@@ -389,15 +389,16 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     // Issue: God file & High coupling & Dead code
     for (const node of finalNodes) {
       // God file
+      // A god file typically has a high cyclomatic complexity and large line count
       const godCondition1 = node.incoming_count >= 10 && node.incoming_count > (totalNodes * 0.3);
-      const godCondition2 = node.line_count > 500 && node.incoming_count > (totalNodes * 0.1);
+      const godCondition2 = node.complexity_score > 30 || (node.line_count > 500 && node.incoming_count > (totalNodes * 0.1));
       if (godCondition1 || godCondition2) {
         issues.push({
           repo_id: repoId,
           type: 'god_file',
           severity: (godCondition1 && godCondition2) ? 'high' : 'medium',
           file_paths: [node.file_path],
-          description: `This file is imported heavily — changes here have an extremely wide blast radius.`
+          description: `This file is overly complex (Score: ${node.complexity_score}) or heavily imported — changes here have a wide blast radius.`
         });
       }
 

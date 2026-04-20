@@ -9,6 +9,7 @@ const indexer = require('../services/indexer');
 
 /**
  * POST /api/webhooks/github
+ * POST /api/webhooks/github
  *
  * Receives a GitHub push event, validates the HMAC-SHA256 signature,
  * and triggers re-indexing if the push is to the repo's default branch.
@@ -17,8 +18,8 @@ const indexer = require('../services/indexer');
  */
 const handleGitHubPush = async (req, res) => {
   const signature = req.headers['x-hub-signature-256'];
-  const event     = req.headers['x-github-event'];
-  const rawBody   = req.body; // Buffer (set by express.raw middleware on this route)
+  const event = req.headers['x-github-event'];
+  const rawBody = req.body; // Buffer (set by express.raw middleware on this route)
 
   // Only process push events
   if (event !== 'push') {
@@ -33,7 +34,7 @@ const handleGitHubPush = async (req, res) => {
   }
 
   const fullName = payload?.repository?.full_name;
-  const ref      = payload?.ref;
+  const ref = payload?.ref;
 
   if (!fullName || !ref) {
     return res.status(400).json({ error: 'Missing repository.full_name or ref in payload' });
@@ -65,7 +66,7 @@ const handleGitHubPush = async (req, res) => {
 
   const isValid = crypto.timingSafeEqual(
     Buffer.from(signature, 'utf8'),
-    Buffer.from(expected,  'utf8')
+    Buffer.from(expected, 'utf8')
   );
 
   if (!isValid) {
@@ -78,21 +79,29 @@ const handleGitHubPush = async (req, res) => {
     return res.status(200).json({ ok: true, skipped: 'push not to default branch' });
   }
 
-  // Fetch the repo owner's GitHub token
+  // Fetch the repo owner's GitHub token from Vault
   const { data: profile } = await supabaseAdmin
     .from('profiles')
-    .select('github_access_token')
+    .select('github_token_secret_id')
     .eq('id', repo.user_id)
     .single();
 
-  if (!profile?.github_access_token) {
+  let githubToken = null;
+  if (profile?.github_token_secret_id) {
+    const { data: tokenData } = await supabaseAdmin.rpc('get_github_token_secret', {
+      secret_id: profile.github_token_secret_id,
+    });
+    githubToken = tokenData;
+  }
+
+  if (!githubToken) {
     console.error(`[webhook] No GitHub token for user ${repo.user_id}`);
     return res.status(200).json({ ok: true, skipped: 'no GitHub token found for repo owner' });
   }
 
   // Fire-and-forget re-index — reuses the same pipeline as the manual Re-index button
   console.log(`[webhook] Triggering re-index for repo ${repo.id} (${fullName}) on push to ${ref}`);
-  indexer.startGitHubIndexing(repo.id, profile.github_access_token, repo.name);
+  indexer.startGitHubIndexing(repo.id, githubToken, repo.name);
 
   res.status(200).json({ ok: true, reindexing: true });
 };

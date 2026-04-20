@@ -38,10 +38,12 @@ Create a Team backed by your GitHub repository's collaborator list. Collaborator
 |---|---|
 | Frontend | React 18, Vite, Tailwind CSS, D3.js v7, React Router 6 |
 | Backend | Node.js 20, Express 4 |
-| Database | PostgreSQL 15 (Supabase) + pgvector |
+| Database | PostgreSQL 15 (Supabase) + pgvector ≥ 0.5.0 |
 | Auth | Supabase Auth, GitHub OAuth |
-| AST Parsing | Tree-sitter (JS, TS, TSX, Python, C#) |
+| Credential Security | Supabase Vault (pgsodium) — GitHub tokens stored encrypted |
+| AST Parsing | Tree-sitter (JS, TS, JSX, TSX, Python, C#, Go, Java, Rust, Ruby) |
 | Embeddings | OpenAI `text-embedding-3-small` (1536-dim) |
+| Vector Index | pgvector HNSW (m=16, ef_construction=64) |
 | LLM / RAG | Groq API |
 | AI Code Review | Anthropic Claude (`@anthropic-ai/sdk`) |
 | GitHub Integration | Octokit |
@@ -121,11 +123,12 @@ GROQ_API_KEY          # RAG LLM responses
 
 ### 3. Apply database migrations
 
-In your Supabase dashboard → **SQL Editor**, run:
+In your Supabase dashboard → **SQL Editor**, run the following scripts **in order**:
 
-1. `scripts/schema.sql`
+1. `scripts/schema.sql` — full schema: tables, RLS, HNSW index, Vault functions, match_code_chunks RPC
+2. `scripts/us039_migration.sql` — one-time: backfills any existing plaintext GitHub tokens into Vault
 
-Also enable the **`vector`** extension under Database → Extensions.
+Also enable the **`vector`** and **`supabase_vault`** extensions under Database → Extensions.
 
 ### 4. Run the app
 
@@ -155,6 +158,14 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for a full step-by-step guide covering:
 - Backend on Render, frontend on Vercel
 - CI/CD via GitHub Actions → GHCR
 - CORS verification and branch protection
+
+---
+
+## Complexity Metric
+
+`graph_nodes.complexity_score` reflects **true cyclomatic complexity** computed from each file's Tree-sitter AST (US-040). It equals the sum of logical decision points (`if`, `else if`, `for`, `while`, `catch`, `&&`, `||`, `?:`, and language-equivalent nodes) across all functions, plus the function count. Files with no functions score at least 1.
+
+This value drives risk highlighting in the Metrics table (90th-percentile colouring) and the god-file issue detector (threshold: score > 30).
 
 ---
 

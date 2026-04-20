@@ -7,6 +7,29 @@
 
 -- ─── Extensions ───────────────────────────────────────────────────────────────
 CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS supabase_vault CASCADE;
+
+-- =============================================================================
+-- FUNCTIONS (Vault wrappers for US-039)
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION create_github_token_secret(token text)
+RETURNS uuid
+LANGUAGE sql SECURITY DEFINER
+AS $$
+  SELECT vault.create_secret(token, 'github_access_token');
+$$;
+
+CREATE OR REPLACE FUNCTION get_github_token_secret(secret_id uuid)
+RETURNS text
+LANGUAGE sql SECURITY DEFINER
+AS $$
+  SELECT decrypted_secret FROM vault.decrypted_secrets WHERE id = secret_id;
+$$;
+
+-- Secure decryption function
+REVOKE EXECUTE ON FUNCTION get_github_token_secret FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION get_github_token_secret TO service_role;
 
 -- =============================================================================
 -- ENUMS
@@ -22,12 +45,12 @@ CREATE TYPE issue_type  AS ENUM ('circular_dependency', 'god_file', 'dead_code',
 -- =============================================================================
 
 CREATE TABLE profiles (
-  id                  UUID        PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
-  github_username     TEXT,
-  -- TODO: move github_access_token to Supabase Vault before production.
-  --       Currently stored in plaintext – acceptable only for development.
-  github_access_token TEXT,
-  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id                     UUID        PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  github_username        TEXT,
+  -- Replaced by Vault: plaintext migration was processed in US-039.
+  -- Original field was github_access_token TEXT.
+  github_token_secret_id UUID,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
@@ -131,9 +154,48 @@ CREATE TABLE code_chunks (
   embedding  vector(1536)
 );
 
--- IVFFlat index for approximate nearest-neighbour cosine similarity search.
--- Requires at least a few thousand rows before it outperforms a sequential scan.
-CREATE INDEX ON code_chunks USING ivfflat (embedding vector_cosine_ops);
+-- HNSW index for approximate nearest-neighbour cosine similarity search. (US-041)
+-- Migrated from IVFFlat: HNSW gives lower latency and higher recall on read-heavy RAG workloads.
+-- m=16 controls graph connectivity; ef_construction=64 controls build-time quality.
+CREATE INDEX ON code_chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+
+-- =============================================================================
+-- FUNCTIONS (Vector search with tunable ef_search for US-041)
+-- =============================================================================
+
+-- match_code_chunks: Finds top-k code chunks for a given embedding.
+-- Uses SET LOCAL to bump ef_search to 100 for higher recall per request.
+CREATE OR REPLACE FUNCTION match_code_chunks(
+  p_repo_id   UUID,
+  p_embedding vector(1536),
+  p_top_k     INT DEFAULT 8
+)
+RETURNS TABLE (
+  file_path  TEXT,
+  start_line INT,
+  end_line   INT,
+  content    TEXT,
+  distance   FLOAT
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  -- Higher ef_search trades query time for better recall; safe for RAG workloads.
+  SET LOCAL hnsw.ef_search = 100;
+
+  RETURN QUERY
+  SELECT
+    cc.file_path,
+    cc.start_line,
+    cc.end_line,
+    cc.content,
+    (cc.embedding <=> p_embedding)::FLOAT AS distance
+  FROM code_chunks cc
+  WHERE cc.repo_id = p_repo_id
+  ORDER BY cc.embedding <=> p_embedding
+  LIMIT p_top_k;
+END;
+$$;
 
 -- =============================================================================
 -- ANALYSIS ISSUES

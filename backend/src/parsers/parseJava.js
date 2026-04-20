@@ -1,5 +1,6 @@
 const Parser = require('tree-sitter');
 const Java = require('tree-sitter-java');
+const { calculateComplexity } = require('./complexity');
 
 const queryStr = `
   (package_declaration (scoped_identifier) @export_name)
@@ -42,6 +43,7 @@ const parseJava = (filePath, content, allFiles) => {
     const parser = new Parser();
     parser.setLanguage(Java);
     const tree = parser.parse(content);
+    const complexity = calculateComplexity(tree, 'java');
 
     const imports = new Set();
     const exports = new Set();
@@ -69,11 +71,12 @@ const parseJava = (filePath, content, allFiles) => {
     return {
       filePath,
       imports: Array.from(imports),
-      exports: Array.from(exports)
+      exports: Array.from(exports),
+      complexity
     };
   } catch (err) {
     console.warn(`[Parser] Failed to parse Java ${filePath}: ${err.message}`);
-    return { filePath, imports: [], exports: [] };
+    return { filePath, imports: [], exports: [], complexity: 1 };
   }
 };
 
