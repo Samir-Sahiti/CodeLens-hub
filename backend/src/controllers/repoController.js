@@ -227,8 +227,16 @@ const reindexRepo = async (req, res) => {
       .eq('id', req.user.id)
       .single();
 
-    if (profile?.github_access_token) {
-      indexer.startGitHubIndexing(repo.id, profile.github_access_token, repo.name);
+    let githubToken = null;
+    if (profile?.github_token_secret_id) {
+      const { data: tokenData, error: tokenError } = await supabaseAdmin.rpc('get_github_token_secret', { secret_id: profile.github_token_secret_id });
+      if (!tokenError && tokenData) {
+        githubToken = tokenData;
+      }
+    }
+
+    if (githubToken) {
+      indexer.startGitHubIndexing(repo.id, githubToken, repo.name);
     } else {
       await supabaseAdmin.from('repositories').update({ status: 'failed' }).eq('id', repoId);
     }

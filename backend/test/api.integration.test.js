@@ -138,7 +138,8 @@ describe('Backend API integration (mocked)', () => {
 
   it('POST /api/repos connects a GitHub repo', async () => {
     supabaseAdminMock = createSupabaseMock({
-      'profiles.select.single': async () => ({ data: { github_access_token: 'gh-token' }, error: null }),
+      'profiles.select.single': async () => ({ data: { github_token_secret_id: 'secret-1' }, error: null }),
+      'rpc.get_github_token_secret': async () => ({ data: 'gh-token', error: null }),
       'repositories.insert.single': async () => ({ data: { id: 'repo-1', name: 'acme/repo', source: 'github', status: 'pending' }, error: null }),
     });
 
@@ -169,7 +170,8 @@ describe('Backend API integration (mocked)', () => {
       'graph_edges.delete.many': async () => ({ data: null, error: null }),
       'graph_nodes.delete.many': async () => ({ data: null, error: null }),
       'repositories.update.many': async () => ({ data: null, error: null }),
-      'profiles.select.single': async () => ({ data: { github_access_token: 'gh-token' }, error: null }),
+      'profiles.select.single': async () => ({ data: { github_token_secret_id: 'secret-1' }, error: null }),
+      'rpc.get_github_token_secret': async () => ({ data: 'gh-token', error: null }),
     });
 
     globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
