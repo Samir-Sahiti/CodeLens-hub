@@ -19,6 +19,7 @@
 const { OpenAI }        = require('openai');
 const Anthropic         = require('@anthropic-ai/sdk');
 const { supabaseAdmin } = require('../db/supabase');
+const { recordUsage }   = require('../services/usageTracker');
 
 const _openai    = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const _anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -31,18 +32,6 @@ const anthropic = _proxy(_anthropic, '__CODELENS_ANTHROPIC__');
 // ---------------------------------------------------------------------------
 // Helpers — mirrors searchController.js exactly
 // ---------------------------------------------------------------------------
-
-/**
- * Embed a code snippet using OpenAI text-embedding-3-small.
- * Same as embedQuery in searchController.js.
- */
-async function embedSnippet(snippet) {
-  const res = await openai.embeddings.create({
-    model: 'text-embedding-3-small',
-    input: snippet,
-  });
-  return res.data[0].embedding;
-}
 
 /**
  * Retrieve the top-k most similar code chunks from Supabase using pgvector.
@@ -195,12 +184,16 @@ const review = async (req, res) => {
 
     // 2. Embed the snippet
     let embedding;
+    let embedTokens = 0;
     try {
-      embedding = await embedSnippet(snippet.trim());
+      const embedRes = await openai.embeddings.create({ model: 'text-embedding-3-small', input: snippet.trim() });
+      embedding   = embedRes.data[0].embedding;
+      embedTokens = embedRes.usage?.total_tokens || 0;
     } catch (err) {
       send({ type: 'error', message: 'Failed to process your snippet. Please try again.' });
       return res.end();
     }
+    recordUsage({ userId: req.user.id, endpoint: 'review', provider: 'openai', embeddingTokens: embedTokens });
 
     // 3. Retrieve top 5 similar chunks
     let chunks;
@@ -227,12 +220,18 @@ const review = async (req, res) => {
       stream:     true,
     });
 
+    let inputTokens = 0, outputTokens = 0;
     for await (const event of stream) {
-      if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+      if (event.type === 'message_start') {
+        inputTokens = event.message?.usage?.input_tokens || 0;
+      } else if (event.type === 'message_delta') {
+        outputTokens = event.usage?.output_tokens || 0;
+      } else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
         send({ type: 'chunk', text: event.delta.text });
       }
     }
 
+    recordUsage({ userId: req.user.id, endpoint: 'review', provider: 'anthropic', promptTokens: inputTokens, completionTokens: outputTokens });
     send({ type: 'done' });
     res.end();
 

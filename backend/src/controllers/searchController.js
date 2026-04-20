@@ -17,6 +17,7 @@
 const { OpenAI }     = require('openai');
 const Anthropic      = require('@anthropic-ai/sdk');
 const { supabaseAdmin } = require('../db/supabase');
+const { recordUsage } = require('../services/usageTracker');
 
 const _openai    = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const _anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -29,18 +30,6 @@ const anthropic = _proxy(_anthropic, '__CODELENS_ANTHROPIC__');
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Embed a single query string with OpenAI text-embedding-3-small.
- * Returns a Float32Array-compatible JS array (1536 dims).
- */
-async function embedQuery(query) {
-  const res = await openai.embeddings.create({
-    model: 'text-embedding-3-small',
-    input: query,
-  });
-  return res.data[0].embedding;
-}
 
 /**
  * Retrieve the top-k most similar code chunks from Supabase using pgvector.
@@ -187,13 +176,17 @@ const search = async (req, res) => {
     // 2. Embed the query
     const embedStart = Date.now();
     let embedding;
+    let embedTokens = 0;
     try {
-      embedding = await embedQuery(query.trim());
+      const embedRes = await openai.embeddings.create({ model: 'text-embedding-3-small', input: query.trim() });
+      embedding    = embedRes.data[0].embedding;
+      embedTokens  = embedRes.usage?.total_tokens || 0;
     } catch (err) {
       clearTimeout(timeoutId);
       send({ type: 'error', message: 'Failed to process your query. Please try again.' });
       return res.end();
     }
+    recordUsage({ userId: req.user.id, endpoint: 'search', provider: 'openai', embeddingTokens: embedTokens });
     console.log(`[search] Embedding took ${Date.now() - embedStart}ms`);
     if (pipelineTimedOut) return;
 
@@ -259,12 +252,19 @@ const search = async (req, res) => {
       stream:     true,
     });
 
+    let inputTokens = 0, outputTokens = 0;
     for await (const event of stream) {
       if (pipelineTimedOut) break;
-      if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+      if (event.type === 'message_start') {
+        inputTokens = event.message?.usage?.input_tokens || 0;
+      } else if (event.type === 'message_delta') {
+        outputTokens = event.usage?.output_tokens || 0;
+      } else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
         send({ type: 'chunk', text: event.delta.text });
       }
     }
+
+    recordUsage({ userId: req.user.id, endpoint: 'search', provider: 'anthropic', promptTokens: inputTokens, completionTokens: outputTokens });
 
     clearTimeout(timeoutId);
     if (!pipelineTimedOut) {

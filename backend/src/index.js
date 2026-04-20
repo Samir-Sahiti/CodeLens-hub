@@ -14,6 +14,8 @@ const reviewRoutes   = require('./routes/review');
 const webhookRoutes  = require('./routes/webhooks');
 const teamRoutes     = require('./routes/teams');
 const fileChatRoutes = require('./routes/fileChat');
+const usageRoutes    = require('./routes/usage');
+const adminRoutes    = require('./routes/admin');
 const errorHandler   = require('./middleware/errorHandler');
 
 const app = express();
@@ -62,6 +64,8 @@ app.use('/api/review',   reviewRoutes);
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/teams',     teamRoutes);
 app.use('/api/file-chat', fileChatRoutes);
+app.use('/api/usage',     usageRoutes);
+app.use('/api/admin',     adminRoutes);
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 

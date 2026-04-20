@@ -290,5 +290,62 @@ ALTER TABLE repositories
 ADD COLUMN IF NOT EXISTS sast_disabled_rules TEXT[] DEFAULT '{}';
 
 -- =============================================================================
+-- API USAGE (US-042)
+-- Records per-request token consumption for rate limiting and cost control.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS api_usage (
+  id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id           UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  endpoint          TEXT        NOT NULL,
+  provider          TEXT        NOT NULL,
+  prompt_tokens     INT         NOT NULL DEFAULT 0,
+  completion_tokens INT         NOT NULL DEFAULT 0,
+  embedding_tokens  INT         NOT NULL DEFAULT 0,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Index supports the rolling 24-hour budget query (US-042)
+CREATE INDEX IF NOT EXISTS api_usage_user_created_idx ON api_usage (user_id, created_at);
+
+-- api_usage has no RLS — only readable via service_role key used by the backend.
+-- Users access their own data through the /api/usage/today endpoint.
+
+-- =============================================================================
+-- FILE CONTENTS (US-043)
+-- Stores the full raw source of each indexed file so the file browser
+-- shows complete content instead of a reconstruction from code_chunks.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS file_contents (
+  id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  repo_id    UUID        NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+  file_path  TEXT        NOT NULL,
+  content    TEXT        NOT NULL,
+  byte_size  INT         NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (repo_id, file_path)
+);
+
+CREATE INDEX IF NOT EXISTS file_contents_repo_id_idx ON file_contents (repo_id);
+
+ALTER TABLE file_contents ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Access file contents via repo ownership"
+  ON file_contents FOR SELECT
+  USING (
+    repo_id IN (
+      SELECT id FROM repositories
+      WHERE  user_id = auth.uid()
+      OR id IN (
+        SELECT repo_id FROM team_repositories
+        WHERE team_id IN (
+          SELECT team_id FROM team_members WHERE user_id = auth.uid()
+        )
+      )
+    )
+  );
+
+-- =============================================================================
 -- END OF SCHEMA
 -- =============================================================================
