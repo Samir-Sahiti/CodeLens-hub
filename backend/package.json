@@ -36,8 +36,10 @@
     "uuid": "^9.0.0",
     "zod": "^3.22.4"
   },
+  "optionalDependencies": {
+    "@rolldown/binding-win32-x64-msvc": "^1.0.0-rc.16"
+  },
   "devDependencies": {
-    "@rolldown/binding-win32-x64-msvc": "^1.0.0-rc.16",
     "eslint": "^8.56.0",
     "nodemon": "^3.0.2",
     "supertest": "^7.2.2",
