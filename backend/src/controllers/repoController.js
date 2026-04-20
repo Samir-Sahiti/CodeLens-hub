@@ -166,7 +166,7 @@ const getStatus = async (req, res) => {
 /** DELETE /api/repos/:repoId — remove repo and all related data */
 const deleteRepo = async (req, res) => {
   const { repoId } = req.params;
-  
+
   const { error } = await supabaseAdmin
     .from('repositories')
     .delete()
@@ -197,13 +197,13 @@ const reindexRepo = async (req, res) => {
   }
 
   const tables = ['code_chunks', 'analysis_issues', 'graph_edges', 'graph_nodes'];
-  
+
   for (const table of tables) {
     const { error: deleteError } = await supabaseAdmin
       .from(table)
       .delete()
       .eq('repo_id', repoId);
-      
+
     if (deleteError) {
       console.error(`[reindexRepo] Failed deleting from ${table}:`, deleteError);
       return res.status(500).json({ error: 'Failed to clear previous indexing data' });
@@ -226,21 +226,15 @@ const reindexRepo = async (req, res) => {
       .select('github_token_secret_id')
       .eq('id', req.user.id)
       .single();
-      
-    let githubToken = null;
-    if (profile?.github_token_secret_id) {
-       const { data: tokenData } = await supabaseAdmin.rpc('get_github_token_secret', { secret_id: profile.github_token_secret_id });
-       githubToken = tokenData;
-    }
 
-    if (githubToken) {
-      indexer.startGitHubIndexing(repo.id, githubToken, repo.name);
+    if (profile?.github_access_token) {
+      indexer.startGitHubIndexing(repo.id, profile.github_access_token, repo.name);
     } else {
       await supabaseAdmin.from('repositories').update({ status: 'failed' }).eq('id', repoId);
     }
   } else if (repo.source === 'upload') {
-    return res.status(400).json({ 
-      error: 'Re-indexing is not supported for uploaded repositories. Please delete and upload the ZIP again.' 
+    return res.status(400).json({
+      error: 'Re-indexing is not supported for uploaded repositories. Please delete and upload the ZIP again.'
     });
   }
 
@@ -320,19 +314,23 @@ const getAnalysisData = async (req, res) => {
 };
 
 /**
- * PATCH /api/repos/:repoId — update mutable repo fields (auto_sync_enabled)
+ * PATCH /api/repos/:repoId — update mutable repo fields (auto_sync_enabled, sast_disabled_rules)
  */
 const updateRepo = async (req, res) => {
   const { repoId } = req.params;
-  const { auto_sync_enabled } = req.body;
+  const { auto_sync_enabled, sast_disabled_rules } = req.body;
 
-  if (typeof auto_sync_enabled !== 'boolean') {
-    return res.status(400).json({ error: 'auto_sync_enabled must be a boolean' });
+  const updates = {};
+  if (typeof auto_sync_enabled === 'boolean') updates.auto_sync_enabled = auto_sync_enabled;
+  if (Array.isArray(sast_disabled_rules)) updates.sast_disabled_rules = sast_disabled_rules;
+
+  if (Object.keys(updates).length === 0) {
+    return res.status(400).json({ error: 'No valid fields to update' });
   }
 
   const { data, error } = await supabaseAdmin
     .from('repositories')
-    .update({ auto_sync_enabled })
+    .update(updates)
     .eq('id', repoId)
     .eq('user_id', req.user.id)
     .select()
@@ -393,7 +391,7 @@ const generateWebhook = async (req, res) => {
  */
 const getFileContent = async (req, res) => {
   const { repoId } = req.params;
-  const filePath   = req.query.path;
+  const filePath = req.query.path;
 
   if (!filePath) {
     return res.status(400).json({ error: 'path query param is required' });
@@ -430,7 +428,7 @@ const getFileContent = async (req, res) => {
   }
 
   res.json({
-    content:  chunks.map((c) => c.content).join(''),
+    content: chunks.map((c) => c.content).join(''),
     filePath,
     language: node?.language || null,
   });

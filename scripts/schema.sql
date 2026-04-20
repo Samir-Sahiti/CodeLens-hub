@@ -283,6 +283,12 @@ CREATE POLICY "Team members can view team repositories"
     )
   );
 
+-- US-046: SAST Queries
+ALTER TYPE issue_type ADD VALUE IF NOT EXISTS 'insecure_pattern';
+
+ALTER TABLE repositories
+ADD COLUMN IF NOT EXISTS sast_disabled_rules TEXT[] DEFAULT '{}';
+
 -- =============================================================================
 -- END OF SCHEMA
 -- =============================================================================
