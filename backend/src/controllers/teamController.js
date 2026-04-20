@@ -32,15 +32,23 @@ const createTeam = async (req, res) => {
     return res.status(400).json({ error: 'Teams can only be created for GitHub repositories' });
   }
 
-  // Get the owner's GitHub token
+  // Get the owner's GitHub token from Vault
   const { data: profile } = await supabaseAdmin
     .from('profiles')
-    .select('github_access_token, github_username')
+    .select('github_token_secret_id, github_username')
     .eq('id', req.user.id)
     .single();
 
-  if (!profile?.github_access_token) {
-    return res.status(400).json({ error: 'GitHub token not found' });
+  let githubToken = null;
+  if (profile?.github_token_secret_id) {
+    const { data: tokenData } = await supabaseAdmin.rpc('get_github_token_secret', {
+      secret_id: profile.github_token_secret_id,
+    });
+    githubToken = tokenData;
+  }
+
+  if (!githubToken) {
+    return res.status(400).json({ error: 'GitHub token not found or could not be decrypted' });
   }
 
   // 1. Create the team
@@ -68,7 +76,7 @@ const createTeam = async (req, res) => {
   let collaboratorCount = 0;
   try {
     const [owner, repoName] = repoFullName.split('/');
-    const octokit = new Octokit({ auth: profile.github_access_token });
+    const octokit = new Octokit({ auth: githubToken });
 
     const collaborators = await octokit.paginate(
       octokit.rest.repos.listCollaborators,

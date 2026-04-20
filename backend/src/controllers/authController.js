@@ -13,12 +13,22 @@ const upsertProfile = async (req, res) => {
   const { github_access_token, github_username } = req.body;
   const userId = req.user.id;
 
+  let secret_id = null;
+  if (github_access_token) {
+    const { data, error } = await supabaseAdmin.rpc('create_github_token_secret', { token: github_access_token });
+    if (error) {
+      console.error('[upsertProfile] vault error:', error);
+      return res.status(500).json({ error: 'Failed to securely store GitHub token' });
+    }
+    secret_id = data;
+  }
+
   const { error } = await supabaseAdmin
     .from('profiles')
     .upsert(
       {
         id: userId,
-        github_access_token: github_access_token ?? null,
+        github_token_secret_id: secret_id ?? null,
         github_username:     github_username     ?? null,
       },
       { onConflict: 'id' }

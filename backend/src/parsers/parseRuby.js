@@ -1,5 +1,6 @@
 const Parser = require('tree-sitter');
 const Ruby = require('tree-sitter-ruby');
+const { calculateComplexity } = require('./complexity');
 const path = require('path');
 
 const queryStr = `
@@ -40,6 +41,7 @@ const parseRuby = (filePath, content, allFiles) => {
     const parser = new Parser();
     parser.setLanguage(Ruby);
     const tree = parser.parse(content);
+    const complexity = calculateComplexity(tree, 'ruby');
 
     const imports = new Set();
     const exports = new Set();
@@ -61,11 +63,12 @@ const parseRuby = (filePath, content, allFiles) => {
     return {
       filePath,
       imports: Array.from(imports),
-      exports: Array.from(exports)
+      exports: Array.from(exports),
+      complexity
     };
   } catch (err) {
     console.warn(`[Parser] Failed to parse Ruby ${filePath}: ${err.message}`);
-    return { filePath, imports: [], exports: [] };
+    return { filePath, imports: [], exports: [], complexity: 1 };
   }
 };
 

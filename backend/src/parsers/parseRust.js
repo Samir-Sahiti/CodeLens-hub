@@ -1,5 +1,6 @@
 const Parser = require('tree-sitter');
 const Rust = require('tree-sitter-rust');
+const { calculateComplexity } = require('./complexity');
 const path = require('path');
 
 const queryStr = `
@@ -42,6 +43,7 @@ const parseRust = (filePath, content, allFiles) => {
     const parser = new Parser();
     parser.setLanguage(Rust);
     const tree = parser.parse(content);
+    const complexity = calculateComplexity(tree, 'rust');
 
     const imports = new Set();
     const exports = new Set();
@@ -65,11 +67,12 @@ const parseRust = (filePath, content, allFiles) => {
     return {
       filePath,
       imports: Array.from(imports),
-      exports: Array.from(exports)
+      exports: Array.from(exports),
+      complexity
     };
   } catch (err) {
     console.warn(`[Parser] Failed to parse Rust ${filePath}: ${err.message}`);
-    return { filePath, imports: [], exports: [] };
+    return { filePath, imports: [], exports: [], complexity: 1 };
   }
 };
 

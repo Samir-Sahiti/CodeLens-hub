@@ -108,11 +108,11 @@ CodeLens-hub/
 ## Database Schema
 
 Tables (all with RLS):
-- `profiles` — user metadata + GitHub token
+- `profiles` — user metadata + `github_token_secret_id` (UUID referencing Supabase Vault; tokens are never stored plaintext — migrated in US-039)
 - `repositories` — connected repos, status: `pending | indexing | ready | failed`
-- `graph_nodes` — files with metrics (line_count, complexity_score, incoming/outgoing counts)
+- `graph_nodes` — files with metrics (line_count, **complexity_score** is true cyclomatic complexity via Tree-sitter AST, incoming/outgoing counts)
 - `graph_edges` — dependency edges (from_path → to_path)
-- `code_chunks` — chunked source code with 1536-dim pgvector embeddings
+- `code_chunks` — chunked source code with 1536-dim pgvector embeddings (HNSW index, m=16, ef_construction=64)
 - `analysis_issues` — detected issues: `circular_dependency | god_file | dead_code | high_coupling`
 
 ---
@@ -135,11 +135,56 @@ NODE_ENV, PORT
 ## Indexing Pipeline (Core Flow)
 
 1. User connects GitHub repo → Octokit fetches repo tree
-2. Files filtered by supported language (`.js`, `.ts`, `.tsx`, `.py`, `.cs`)
-3. Tree-sitter parses each file → extracts imports, exports, functions, classes
+2. Files filtered by supported language (`.js`, `.ts`, `.tsx`, `.py`, `.cs`, `.go`, `.java`, `.rs`, `.rb`)
+3. Tree-sitter parses each file → extracts imports, exports, and computes **cyclomatic complexity** (US-040)
 4. Dependency graph built → stored in `graph_nodes` + `graph_edges`
 5. Source split into semantic chunks → embeddings via OpenAI → stored in `code_chunks`
 6. Analysis runs → issues stored in `analysis_issues`
+
+---
+
+## Complexity Score (US-040)
+
+`graph_nodes.complexity_score` holds the **true cyclomatic complexity** of each file, computed from the Tree-sitter AST by `backend/src/parsers/complexity.js`.
+
+**Formula:** `complexity = Σ(decision_points_per_function) + max(1, function_count)`
+
+Decision points counted per language:
+- **JS/TS/JSX/TSX:** `if_statement`, `else_clause`, `for_statement`, `while_statement`, `do_statement`, `switch_case`, `ternary_expression`, `catch_clause`, `binary_expression` where operator is `&&` or `||`
+- **Python:** `if_statement`, `elif_clause`, `for_statement`, `while_statement`, `except_clause`, `boolean_operator`, `conditional_expression`
+- **C#:** `if_statement`, `else_clause`, `for_statement`, `while_statement`, `do_statement`, `switch_section`, `conditional_expression`, `catch_clause`, `conditional_access_expression`
+- **Go:** `if_statement`, `for_statement`, `expression_case`, `type_case`, `communication_case`
+- **Java:** `if_statement`, `else_clause`, `for_statement`, `while_statement`, `do_statement`, `switch_label`, `ternary_expression`, `catch_clause`
+- **Rust:** `if_expression`, `else_clause`, `for_expression`, `while_expression`, `loop_expression`, `match_arm`
+- **Ruby:** `if`, `elsif`, `unless`, `case_match`, `when`, `rescue`, `for`, `while`, `until`
+
+**Issue thresholds (re-tuned for actual cyclomatic scores):**
+- God file: `complexity_score > 30` OR `(line_count > 500 AND incoming_count > 10% of total nodes)` OR `incoming_count > 30% of total nodes`
+- High coupling: `outgoing_count > 15` (medium ≥ 20, high ≥ 30)
+
+---
+
+## Security: GitHub Token Vault (US-039)
+
+GitHub access tokens are stored encrypted in **Supabase Vault** — never in plaintext columns.
+
+- `profiles.github_token_secret_id` (UUID) — references the Vault entry
+- Tokens are written via the `create_github_token_secret(token)` SQL function
+- Tokens are read via `get_github_token_secret(secret_id)` — **only callable by `service_role`**
+- `console.log`/`error`/`warn` are globally intercepted in `backend/src/index.js` to redact any `ghp_`/`gho_`/`ghu_`-prefixed strings from logs
+- One-time migration: `scripts/us039_migration.sql` backfills plaintext tokens and drops the old column
+
+---
+
+## Vector Search Index (US-041)
+
+`code_chunks.embedding` uses an **HNSW** index (pgvector ≥ 0.5.0 required):
+```sql
+CREATE INDEX ON code_chunks USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
+```
+- The `match_code_chunks(p_repo_id, p_embedding, p_top_k)` RPC sets `SET LOCAL hnsw.ef_search = 100` per request for higher recall
+- Benchmark: `node backend/scripts/benchmark-vector-search.js` (set `REPO_ID=<uuid>` env var)
 
 ---
 

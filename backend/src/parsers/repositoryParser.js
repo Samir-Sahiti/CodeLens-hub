@@ -10,6 +10,7 @@ const { parseGo } = require('./parseGo');
 const { parseJava } = require('./parseJava');
 const { parseRust } = require('./parseRust');
 const { parseRuby } = require('./parseRuby');
+const { calculateComplexity } = require('./complexity');
 const LANGUAGE_MAP = {
   '.js': JavaScript,
   '.jsx': TSX,
@@ -208,6 +209,8 @@ const parseFile = (filePath, source, allFiles = new Set()) => {
     parser.setLanguage(language);
     const tree = parser.parse(source);
 
+    const complexity = calculateComplexity(tree, queryKey);
+
     const imports = new Set();
     const exports = new Set();
 
@@ -241,11 +244,12 @@ const parseFile = (filePath, source, allFiles = new Set()) => {
     return {
       filePath,
       imports: Array.from(imports),
-      exports: Array.from(exports)
+      exports: Array.from(exports),
+      complexity
     };
   } catch (err) {
     console.warn(`[Parser] Failed to parse ${filePath}: ${err.message}`);
-    return { filePath, imports: [], exports: [] };
+    return { filePath, imports: [], exports: [], complexity: 1 };
   }
 };
 
@@ -255,8 +259,8 @@ const parseRepository = (files) => {
   const edges = [];
 
   for (const file of files) {
-    const { imports, exports } = parseFile(file.path, file.content, allFilesSet);
-    nodes.push({ path: file.path, exports });
+    const { imports, exports, complexity } = parseFile(file.path, file.content, allFilesSet);
+    nodes.push({ path: file.path, exports, complexity });
     for (const imp of imports) {
       edges.push({ from: file.path, to: imp });
     }

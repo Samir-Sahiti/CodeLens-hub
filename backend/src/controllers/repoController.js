@@ -16,12 +16,20 @@ const connectRepo = async (req, res) => {
   // 1. Get user's github token from profiles
   const { data: profile } = await supabaseAdmin
     .from('profiles')
-    .select('github_access_token')
+    .select('github_token_secret_id')
     .eq('id', req.user.id)
     .single();
 
-  if (!profile?.github_access_token) {
-    return res.status(400).json({ error: 'GitHub token not found' });
+  let githubToken = null;
+  if (profile?.github_token_secret_id) {
+    const { data: tokenData, error: tokenError } = await supabaseAdmin.rpc('get_github_token_secret', { secret_id: profile.github_token_secret_id });
+    if (!tokenError && tokenData) {
+      githubToken = tokenData;
+    }
+  }
+
+  if (!githubToken) {
+    return res.status(400).json({ error: 'GitHub token not found or could not be decrypted' });
   }
 
   // 2. Insert repository
@@ -42,7 +50,7 @@ const connectRepo = async (req, res) => {
   }
 
   // 3. Fire-and-forget background indexing
-  indexer.startGitHubIndexing(repo.id, profile.github_access_token, name);
+  indexer.startGitHubIndexing(repo.id, githubToken, name);
 
   res.json({ ok: true, repo });
 };
@@ -215,12 +223,18 @@ const reindexRepo = async (req, res) => {
   if (repo.source === 'github') {
     const { data: profile } = await supabaseAdmin
       .from('profiles')
-      .select('github_access_token')
+      .select('github_token_secret_id')
       .eq('id', req.user.id)
       .single();
       
-    if (profile?.github_access_token) {
-      indexer.startGitHubIndexing(repo.id, profile.github_access_token, repo.name);
+    let githubToken = null;
+    if (profile?.github_token_secret_id) {
+       const { data: tokenData } = await supabaseAdmin.rpc('get_github_token_secret', { secret_id: profile.github_token_secret_id });
+       githubToken = tokenData;
+    }
+
+    if (githubToken) {
+      indexer.startGitHubIndexing(repo.id, githubToken, repo.name);
     } else {
       await supabaseAdmin.from('repositories').update({ status: 'failed' }).eq('id', repoId);
     }
