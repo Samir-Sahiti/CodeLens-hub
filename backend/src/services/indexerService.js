@@ -450,43 +450,43 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       }
     }
 
-    // 10. Extract Semantic Chunks and Embed Vectors (US-017)
+    // 10. Store full file contents (US-043) — independent of OpenAI key
+    await supabaseAdmin.from('file_contents').delete().eq('repo_id', repoId);
+    const FILE_SIZE_CAP = 1024 * 1024; // 1 MB
+    const fileContentRows = [];
+    for (const file of pendingFiles) {
+      if (!file.content) continue;
+      const raw = file.content;
+      const truncated = raw.length > FILE_SIZE_CAP;
+      fileContentRows.push({
+        repo_id:   repoId,
+        file_path: file.path,
+        content:   truncated ? raw.slice(0, FILE_SIZE_CAP) + '\n\n/* [CodeLens] File truncated at 1 MB */' : raw,
+        byte_size: Buffer.byteLength(raw, 'utf8'),
+      });
+    }
+    if (fileContentRows.length > 0) {
+      const fcBatches = chunkArray(fileContentRows, 200);
+      for (const batch of fcBatches) {
+        const { error: fcErr } = await supabaseAdmin
+          .from('file_contents')
+          .upsert(batch, { onConflict: 'repo_id,file_path', ignoreDuplicates: false });
+        if (fcErr) console.error(`[indexer] file_contents insert error: ${fcErr.message}`);
+      }
+    }
+    console.log(`[indexer] Stored ${fileContentRows.length} file contents.`);
+
+    // 11. Extract Semantic Chunks and Embed Vectors (US-017)
     if (!process.env.OPENAI_API_KEY) {
       console.log('[indexer] No OPENAI_API_KEY set — skipping embedding step.');
     } else {
       try {
         console.log(`[indexer] Starting semantic chunking and embedding for ${repoId}`);
 
-        // 10a. Wipe obsolete chunks and file contents (US-043)
+        // Wipe obsolete chunks before re-embedding
         await supabaseAdmin.from('code_chunks').delete().eq('repo_id', repoId);
-        await supabaseAdmin.from('file_contents').delete().eq('repo_id', repoId);
 
-        // 10b-i. Store full file contents (US-043) — 1 MB cap per file
-        const FILE_SIZE_CAP = 1024 * 1024; // 1 MB
-        const fileContentRows = [];
-        for (const file of pendingFiles) {
-          if (!file.content) continue;
-          const raw = file.content;
-          const truncated = raw.length > FILE_SIZE_CAP;
-          fileContentRows.push({
-            repo_id:   repoId,
-            file_path: file.path,
-            content:   truncated ? raw.slice(0, FILE_SIZE_CAP) + '\n\n/* [CodeLens] File truncated at 1 MB */' : raw,
-            byte_size: Buffer.byteLength(raw, 'utf8'),
-          });
-        }
-        if (fileContentRows.length > 0) {
-          const fcBatches = chunkArray(fileContentRows, 200);
-          for (const batch of fcBatches) {
-            const { error: fcErr } = await supabaseAdmin
-              .from('file_contents')
-              .upsert(batch, { onConflict: 'repo_id,file_path', ignoreDuplicates: false });
-            if (fcErr) console.error(`[indexer] file_contents insert error: ${fcErr.message}`);
-          }
-        }
-        console.log(`[indexer] Stored ${fileContentRows.length} file contents.`);
-
-        // 10b. Extract local raw chunks
+        // Extract local raw chunks
         const allExtractedChunks = [];
         for (const file of pendingFiles) {
           if (!file.content) continue;

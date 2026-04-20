@@ -1,5 +1,5 @@
 -- =============================================================================
--- CodeLens Hub – Full Schema
+-- CodeLens Hub – Full Schema (idempotent — safe to re-run on any existing DB)
 -- Run this in the Supabase SQL Editor (Dashboard → SQL Editor → New query)
 -- PRE-REQUISITE: Enable the pgvector extension first via
 --   Dashboard → Database → Extensions → enable "vector"
@@ -10,14 +10,38 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS supabase_vault CASCADE;
 
 -- =============================================================================
--- FUNCTIONS (Vault wrappers for US-039)
+-- ENUMS
+-- Wrapped in DO blocks so re-runs skip already-existing types.
 -- =============================================================================
 
+DO $$ BEGIN
+  CREATE TYPE repo_status AS ENUM ('pending', 'indexing', 'ready', 'failed');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+  CREATE TYPE repo_source AS ENUM ('github', 'upload');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+  CREATE TYPE issue_type AS ENUM ('circular_dependency', 'god_file', 'dead_code', 'high_coupling');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- Add enum values introduced in later sprints (safe to re-run)
+ALTER TYPE issue_type ADD VALUE IF NOT EXISTS 'insecure_pattern';
+ALTER TYPE issue_type ADD VALUE IF NOT EXISTS 'hardcoded_secret';
+
+-- =============================================================================
+-- FUNCTIONS — Vault wrappers (US-039)
+-- CREATE OR REPLACE is always safe to re-run.
+-- =============================================================================
+
+-- Each call generates a unique vault secret name so the name uniqueness
+-- constraint on vault.secrets is never violated across multiple users.
 CREATE OR REPLACE FUNCTION create_github_token_secret(token text)
 RETURNS uuid
 LANGUAGE sql SECURITY DEFINER
 AS $$
-  SELECT vault.create_secret(token, 'github_access_token');
+  SELECT vault.create_secret(token, 'github_token_' || gen_random_uuid());
 $$;
 
 CREATE OR REPLACE FUNCTION get_github_token_secret(secret_id uuid)
@@ -27,144 +51,13 @@ AS $$
   SELECT decrypted_secret FROM vault.decrypted_secrets WHERE id = secret_id;
 $$;
 
--- Secure decryption function
 REVOKE EXECUTE ON FUNCTION get_github_token_secret FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION get_github_token_secret TO service_role;
+GRANT  EXECUTE ON FUNCTION get_github_token_secret TO   service_role;
 
 -- =============================================================================
--- ENUMS
+-- FUNCTIONS — Vector search (US-041)
 -- =============================================================================
 
-CREATE TYPE repo_status AS ENUM ('pending', 'indexing', 'ready', 'failed');
-CREATE TYPE repo_source AS ENUM ('github', 'upload');
-CREATE TYPE issue_type  AS ENUM ('circular_dependency', 'god_file', 'dead_code', 'high_coupling');
-
--- =============================================================================
--- PROFILES
--- Extends Supabase auth.users with app-level data.
--- =============================================================================
-
-CREATE TABLE profiles (
-  id                     UUID        PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
-  github_username        TEXT,
-  -- Replaced by Vault: plaintext migration was processed in US-039.
-  -- Original field was github_access_token TEXT.
-  github_token_secret_id UUID,
-  created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "Users can only access their own profile"
-  ON profiles
-  FOR ALL
-  USING (auth.uid() = id);
-
--- =============================================================================
--- REPOSITORIES
--- One row per repo connected or uploaded by a user.
--- =============================================================================
-
-CREATE TABLE repositories (
-  id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id          UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  name             TEXT        NOT NULL,
-  full_name        TEXT,
-  source           repo_source NOT NULL DEFAULT 'github',
-  status           repo_status NOT NULL DEFAULT 'pending',
-  github_url       TEXT,
-  default_branch   TEXT        DEFAULT 'main',
-  file_count       INT         DEFAULT 0,
-  indexed_at       TIMESTAMPTZ,
-  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  webhook_secret    TEXT,
-  auto_sync_enabled BOOLEAN    NOT NULL DEFAULT false
-);
-
-ALTER TABLE repositories ENABLE ROW LEVEL SECURITY;
-
--- Replaced by the broader team-access policy below.
--- CREATE POLICY "Users can only access their own repos" ...
-
-CREATE POLICY "Users can access own repos or team-shared repos"
-  ON repositories FOR ALL
-  USING (
-    auth.uid() = user_id
-    OR id IN (
-      SELECT repo_id
-      FROM   team_repositories
-      WHERE  team_id IN (
-        SELECT team_id FROM team_members WHERE user_id = auth.uid()
-      )
-    )
-  );
-
--- =============================================================================
--- GRAPH NODES
--- One node per file in an indexed repository.
--- =============================================================================
-
-CREATE TABLE graph_nodes (
-  id               UUID  PRIMARY KEY DEFAULT gen_random_uuid(),
-  repo_id          UUID  NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
-  file_path        TEXT  NOT NULL,
-  language         TEXT,
-  line_count       INT   DEFAULT 0,
-  outgoing_count   INT   DEFAULT 0,
-  incoming_count   INT   DEFAULT 0,
-  complexity_score FLOAT DEFAULT 0,
-  UNIQUE (repo_id, file_path)
-);
-
-CREATE INDEX ON graph_nodes (repo_id);
-
--- NOTE: graph_nodes does NOT need per-user RLS because access is mediated
--- through the repositories table (which is already RLS-protected).
--- All queries should join through repositories to enforce ownership.
-
--- =============================================================================
--- GRAPH EDGES
--- Directed dependency relationships between files.
--- =============================================================================
-
-CREATE TABLE graph_edges (
-  id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  repo_id   UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
-  from_path TEXT NOT NULL,
-  to_path   TEXT NOT NULL,
-  UNIQUE (repo_id, from_path, to_path)
-);
-
-CREATE INDEX ON graph_edges (repo_id);
-CREATE INDEX ON graph_edges (from_path);
-CREATE INDEX ON graph_edges (to_path);
-
--- =============================================================================
--- CODE CHUNKS
--- Chunked file content with vector embeddings for RAG / semantic search.
--- =============================================================================
-
-CREATE TABLE code_chunks (
-  id         UUID    PRIMARY KEY DEFAULT gen_random_uuid(),
-  repo_id    UUID    NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
-  file_path  TEXT    NOT NULL,
-  content    TEXT    NOT NULL,
-  start_line INT,
-  end_line   INT,
-  embedding  vector(1536)
-);
-
--- HNSW index for approximate nearest-neighbour cosine similarity search. (US-041)
--- Migrated from IVFFlat: HNSW gives lower latency and higher recall on read-heavy RAG workloads.
--- m=16 controls graph connectivity; ef_construction=64 controls build-time quality.
-CREATE INDEX ON code_chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
-
--- =============================================================================
--- FUNCTIONS (Vector search with tunable ef_search for US-041)
--- =============================================================================
-
--- match_code_chunks: Finds top-k code chunks for a given embedding.
--- Uses SET LOCAL to bump ef_search to 100 for higher recall per request.
 CREATE OR REPLACE FUNCTION match_code_chunks(
   p_repo_id   UUID,
   p_embedding vector(1536),
@@ -198,11 +91,126 @@ END;
 $$;
 
 -- =============================================================================
--- ANALYSIS ISSUES
--- Architectural issues detected during repo analysis.
+-- PROFILES
 -- =============================================================================
 
-CREATE TABLE analysis_issues (
+CREATE TABLE IF NOT EXISTS profiles (
+  id                     UUID        PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  github_username        TEXT,
+  github_token_secret_id UUID,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Column added in US-039 — safe to re-run
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS github_token_secret_id UUID;
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can only access their own profile" ON profiles;
+CREATE POLICY "Users can only access their own profile"
+  ON profiles FOR ALL
+  USING (auth.uid() = id);
+
+-- =============================================================================
+-- REPOSITORIES
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS repositories (
+  id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id           UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  name              TEXT        NOT NULL,
+  full_name         TEXT,
+  source            repo_source NOT NULL DEFAULT 'github',
+  status            repo_status NOT NULL DEFAULT 'pending',
+  github_url        TEXT,
+  default_branch    TEXT        DEFAULT 'main',
+  file_count        INT         DEFAULT 0,
+  indexed_at        TIMESTAMPTZ,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  webhook_secret    TEXT,
+  auto_sync_enabled BOOLEAN     NOT NULL DEFAULT false,
+  sast_disabled_rules TEXT[]    DEFAULT '{}'
+);
+
+-- Columns added in later sprints — safe to re-run
+ALTER TABLE repositories ADD COLUMN IF NOT EXISTS webhook_secret     TEXT;
+ALTER TABLE repositories ADD COLUMN IF NOT EXISTS auto_sync_enabled  BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE repositories ADD COLUMN IF NOT EXISTS sast_disabled_rules TEXT[] DEFAULT '{}';
+
+ALTER TABLE repositories ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can only access their own repos"              ON repositories;
+DROP POLICY IF EXISTS "Users can access own repos or team-shared repos"    ON repositories;
+CREATE POLICY "Users can access own repos or team-shared repos"
+  ON repositories FOR ALL
+  USING (
+    auth.uid() = user_id
+    OR id IN (
+      SELECT repo_id FROM team_repositories
+      WHERE  team_id IN (
+        SELECT team_id FROM team_members WHERE user_id = auth.uid()
+      )
+    )
+  );
+
+-- =============================================================================
+-- GRAPH NODES
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS graph_nodes (
+  id               UUID  PRIMARY KEY DEFAULT gen_random_uuid(),
+  repo_id          UUID  NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+  file_path        TEXT  NOT NULL,
+  language         TEXT,
+  line_count       INT   DEFAULT 0,
+  outgoing_count   INT   DEFAULT 0,
+  incoming_count   INT   DEFAULT 0,
+  complexity_score FLOAT DEFAULT 0,
+  UNIQUE (repo_id, file_path)
+);
+
+CREATE INDEX IF NOT EXISTS graph_nodes_repo_id_idx ON graph_nodes (repo_id);
+
+-- =============================================================================
+-- GRAPH EDGES
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS graph_edges (
+  id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  repo_id   UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+  from_path TEXT NOT NULL,
+  to_path   TEXT NOT NULL,
+  UNIQUE (repo_id, from_path, to_path)
+);
+
+CREATE INDEX IF NOT EXISTS graph_edges_repo_id_idx   ON graph_edges (repo_id);
+CREATE INDEX IF NOT EXISTS graph_edges_from_path_idx ON graph_edges (from_path);
+CREATE INDEX IF NOT EXISTS graph_edges_to_path_idx   ON graph_edges (to_path);
+
+-- =============================================================================
+-- CODE CHUNKS
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS code_chunks (
+  id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  repo_id    UUID        NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+  file_path  TEXT        NOT NULL,
+  content    TEXT        NOT NULL,
+  start_line INT,
+  end_line   INT,
+  embedding  vector(1536)
+);
+
+-- HNSW index (US-041): lower latency and higher recall than IVFFlat.
+CREATE INDEX IF NOT EXISTS code_chunks_hnsw_idx
+  ON code_chunks USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
+
+-- =============================================================================
+-- ANALYSIS ISSUES
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS analysis_issues (
   id          UUID       PRIMARY KEY DEFAULT gen_random_uuid(),
   repo_id     UUID       NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
   type        issue_type NOT NULL,
@@ -212,7 +220,25 @@ CREATE TABLE analysis_issues (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX ON analysis_issues (repo_id);
+CREATE INDEX IF NOT EXISTS analysis_issues_repo_id_idx ON analysis_issues (repo_id);
+
+-- =============================================================================
+-- ISSUE SUPPRESSIONS (US-044 / US-046)
+-- Per-instance false-positive suppression — rule-agnostic so US-049 can reuse it.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS issue_suppressions (
+  id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  repo_id     UUID        NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+  file_path   TEXT        NOT NULL,
+  rule_id     TEXT        NOT NULL,
+  line_number INT,
+  created_by  UUID        REFERENCES auth.users(id) ON DELETE SET NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (repo_id, file_path, rule_id, line_number)
+);
+
+CREATE INDEX IF NOT EXISTS issue_suppressions_repo_id_idx ON issue_suppressions (repo_id);
 
 -- =============================================================================
 -- TEAMS / ORGANIZATIONS
@@ -249,19 +275,18 @@ CREATE TABLE IF NOT EXISTS team_repositories (
 CREATE INDEX IF NOT EXISTS team_repositories_team_id_idx ON team_repositories (team_id);
 CREATE INDEX IF NOT EXISTS team_repositories_repo_id_idx ON team_repositories (repo_id);
 
--- ── Row Level Security ────────────────────────────────────────────────────────
-
 ALTER TABLE teams             ENABLE ROW LEVEL SECURITY;
 ALTER TABLE team_members      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE team_repositories ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Team members can view their teams"           ON teams;
+DROP POLICY IF EXISTS "Team owners can manage their teams"          ON teams;
+DROP POLICY IF EXISTS "Team members can view members of their teams" ON team_members;
+DROP POLICY IF EXISTS "Team members can view team repositories"     ON team_repositories;
+
 CREATE POLICY "Team members can view their teams"
   ON teams FOR SELECT
-  USING (
-    id IN (
-      SELECT team_id FROM team_members WHERE user_id = auth.uid()
-    )
-  );
+  USING (id IN (SELECT team_id FROM team_members WHERE user_id = auth.uid()));
 
 CREATE POLICY "Team owners can manage their teams"
   ON teams FOR ALL
@@ -269,25 +294,11 @@ CREATE POLICY "Team owners can manage their teams"
 
 CREATE POLICY "Team members can view members of their teams"
   ON team_members FOR SELECT
-  USING (
-    team_id IN (
-      SELECT team_id FROM team_members WHERE user_id = auth.uid()
-    )
-  );
+  USING (team_id IN (SELECT team_id FROM team_members WHERE user_id = auth.uid()));
 
 CREATE POLICY "Team members can view team repositories"
   ON team_repositories FOR SELECT
-  USING (
-    team_id IN (
-      SELECT team_id FROM team_members WHERE user_id = auth.uid()
-    )
-  );
-
--- US-046: SAST Queries
-ALTER TYPE issue_type ADD VALUE IF NOT EXISTS 'insecure_pattern';
-
-ALTER TABLE repositories
-ADD COLUMN IF NOT EXISTS sast_disabled_rules TEXT[] DEFAULT '{}';
+  USING (team_id IN (SELECT team_id FROM team_members WHERE user_id = auth.uid()));
 
 -- =============================================================================
 -- API USAGE (US-042)
@@ -305,16 +316,13 @@ CREATE TABLE IF NOT EXISTS api_usage (
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Index supports the rolling 24-hour budget query (US-042)
+-- Supports the rolling 24-hour budget query
 CREATE INDEX IF NOT EXISTS api_usage_user_created_idx ON api_usage (user_id, created_at);
-
--- api_usage has no RLS — only readable via service_role key used by the backend.
--- Users access their own data through the /api/usage/today endpoint.
 
 -- =============================================================================
 -- FILE CONTENTS (US-043)
--- Stores the full raw source of each indexed file so the file browser
--- shows complete content instead of a reconstruction from code_chunks.
+-- Full raw source per indexed file — fixes the chunk-reconstruction gap in
+-- the file browser. 1 MB cap enforced by the indexing pipeline.
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS file_contents (
@@ -331,6 +339,7 @@ CREATE INDEX IF NOT EXISTS file_contents_repo_id_idx ON file_contents (repo_id);
 
 ALTER TABLE file_contents ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Access file contents via repo ownership" ON file_contents;
 CREATE POLICY "Access file contents via repo ownership"
   ON file_contents FOR SELECT
   USING (

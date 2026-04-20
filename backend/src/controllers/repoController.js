@@ -236,8 +236,12 @@ const reindexRepo = async (req, res) => {
     }
 
     if (githubToken) {
-      indexer.startGitHubIndexing(repo.id, githubToken, repo.name);
+      // Use full_name (owner/repo) so the GitHub API call resolves correctly.
+      // Fall back to name for repos connected before full_name was populated.
+      const repoFullName = repo.full_name || repo.name;
+      indexer.startGitHubIndexing(repo.id, githubToken, repoFullName);
     } else {
+      console.error(`[reindexRepo] GitHub token not found in vault for user ${req.user.id} — profile.github_token_secret_id: ${profile?.github_token_secret_id ?? 'null'}. User must sign out and sign back in to re-sync their token.`);
       await supabaseAdmin.from('repositories').update({ status: 'failed' }).eq('id', repoId);
     }
   } else if (repo.source === 'upload') {

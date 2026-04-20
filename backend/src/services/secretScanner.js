@@ -21,7 +21,7 @@ const loadRules = async () => {
     const data = await fs.readFile(rulesPath, 'utf8');
     compiledRules = JSON.parse(data).map(r => ({
       ...r,
-      regex: new RegExp(r.pattern, 'g') // pre-compile for speed
+      regex: new RegExp(r.pattern, r.flags || 'g'),
     }));
   }
   return compiledRules;

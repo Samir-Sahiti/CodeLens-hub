@@ -635,13 +635,9 @@ export default function RepoView() {
   }, [fetchRepo]);
 
   useEffect(() => {
-    let timeoutId;
-    if (repo?.status === 'pending' || repo?.status === 'indexing') {
-      timeoutId = setTimeout(() => {
-        fetchRepo();
-      }, 5000);
-    }
-    return () => clearTimeout(timeoutId);
+    if (repo?.status !== 'pending' && repo?.status !== 'indexing') return;
+    const id = setInterval(fetchRepo, 3000);
+    return () => clearInterval(id);
   }, [repo?.status, fetchRepo]);
 
   useEffect(() => {
