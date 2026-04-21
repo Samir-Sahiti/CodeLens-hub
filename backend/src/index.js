@@ -6,17 +6,18 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 
-const repoRoutes     = require('./routes/repo');
-const searchRoutes   = require('./routes/search');
-const analysisRoutes = require('./routes/analysis');
-const authRoutes     = require('./routes/auth');
-const reviewRoutes   = require('./routes/review');
-const webhookRoutes  = require('./routes/webhooks');
-const teamRoutes     = require('./routes/teams');
-const fileChatRoutes = require('./routes/fileChat');
-const usageRoutes    = require('./routes/usage');
-const adminRoutes    = require('./routes/admin');
-const errorHandler   = require('./middleware/errorHandler');
+const repoRoutes         = require('./routes/repo');
+const searchRoutes       = require('./routes/search');
+const analysisRoutes     = require('./routes/analysis');
+const authRoutes         = require('./routes/auth');
+const reviewRoutes       = require('./routes/review');
+const webhookRoutes      = require('./routes/webhooks');
+const teamRoutes         = require('./routes/teams');
+const fileChatRoutes     = require('./routes/fileChat');
+const usageRoutes        = require('./routes/usage');        // kept from file 1
+const adminRoutes        = require('./routes/admin');        // kept from file 1
+const dependenciesRoutes = require('./routes/dependencies'); // ✅ ADDED (file 2)
+const errorHandler       = require('./middleware/errorHandler');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -35,7 +36,9 @@ const redact = (args) => {
       try {
         let str = JSON.stringify(arg);
         if (str.match(/(ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{36,}/)) {
-           return JSON.parse(str.replace(/(ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{36,}/g, '[REDACTED_GITHUB_TOKEN]'));
+          return JSON.parse(
+            str.replace(/(ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{36,}/g, '[REDACTED_GITHUB_TOKEN]')
+          );
         }
       } catch (e) { /* ignore circular references, etc. */ }
     }
@@ -54,18 +57,27 @@ app.use(express.json());
 app.use(morgan('dev'));
 
 // ── Routes ────────────────────────────────────────────────────────────────────
-app.use('/api/auth',     authRoutes);
+app.use('/api/auth', authRoutes);
 
-app.use('/api/repos',    repoRoutes);
-app.use('/api/search',   searchRoutes);
+app.use('/api/repos', repoRoutes);
+
+// ✅ NEW (from file 2)
+// GET /api/repos/:repoId/dependencies
+app.use('/api/repos', dependenciesRoutes);
+
+app.use('/api/search', searchRoutes);
 app.use('/api/analysis', analysisRoutes);
-app.use('/api/review',   reviewRoutes);
-// Webhook routes use express.raw per-route (mounted before global express.json parses them)
+app.use('/api/review', reviewRoutes);
+
+// Webhook routes use express.raw per-route
 app.use('/api/webhooks', webhookRoutes);
-app.use('/api/teams',     teamRoutes);
+
+app.use('/api/teams', teamRoutes);
 app.use('/api/file-chat', fileChatRoutes);
-app.use('/api/usage',     usageRoutes);
-app.use('/api/admin',     adminRoutes);
+
+// ✅ kept from file 1 (DO NOT REMOVE)
+app.use('/api/usage', usageRoutes);
+app.use('/api/admin', adminRoutes);
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
