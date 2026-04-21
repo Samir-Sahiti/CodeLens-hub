@@ -2,6 +2,8 @@ const { parseFile } = require('../parsers/repositoryParser');
 const { extractChunksFromFile } = require('../parsers/chunkParser');
 const { scanFileForSecrets } = require('./secretScanner');
 const { scanFileForInsecurePatterns } = require('./sastEngine'); // US-046
+const { parseManifest, isManifestPath } = require('./manifestParser');
+const { scanDependencies } = require('./osvScanner');
 const { recordUsage } = require('./usageTracker'); // US-042
 const { OpenAI } = require('openai');
 const { supabaseAdmin } = require('../db/supabase');
@@ -46,7 +48,11 @@ async function fetchGithubFiles(owner, name, token) {
   });
 
   const files = tree.tree.filter(item =>
-    item.type === 'blob' && VALID_EXTENSIONS.has(path.extname(item.path).toLowerCase())
+    item.type === 'blob' && 
+    (
+      VALID_EXTENSIONS.has(path.extname(item.path).toLowerCase()) ||
+      isManifestPath(item.path)
+    )
   );
 
   return files.map(f => ({ path: f.path, sha: f.sha, content: null }));
@@ -62,7 +68,10 @@ async function fetchLocalFiles(dir, baseDir = dir, results = []) {
       if (entry.isDirectory()) {
         await fetchLocalFiles(fullPath, baseDir, results);
       } else {
-        if (VALID_EXTENSIONS.has(path.extname(relativePath).toLowerCase())) {
+        if (
+          VALID_EXTENSIONS.has(path.extname(relativePath).toLowerCase()) ||
+          isManifestPath(relativePath)
+        ) {
           results.push({ path: relativePath, fsPath: fullPath, content: null });
         }
       }
@@ -170,6 +179,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       }
     }
 
+    const allManifestDeps = [];
     const parsedFiles = [];
     let parsedCount = 0;
 
@@ -190,6 +200,18 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
             // Parse file directly, passing namespaceMap for C# resolution
             const parsed = parseFile(file.path, file.content, isCSharpRepo ? namespaceMap : getAllFilesSet);
             parsedFiles.push(parsed);
+
+            // SCA: Manifest support (US-045)
+            if (isManifestPath(file.path)) {
+              try {
+                const deps = parseManifest(file.path, file.content);
+                if (deps && deps.length > 0) {
+                  allManifestDeps.push(...deps);
+                }
+              } catch (manifestErr) {
+                console.warn(`[indexer] Manifest parse failed for ${file.path}: ${manifestErr.message}`);
+              }
+            }
 
             // Secret scanning (US-044)
             try {
@@ -235,6 +257,19 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       )
     );
     console.timeEnd(`[indexer] Phase 2: Parsing (${repoId})`);
+
+    // SCA: OSV scan (US-045)
+    if (allManifestDeps.length > 0) {
+      console.log(`[indexer] SCA: scanning ${allManifestDeps.length} dependencies against OSV...`);
+      try {
+        const vulnIssues = await scanDependencies(repoId, allManifestDeps);
+        issues.push(...vulnIssues);
+      } catch (scaErr) {
+        console.warn(`[indexer] SCA scan failed (non-fatal): ${scaErr.message}`);
+      }
+    } else {
+      console.log(`[indexer] SCA: no manifest files found — skipping OSV scan`);
+    }
 
     // 5. dedupe nodes (in memory)
     const nodeMap = new Map();

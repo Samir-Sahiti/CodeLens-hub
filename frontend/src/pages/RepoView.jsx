@@ -8,6 +8,7 @@ import CodeReviewPanel from '../components/CodeReviewPanel';
 import VirtualTable from '../components/VirtualTable';
 import FileChatPanel from '../components/FileChatPanel';
 import FileBrowser from '../components/FileBrowser';
+import DependenciesPanel from '../components/DependenciesPanel'; // US-045
 import { useToast } from '../components/Toast';
 
 function formatLanguage(str) {
@@ -92,7 +93,8 @@ function buildImpactAnalysis(sourcePath, nodes, edges) {
   };
 }
 
-// --- Child Panels ---
+// ── MetricsPanel ─────────────────────────────────────────────────────────────
+
 function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [sortConfig, setSortConfig] = useState({ key: 'complexity_score', direction: 'desc' });
@@ -102,7 +104,6 @@ function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact }) {
   const sortedNodes = [...filteredNodes].sort((a, b) => {
     const valA = a[sortConfig.key] || 0;
     const valB = b[sortConfig.key] || 0;
-
     if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
     if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
     return 0;
@@ -110,9 +111,7 @@ function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact }) {
 
   const handleSort = (key) => {
     setSortConfig(prev => {
-      if (prev.key === key) {
-        return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
-      }
+      if (prev.key === key) return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
       return { key, direction: 'desc' };
     });
   };
@@ -290,92 +289,15 @@ function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact }) {
   );
 }
 
-function IssuesPanel({ nodes, issues, onNodeSelect }) {
-  const nodeMap = useMemo(
-    () => new Map(nodes.map(n => [n.file_path, n.id || n.file_path])),
-    [nodes]
-  );
+// ── IssuesPanel (inline — passes repoId) ─────────────────────────────────────
 
-  if (!issues || issues.length === 0) {
-    return (
-      <div className="flex h-[40rem] flex-col items-center justify-center rounded-xl border border-dashed border-gray-700 bg-gray-900/30">
-        <div className="flex items-center justify-center w-16 h-16 rounded-full bg-green-500/10 mb-4">
-          <svg className="w-8 h-8 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-          </svg>
-        </div>
-        <h3 className="text-lg font-medium text-gray-200">No issues detected — your codebase looks healthy 🎉</h3>
-      </div>
-    );
-  }
-
-  const GROUP_ORDER = [
-    { type: 'circular_dependency', label: 'Circular Dependencies' },
-    { type: 'god_file',            label: 'God Files'             },
-    { type: 'high_coupling',       label: 'High Coupling'         },
-    { type: 'dead_code',           label: 'Dead Code'             },
-  ];
-
-  const getBadgeStyles = (severity) => {
-    switch (severity?.toLowerCase()) {
-      case 'high':   return 'bg-red-500/20 text-red-400 ring-1 ring-inset ring-red-500/30';
-      case 'medium': return 'bg-orange-500/20 text-orange-400 ring-1 ring-inset ring-orange-500/30';
-      case 'low':    return 'bg-yellow-500/20 text-yellow-400 ring-1 ring-inset ring-yellow-500/30';
-      default:       return 'bg-gray-500/20 text-gray-400 ring-1 ring-inset ring-gray-500/30';
-    }
-  };
-
-  const handleIssueClick = (issue) => {
-    const resolvedIds = issue.file_paths
-      .map(path => nodeMap.get(path))
-      .filter(Boolean);
-
-    if (resolvedIds.length > 0) {
-      onNodeSelect(resolvedIds);
-    }
-  };
-
-  return (
-    <div className="flex flex-col h-[40rem] overflow-auto bg-gray-950 rounded-xl space-y-8 p-1 relative">
-      {GROUP_ORDER.map(({ type, label }) => {
-        const groupIssues = issues.filter(i => i.type === type);
-        if (groupIssues.length === 0) return null;
-
-        return (
-          <div key={type} className="mb-8 last:mb-0">
-            <h2 className="text-lg font-semibold text-gray-200 border-b border-gray-800 pb-2 mb-4 sticky top-0 bg-gray-950 z-10">
-              {label} <span className="text-gray-500 text-sm ml-2 font-normal">({groupIssues.length})</span>
-            </h2>
-            <div className="grid gap-4">
-              {groupIssues.map((issue, idx) => (
-                <div
-                  key={issue.id || `${type}-${idx}`}
-                  onClick={() => handleIssueClick(issue)}
-                  className="flex flex-col bg-gray-900/50 hover:bg-gray-800/80 border border-gray-800 hover:border-gray-700 rounded-lg p-5 cursor-pointer transition-all duration-200"
-                >
-                  <div className="flex items-start justify-between mb-3">
-                    <span className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium uppercase tracking-wider ${getBadgeStyles(issue.severity)}`}>
-                      {issue.severity || 'UNKNOWN'}
-                    </span>
-                  </div>
-                  <p className="text-gray-300 text-sm mb-4 leading-relaxed">
-                    {issue.description || 'No description available.'}
-                  </p>
-                  <div className="mt-auto bg-gray-950/50 rounded-md p-3 border border-gray-800 break-words">
-                    <span className="font-mono text-xs text-gray-400 leading-loose">
-                      {issue.file_paths.join(' → ')}
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
+function IssuesPanelWrapper({ nodes, issues, onNodeSelect, repoId }) {
+  // Import is dynamic to avoid circular deps in the same file
+  const IssuesPanel = require('../components/IssuesPanel').default;
+  return <IssuesPanel nodes={nodes} issues={issues} onNodeSelect={onNodeSelect} repoId={repoId} />;
 }
 
+// ── SettingsPanel ─────────────────────────────────────────────────────────────
 
 function SettingsPanel({ repo, session, onRepoUpdated }) {
   const [autoSync, setAutoSync] = useState(repo?.auto_sync_enabled ?? false);
@@ -445,7 +367,6 @@ function SettingsPanel({ repo, session, onRepoUpdated }) {
 
   return (
     <div className="max-w-2xl space-y-8">
-      {/* Auto-sync toggle */}
       <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-6">
         <div className="flex items-center justify-between">
           <div>
@@ -475,7 +396,6 @@ function SettingsPanel({ repo, session, onRepoUpdated }) {
         )}
       </div>
 
-      {/* Webhook URL generation */}
       <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-6">
         <h3 className="text-base font-semibold text-white">Webhook configuration</h3>
         <p className="mt-1 text-sm text-gray-400">
@@ -525,6 +445,8 @@ function SettingsPanel({ repo, session, onRepoUpdated }) {
   );
 }
 
+// ── Main RepoView ─────────────────────────────────────────────────────────────
+
 export default function RepoView() {
   const { repoId } = useParams();
   const { session } = useAuth();
@@ -534,18 +456,15 @@ export default function RepoView() {
   const activeTab = searchParams.get('tab') || 'graph';
 
   const [repo, setRepo]         = useState(null);
-
-  const [selectedNodeId, setSelectedNodeId] = useState(null);
+  const [selectedNodeId, setSelectedNodeId]   = useState(null);
   const [impactSourcePath, setImpactSourcePath] = useState(null);
-  const [chatFilePath, setChatFilePath] = useState(null);
-
-  const [analysisData, setAnalysisData]   = useState({ nodes: [], edges: [], issues: [] });
-  const [hasFetchedData, setHasFetchedData] = useState(false);
-  const [analysisError, setAnalysisError] = useState(null);
-
-  const [isLoading, setIsLoading]     = useState(true);
-  const [error, setError]             = useState(null);
-  const [isReindexing, setIsReindexing] = useState(false);
+  const [chatFilePath, setChatFilePath]         = useState(null);
+  const [analysisData, setAnalysisData]         = useState({ nodes: [], edges: [], issues: [] });
+  const [hasFetchedData, setHasFetchedData]     = useState(false);
+  const [analysisError, setAnalysisError]       = useState(null);
+  const [isLoading, setIsLoading]               = useState(true);
+  const [error, setError]                       = useState(null);
+  const [isReindexing, setIsReindexing]         = useState(false);
 
   const handleNodeSelect = useCallback((nodeIdOrIds, options = {}) => {
     setSelectedNodeId(nodeIdOrIds);
@@ -567,10 +486,8 @@ export default function RepoView() {
   const handleStartImpactAnalysis = useCallback((nodeOrPath) => {
     const sourcePath = typeof nodeOrPath === 'string' ? nodeOrPath : nodeOrPath?.file_path;
     if (!sourcePath) return;
-
     const sourceNode = analysisData.nodes.find((node) => node.file_path === sourcePath);
     if (!sourceNode) return;
-
     setImpactSourcePath(sourcePath);
     setSelectedNodeId(sourceNode.id || sourceNode.file_path);
     setSearchParams({ tab: 'graph' }, { replace: true });
@@ -587,14 +504,8 @@ export default function RepoView() {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (!res.ok) throw new Error('Failed to fetch analysis metadata');
-
       const data = await res.json();
-
-      setAnalysisData({
-        nodes:  data.nodes  || [],
-        edges:  data.edges  || [],
-        issues: data.issues || [],
-      });
+      setAnalysisData({ nodes: data.nodes || [], edges: data.edges || [], issues: data.issues || [] });
       setHasFetchedData(true);
       setAnalysisError(null);
     } catch (err) {
@@ -610,14 +521,10 @@ export default function RepoView() {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (!res.ok) throw new Error('Failed to fetch repositories');
-
       const data = await res.json();
       const currentRepo = data.repos?.find(r => String(r.id) === repoId);
-
       if (!currentRepo) throw new Error('Repository not found');
-
       setRepo(currentRepo);
-
       if (currentRepo.status === 'ready') {
         fetchAnalysisData(true);
       }
@@ -630,14 +537,14 @@ export default function RepoView() {
     }
   }, [session?.access_token, repoId, fetchAnalysisData]);
 
-  useEffect(() => {
-    fetchRepo();
-  }, [fetchRepo]);
+  useEffect(() => { fetchRepo(); }, [fetchRepo]);
 
   useEffect(() => {
-    if (repo?.status !== 'pending' && repo?.status !== 'indexing') return;
-    const id = setInterval(fetchRepo, 3000);
-    return () => clearInterval(id);
+    let timeoutId;
+    if (repo?.status === 'pending' || repo?.status === 'indexing') {
+      timeoutId = setTimeout(() => { fetchRepo(); }, 5000);
+    }
+    return () => clearTimeout(timeoutId);
   }, [repo?.status, fetchRepo]);
 
   useEffect(() => {
@@ -648,17 +555,9 @@ export default function RepoView() {
     };
   }, [setRepoCtx, setIssueCount]);
 
-  // Sync repo and issue count into context so Layout's sidebar stays current
-  useEffect(() => {
-    setRepoCtx(repo);
-  }, [repo, setRepoCtx]);
+  useEffect(() => { setRepoCtx(repo); }, [repo, setRepoCtx]);
+  useEffect(() => { setIssueCount(analysisData.issues.length); }, [analysisData.issues, setIssueCount]);
 
-  useEffect(() => {
-    setIssueCount(analysisData.issues.length);
-  }, [analysisData.issues, setIssueCount]);
-
-  // When a repo transitions from indexing → ready, land on Metrics for a better
-  // "here's what we found" first impression rather than an empty graph.
   const prevStatusRef = useRef(null);
   useEffect(() => {
     const prev = prevStatusRef.current;
@@ -680,14 +579,12 @@ export default function RepoView() {
     setIsReindexing(true);
     setHasFetchedData(false);
     setImpactSourcePath(null);
-
     try {
       const res = await fetch(`/api/repos/${repoId}/reindex`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (!res.ok) throw new Error('Failed to start re-indexing');
-
       await fetchRepo();
     } catch (err) {
       console.error(err);
@@ -695,6 +592,24 @@ export default function RepoView() {
       setIsReindexing(false);
     }
   };
+
+  // Count vuln issues for badge
+  const vulnIssueCount = useMemo(
+    () => (analysisData.issues || []).filter((issue) => issue?.type === 'vulnerable_dependency').length,
+    [analysisData.issues]
+  );
+
+  // ── Tab definitions ──────────────────────────────────────────────────────────
+  const TABS = [
+    { key: 'graph',        label: 'Graph' },
+    { key: 'metrics',      label: 'Metrics' },
+    { key: 'issues',       label: `Issues${analysisData.issues.length > 0 ? ` (${analysisData.issues.length})` : ''}` },
+    { key: 'dependencies', label: `Dependencies${vulnIssueCount > 0 ? ` 🛡️ ${vulnIssueCount}` : ''}` }, // US-045
+    { key: 'search',       label: 'Search' },
+    { key: 'review',       label: 'Code Review' },
+    { key: 'files',        label: 'Files' },
+    { key: 'settings',     label: 'Settings' },
+  ];
 
   if (isLoading && !repo) {
     return (
@@ -722,7 +637,7 @@ export default function RepoView() {
   return (
     <div className="flex flex-col min-h-screen bg-gray-950 text-white">
 
-      {/* Header Container */}
+      {/* ── Header ──────────────────────────────────────────────────────────── */}
       <div className="border-b border-gray-800 bg-gray-900/50 px-8 py-6">
         <div className="flex items-center justify-between">
           <div>
@@ -751,9 +666,28 @@ export default function RepoView() {
             {isReindexing ? 'Starting...' : 'Re-index'}
           </button>
         </div>
+
+        {/* ── Tab bar ────────────────────────────────────────────────────────── */}
+        {!isWorking && repo.status !== 'failed' && (
+          <div className="mt-6 flex gap-1 overflow-x-auto">
+            {TABS.map(tab => (
+              <button
+                key={tab.key}
+                onClick={() => setSearchParams({ tab: tab.key }, { replace: true })}
+                className={`shrink-0 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                  activeTab === tab.key
+                    ? 'bg-indigo-600 text-white'
+                    : 'text-gray-400 hover:text-white hover:bg-gray-800'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
-      {/* Main Content Area */}
+      {/* ── Main Content ────────────────────────────────────────────────────── */}
       <div className="flex-1 p-8 pb-12">
         {impactAnalysis && (
           <div className="mb-6 flex items-center justify-between gap-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-5 py-4 text-amber-100">
@@ -783,7 +717,7 @@ export default function RepoView() {
         ) : repo.status === 'failed' ? (
           <div className="flex flex-col items-center justify-center py-32 rounded-xl border border-dashed border-red-900/50 bg-red-950/10">
             <svg className="h-12 w-12 text-red-500 mb-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-               <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
             </svg>
             <h3 className="text-lg font-medium text-red-400 mb-2">Indexing Failed</h3>
             <p className="text-red-300 text-sm max-w-md text-center mb-6">
@@ -802,6 +736,7 @@ export default function RepoView() {
           </div>
         ) : (
           <div className="h-full relative">
+            {/* Graph */}
             <div className={activeTab === 'graph' ? 'block h-full' : 'hidden'}>
               <DependencyGraph
                 nodes={analysisData.nodes}
@@ -817,6 +752,7 @@ export default function RepoView() {
               />
             </div>
 
+            {/* Metrics */}
             <div className={activeTab === 'metrics' ? 'block h-full' : 'hidden'}>
               <MetricsPanel
                 nodes={analysisData.nodes}
@@ -826,24 +762,36 @@ export default function RepoView() {
               />
             </div>
 
+            {/* Issues */}
             <div className={activeTab === 'issues' ? 'block h-full' : 'hidden'}>
-              <IssuesPanel
+              <IssuesPanelWrapper
                 nodes={analysisData.nodes}
                 issues={analysisData.issues}
                 onNodeSelect={(nodeIds) => handleNodeSelect(nodeIds, { openGraph: true })}
+                repoId={repoId}
               />
             </div>
 
+            {/* Dependencies — US-045 */}
+            <div className={activeTab === 'dependencies' ? 'block h-full' : 'hidden'}>
+              <DependenciesPanel
+                repoId={repoId}
+                nodes={analysisData.nodes}
+                issues={analysisData.issues}
+              />
+            </div>
+
+            {/* Search */}
             <div className={activeTab === 'search' ? 'block h-full' : 'hidden'}>
               <SearchPanel repoId={repoId} />
             </div>
 
-            {/* Review tab — CodeReviewPanel */}
+            {/* Code Review */}
             <div className={activeTab === 'review' ? 'block h-full' : 'hidden'}>
               <CodeReviewPanel repoId={repoId} />
             </div>
 
-            {/* Settings tab — webhook / auto-sync */}
+            {/* Settings */}
             <div className={activeTab === 'settings' ? 'block h-full' : 'hidden'}>
               <SettingsPanel
                 repo={repo}
@@ -852,7 +800,7 @@ export default function RepoView() {
               />
             </div>
 
-            {/* Files tab — repository file browser */}
+            {/* Files */}
             <div className={activeTab === 'files' ? 'block h-full' : 'hidden'}>
               <FileBrowser repoId={repoId} nodes={analysisData.nodes} />
             </div>
@@ -860,7 +808,7 @@ export default function RepoView() {
         )}
       </div>
 
-      {/* File chat panel — slides in from right, scoped to selected file */}
+      {/* File chat panel */}
       <FileChatPanel
         repoId={repoId}
         filePath={chatFilePath}
