@@ -27,7 +27,9 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- Add enum values introduced in later sprints (safe to re-run)
+COMMIT;
 ALTER TYPE issue_type ADD VALUE IF NOT EXISTS 'insecure_pattern';
+COMMIT;
 ALTER TYPE issue_type ADD VALUE IF NOT EXISTS 'hardcoded_secret';
 
 -- =============================================================================
@@ -376,6 +378,7 @@ CREATE POLICY "Access file contents via repo ownership"
 -- =============================================================================
 
 -- New enum value
+COMMIT;
 ALTER TYPE issue_type ADD VALUE IF NOT EXISTS 'vulnerable_dependency';
 
 -- Both tables are safe to drop on re-run: vulnerability_cache is an OSV API
