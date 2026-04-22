@@ -3,9 +3,11 @@ const { extractChunksFromFile } = require('../parsers/chunkParser');
 const { scanFileForSecrets } = require('./secretScanner');
 const { scanFileForInsecurePatterns } = require('./sastEngine'); // US-046
 const { recordUsage } = require('./usageTracker'); // US-042
+const { isManifestFile, parseManifest } = require('./manifestParser'); // US-045
+const { scanDependencies } = require('./osvScanner'); // US-045
 const { OpenAI } = require('openai');
 const { supabaseAdmin } = require('../db/supabase');
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || 'sk-dummy' });
 const { Octokit } = require('octokit');
 const pLimit = require('p-limit');
 const fs = require('fs/promises');
@@ -45,11 +47,19 @@ async function fetchGithubFiles(owner, name, token) {
     recursive: '1',
   });
 
-  const files = tree.tree.filter(item =>
-    item.type === 'blob' && VALID_EXTENSIONS.has(path.extname(item.path).toLowerCase())
-  );
+  const sourceFiles   = [];
+  const manifestFiles = [];
 
-  return files.map(f => ({ path: f.path, sha: f.sha, content: null }));
+  for (const item of tree.tree) {
+    if (item.type !== 'blob') continue;
+    if (VALID_EXTENSIONS.has(path.extname(item.path).toLowerCase())) {
+      sourceFiles.push({ path: item.path, sha: item.sha, content: null });
+    } else if (isManifestFile(item.path)) {
+      manifestFiles.push({ path: item.path, sha: item.sha, content: null });
+    }
+  }
+
+  return { sourceFiles, manifestFiles };
 }
 
 async function fetchLocalFiles(dir, baseDir = dir, results = []) {
@@ -95,6 +105,19 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     console.log(`[indexer] Starting indexing for repoId: ${repoId} (source: ${source})`);
     console.time(`[indexer] Total pipeline (${repoId})`);
 
+    // Ensure each indexing run replaces prior derived analysis data instead of
+    // accumulating stale rows across webhook syncs or repeated background jobs.
+    const derivedTables = ['code_chunks', 'file_contents', 'analysis_issues', 'graph_edges', 'graph_nodes', 'dependency_manifests'];
+    for (const table of derivedTables) {
+      const { error: deleteError } = await supabaseAdmin
+        .from(table)
+        .delete()
+        .eq('repo_id', repoId);
+      if (deleteError) {
+        console.warn(`[indexer] Failed clearing ${table} before reindex: ${deleteError.message}`);
+      }
+    }
+
     // Fetch repo owner for usage tracking (US-042)
     const { data: repoMeta } = await supabaseAdmin
       .from('repositories')
@@ -103,11 +126,15 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       .single();
     const repoUserId = repoMeta?.user_id || null;
 
-    // 1. fetch files & 2. filter
+    // 1. Fetch & filter files
     console.time(`[indexer] Phase 1: File discovery (${repoId})`);
     let pendingFiles = [];
+    const manifestFiles = [];
     if (source === 'github') {
-      pendingFiles = await fetchGithubFiles(owner, name, token);
+      // Single tree fetch returns both source files and manifest files (US-045)
+      const { sourceFiles, manifestFiles: githubManifests } = await fetchGithubFiles(owner, name, token);
+      pendingFiles = sourceFiles;
+      manifestFiles.push(...githubManifests);
     } else if (source === 'upload') {
       pendingFiles = await fetchLocalFiles(extractPath);
     }
@@ -115,6 +142,32 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     const getAllFilesSet = new Set(pendingFiles.map(f => f.path));
     console.timeEnd(`[indexer] Phase 1: File discovery (${repoId})`);
     console.log(`[indexer] Discovered ${pendingFiles.length} files to index.`);
+
+    // US-045: For upload source, scan filesystem for manifest files
+    if (source === 'upload') {
+      console.time(`[indexer] Phase 1b: Manifest discovery (${repoId})`);
+      const scanForManifests = async (dir, baseDir) => {
+        try {
+          const entries = await fs.readdir(dir, { withFileTypes: true });
+          for (const entry of entries) {
+            const fullPath = path.join(dir, entry.name);
+            const relativePath = path.relative(baseDir, fullPath).split(path.sep).join('/');
+            if (entry.isDirectory()) {
+              if (['node_modules', '.git', 'vendor', '__pycache__', '.cache'].includes(entry.name)) continue;
+              await scanForManifests(fullPath, baseDir);
+            } else if (isManifestFile(relativePath)) {
+              manifestFiles.push({ path: relativePath, fsPath: fullPath, content: null });
+            }
+          }
+        } catch (scanDirErr) {
+          console.warn(`[indexer] Manifest scan failed for ${dir}: ${scanDirErr.message}`);
+        }
+      };
+      await scanForManifests(extractPath, extractPath);
+      console.timeEnd(`[indexer] Phase 1b: Manifest discovery (${repoId})`);
+    }
+
+    console.log(`[indexer] Discovered ${manifestFiles.length} manifest file(s) for SCA.`);
 
     // octokit instance for github fetching inside pLimit
     const octokit = source === 'github' ? new Octokit({ auth: token }) : null;
@@ -440,6 +493,66 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
           });
         }
       }
+    }
+
+    // US-045: Dependency vulnerability scanning (SCA) — best-effort, never blocks pipeline
+    try {
+      if (manifestFiles.length > 0) {
+        console.time(`[indexer] Phase SCA: Dependency scanning (${repoId})`);
+
+        const manifestOctokit = source === 'github' ? new Octokit({ auth: token }) : null;
+        const allDeps = [];
+
+        for (const mf of manifestFiles) {
+          try {
+            if (source === 'github') {
+              mf.content = await getGithubFileContent(manifestOctokit, owner, name, mf.sha);
+            } else {
+              mf.content = await fs.readFile(mf.fsPath, 'utf-8');
+            }
+            const parsed = parseManifest(mf.path, mf.content);
+            allDeps.push(...parsed);
+          } catch (parseErr) {
+            console.warn(`[indexer] Failed to fetch/parse manifest ${mf.path}: ${parseErr.message}`);
+          }
+        }
+
+        console.log(`[indexer] Parsed ${allDeps.length} dependencies from ${manifestFiles.length} manifest(s).`);
+
+        if (allDeps.length > 0) {
+          const { issues: scaIssues, depResults } = await scanDependencies(allDeps, repoId);
+
+          // Append SCA issues to the main issues array before the bulk insert below
+          issues.push(...scaIssues);
+          console.log(`[indexer] SCA found ${scaIssues.length} vulnerability issue(s).`);
+
+          // Store per-package dependency results for the Dependencies tab
+          if (depResults.length > 0) {
+            await supabaseAdmin.from('dependency_manifests').delete().eq('repo_id', repoId);
+            const depRows = depResults.map(d => ({
+              repo_id: repoId,
+              manifest_path: d.manifest_path,
+              ecosystem: d.ecosystem,
+              package_name: d.package_name,
+              pkg_version: d.version,
+              is_transitive: d.is_transitive,
+              vuln_count: d.vuln_count,
+              vulns_json: d.vulns_json,
+            }));
+            const depChunks = chunkArray(depRows, 200);
+            for (const chunk of depChunks) {
+              const { error: depErr } = await supabaseAdmin
+                .from('dependency_manifests')
+                .upsert(chunk, { onConflict: 'repo_id,manifest_path,ecosystem,package_name,pkg_version', ignoreDuplicates: false });
+              if (depErr) console.warn(`[indexer] dependency_manifests write error: ${depErr.message}`);
+            }
+          }
+        }
+
+        console.timeEnd(`[indexer] Phase SCA: Dependency scanning (${repoId})`);
+      }
+    } catch (scaErr) {
+      console.warn(`[indexer] SCA scan failed (best-effort, non-blocking): ${scaErr.message}`);
     }
 
     if (issues.length > 0) {

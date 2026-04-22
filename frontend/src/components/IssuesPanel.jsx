@@ -1,6 +1,9 @@
 import { useMemo, useState, useEffect } from 'react';
+import { useAuth } from '../context/AuthContext';
+import { apiUrl } from '../lib/api';
 
 export default function IssuesPanel({ nodes, issues, onNodeSelect, repoId }) {
+  const { session } = useAuth();
   // Local state to hide suppressed issues instantly without full page reload
   const [localIssues, setLocalIssues] = useState(issues || []);
 
@@ -28,6 +31,7 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, repoId }) {
   }
 
   const GROUP_ORDER = [
+    { type: 'vulnerable_dependency', label: 'Vulnerable Dependencies' },
     { type: 'hardcoded_secret', label: 'Hardcoded Secrets' },
     { type: 'insecure_pattern', label: 'Insecure Code Patterns' },
     { type: 'circular_dependency', label: 'Circular Dependencies' },
@@ -75,9 +79,12 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, repoId }) {
     };
 
     try {
-      const response = await fetch(`/api/repos/${repoId}/issues/suppress`, {
+      const response = await fetch(apiUrl(`/api/analysis/${repoId}/issues/suppress`), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+        },
         body: JSON.stringify(payload)
       });
 
@@ -108,15 +115,20 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, repoId }) {
 
     try {
       // Fetch current disabled rules first, then append
-      const repoRes = await fetch(`/api/repos/${repoId}/status`);
+      const repoRes = await fetch(apiUrl(`/api/repos/${repoId}/status`), {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
       const repoData = await repoRes.json();
       const currentDisabled = repoData.sast_disabled_rules || [];
 
       if (currentDisabled.includes(ruleId)) return; // already disabled
 
-      const response = await fetch(`/api/repos/${repoId}`, {
+      const response = await fetch(apiUrl(`/api/repos/${repoId}`), {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+        },
         body: JSON.stringify({ sast_disabled_rules: [...currentDisabled, ruleId] })
       });
 
@@ -140,6 +152,7 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, repoId }) {
         return (
           <div key={type} className="mb-8 last:mb-0">
             <h2 className="text-lg font-semibold text-gray-200 border-b border-gray-800 pb-2 mb-4 sticky top-0 bg-gray-950 z-10 flex items-center">
+              {type === 'vulnerable_dependency' && <span className="mr-2">📦</span>}
               {type === 'hardcoded_secret' && <span className="mr-2">🔒</span>}
               {type === 'insecure_pattern' && <span className="mr-2">🛡️</span>}
               {label} <span className="text-gray-500 text-sm ml-2 font-normal">({groupIssues.length})</span>

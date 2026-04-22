@@ -2,12 +2,14 @@ import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useRepo } from '../context/RepoContext';
+import { apiUrl } from '../lib/api';
 import DependencyGraph from '../components/DependencyGraph';
 import SearchPanel from '../components/SearchPanel';
 import CodeReviewPanel from '../components/CodeReviewPanel';
 import VirtualTable from '../components/VirtualTable';
 import FileChatPanel from '../components/FileChatPanel';
 import FileBrowser from '../components/FileBrowser';
+import DependenciesPanel from '../components/DependenciesPanel';
 import { useToast } from '../components/Toast';
 
 function formatLanguage(str) {
@@ -290,7 +292,7 @@ function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact }) {
   );
 }
 
-function IssuesPanel({ nodes, issues, onNodeSelect }) {
+function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDependencies }) {
   const nodeMap = useMemo(
     () => new Map(nodes.map(n => [n.file_path, n.id || n.file_path])),
     [nodes]
@@ -310,10 +312,13 @@ function IssuesPanel({ nodes, issues, onNodeSelect }) {
   }
 
   const GROUP_ORDER = [
-    { type: 'circular_dependency', label: 'Circular Dependencies' },
-    { type: 'god_file',            label: 'God Files'             },
-    { type: 'high_coupling',       label: 'High Coupling'         },
-    { type: 'dead_code',           label: 'Dead Code'             },
+    { type: 'vulnerable_dependency', label: 'Vulnerable Dependencies', icon: '📦' },
+    { type: 'hardcoded_secret',      label: 'Hardcoded Secrets',        icon: '🔒' },
+    { type: 'insecure_pattern',      label: 'Insecure Code Patterns',   icon: '🛡️' },
+    { type: 'circular_dependency',   label: 'Circular Dependencies',    icon: null },
+    { type: 'god_file',              label: 'God Files',                icon: null },
+    { type: 'high_coupling',         label: 'High Coupling',            icon: null },
+    { type: 'dead_code',             label: 'Dead Code',                icon: null },
   ];
 
   const getBadgeStyles = (severity) => {
@@ -326,8 +331,13 @@ function IssuesPanel({ nodes, issues, onNodeSelect }) {
   };
 
   const handleIssueClick = (issue) => {
+    if (issue.type === 'vulnerable_dependency') {
+      onOpenDependencies(issue);
+      return;
+    }
+
     const resolvedIds = issue.file_paths
-      .map(path => nodeMap.get(path))
+      .map(p => nodeMap.get(p))
       .filter(Boolean);
 
     if (resolvedIds.length > 0) {
@@ -337,13 +347,17 @@ function IssuesPanel({ nodes, issues, onNodeSelect }) {
 
   return (
     <div className="flex flex-col h-[40rem] overflow-auto bg-gray-950 rounded-xl space-y-8 p-1 relative">
-      {GROUP_ORDER.map(({ type, label }) => {
+      <div className="rounded-xl border border-gray-800 bg-gray-900/40 px-4 py-3 text-sm text-gray-400">
+        Issues is the triage view. It shows only actionable problems, including vulnerable dependencies. Click a dependency issue to jump into the `Dependencies` tab with that package pre-filtered.
+      </div>
+      {GROUP_ORDER.map(({ type, label, icon }) => {
         const groupIssues = issues.filter(i => i.type === type);
         if (groupIssues.length === 0) return null;
 
         return (
           <div key={type} className="mb-8 last:mb-0">
-            <h2 className="text-lg font-semibold text-gray-200 border-b border-gray-800 pb-2 mb-4 sticky top-0 bg-gray-950 z-10">
+            <h2 className="text-lg font-semibold text-gray-200 border-b border-gray-800 pb-2 mb-4 sticky top-0 bg-gray-950 z-10 flex items-center">
+              {icon && <span className="mr-2">{icon}</span>}
               {label} <span className="text-gray-500 text-sm ml-2 font-normal">({groupIssues.length})</span>
             </h2>
             <div className="grid gap-4">
@@ -390,7 +404,7 @@ function SettingsPanel({ repo, session, onRepoUpdated }) {
     const next = !autoSync;
     setIsSaving(true);
     try {
-      const res = await fetch(`/api/repos/${repo.id}`, {
+      const res = await fetch(apiUrl(`/api/repos/${repo.id}`), {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -412,7 +426,7 @@ function SettingsPanel({ repo, session, onRepoUpdated }) {
     setIsGenerating(true);
     setWebhookInfo(null);
     try {
-      const res = await fetch(`/api/repos/${repo.id}/webhook`, {
+      const res = await fetch(apiUrl(`/api/repos/${repo.id}/webhook`), {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (!res.ok) throw new Error('Failed to generate webhook');
@@ -583,7 +597,7 @@ export default function RepoView() {
   const fetchAnalysisData = useCallback(async (force = false) => {
     if ((hasFetchedData && !force) || !session?.access_token) return;
     try {
-      const res = await fetch(`/api/repos/${repoId}/analysis`, {
+      const res = await fetch(apiUrl(`/api/repos/${repoId}/analysis`), {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (!res.ok) throw new Error('Failed to fetch analysis metadata');
@@ -606,7 +620,7 @@ export default function RepoView() {
   const fetchRepo = useCallback(async () => {
     if (!session?.access_token) return;
     try {
-      const res = await fetch('/api/repos', {
+      const res = await fetch(apiUrl('/api/repos'), {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (!res.ok) throw new Error('Failed to fetch repositories');
@@ -682,7 +696,7 @@ export default function RepoView() {
     setImpactSourcePath(null);
 
     try {
-      const res = await fetch(`/api/repos/${repoId}/reindex`, {
+      const res = await fetch(apiUrl(`/api/repos/${repoId}/reindex`), {
         method: 'POST',
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
@@ -695,6 +709,24 @@ export default function RepoView() {
       setIsReindexing(false);
     }
   };
+
+  const handleOpenDependencies = useCallback((issue) => {
+    const packageName = issue?.description?.match(/:\s(@?[^@\s:]+(?:\/[^@\s:]+)?)@/)?.[1] || '';
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.set('tab', 'dependencies');
+      next.set('vulnerable', '1');
+      if (packageName) next.set('dep', packageName);
+      else next.delete('dep');
+      if (issue?.description) next.set('dep_description', issue.description);
+      else next.delete('dep_description');
+      if (issue?.file_paths?.[0]) next.set('dep_manifest', issue.file_paths[0]);
+      else next.delete('dep_manifest');
+      if (issue?.severity) next.set('dep_severity', issue.severity);
+      else next.delete('dep_severity');
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
 
   if (isLoading && !repo) {
     return (
@@ -831,6 +863,7 @@ export default function RepoView() {
                 nodes={analysisData.nodes}
                 issues={analysisData.issues}
                 onNodeSelect={(nodeIds) => handleNodeSelect(nodeIds, { openGraph: true })}
+                onOpenDependencies={handleOpenDependencies}
               />
             </div>
 
@@ -855,6 +888,11 @@ export default function RepoView() {
             {/* Files tab — repository file browser */}
             <div className={activeTab === 'files' ? 'block h-full' : 'hidden'}>
               <FileBrowser repoId={repoId} nodes={analysisData.nodes} />
+            </div>
+
+            {/* Dependencies tab — package vulnerability scanning (US-045) */}
+            <div className={activeTab === 'dependencies' ? 'block h-full' : 'hidden'}>
+              <DependenciesPanel repoId={repoId} />
             </div>
           </div>
         )}
