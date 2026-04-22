@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
+import { apiUrl } from '../lib/api';
 import { Octokit } from 'octokit';
 import { useToast } from './Toast';
 
@@ -95,7 +96,7 @@ export default function ConnectGitHubModal({ isOpen, onClose, existingRepos, onC
     setIsConnecting(repo.id);
     try {
       const { data: { session } } = await supabase.auth.getSession();
-      const res = await fetch('/api/repos', {
+      const res = await fetch(apiUrl('/api/repos'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

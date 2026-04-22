@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { apiUrl } from '../lib/api';
 import { AnswerBlock, SourceCard } from './SharedAnswerComponents';
 
 // ---------------------------------------------------------------------------
@@ -88,7 +89,7 @@ export default function SearchPanel({ repoId }) {
     setHistory(prev => [query, ...prev.filter(q => q !== query)].slice(0, 10));
 
     try {
-      const res = await fetch(`/api/search/${repoId}`, {
+      const res = await fetch(apiUrl(`/api/search/${repoId}`), {
         method: 'POST',
         headers: {
           'Content-Type':  'application/json',

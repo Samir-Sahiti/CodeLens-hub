@@ -14,7 +14,7 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const { supabaseAdmin } = require('../db/supabase');
 
-const anthropic = globalThis.__CODELENS_ANTHROPIC__ || new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const anthropic = globalThis.__CODELENS_ANTHROPIC__ || new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || 'sk-ant-dummy' });
 
 async function canAccessRepo(repoId, userId) {
   // Owner check

@@ -164,11 +164,14 @@ describe('Backend API integration (mocked)', () => {
 
   it('POST /api/repos/:repoId/reindex clears data and restarts indexing', async () => {
     supabaseAdminMock = createSupabaseMock({
+      'repositories.select.maybeSingle': async () => ({ data: { id: 'repo-1' }, error: null }),
       'repositories.select.single': async () => ({ data: { id: 'repo-1', source: 'github', name: 'acme/repo' }, error: null }),
       'code_chunks.delete.many': async () => ({ data: null, error: null }),
+      'file_contents.delete.many': async () => ({ data: null, error: null }),
       'analysis_issues.delete.many': async () => ({ data: null, error: null }),
       'graph_edges.delete.many': async () => ({ data: null, error: null }),
       'graph_nodes.delete.many': async () => ({ data: null, error: null }),
+      'dependency_manifests.delete.many': async () => ({ data: null, error: null }),
       'repositories.update.many': async () => ({ data: null, error: null }),
       'profiles.select.single': async () => ({ data: { github_token_secret_id: 'secret-1' }, error: null }),
       'rpc.get_github_token_secret': async () => ({ data: 'gh-token', error: null }),

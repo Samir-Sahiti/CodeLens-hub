@@ -21,8 +21,8 @@ const Anthropic         = require('@anthropic-ai/sdk');
 const { supabaseAdmin } = require('../db/supabase');
 const { recordUsage }   = require('../services/usageTracker');
 
-const _openai    = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const _anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const _openai    = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || 'sk-dummy' });
+const _anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || 'sk-ant-dummy' });
 function _proxy(real, key) {
   return new Proxy(real, { get(_t, p) { const a = globalThis[key] || real; const v = a[p]; return typeof v === 'function' ? v.bind(a) : v; } });
 }

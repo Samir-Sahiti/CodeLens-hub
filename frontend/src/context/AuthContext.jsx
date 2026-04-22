@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
+import { apiUrl } from '../lib/api';
 
 const AuthContext = createContext(null);
 
@@ -11,7 +12,7 @@ async function syncProfile(session) {
   if (!session?.provider_token) return;
 
   try {
-    await fetch('/api/auth/profile', {
+    await fetch(apiUrl('/api/auth/profile'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -37,6 +38,9 @@ export function AuthProvider({ children }) {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session ?? null);
       setUser(session?.user ?? null);
+      if (session) {
+        syncProfile(session);
+      }
     });
 
     // Keep in sync with Supabase auth changes

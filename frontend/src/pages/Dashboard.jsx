@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { apiUrl } from '../lib/api';
 import ConnectGitHubModal from '../components/ConnectGitHubModal';
 import UploadRepoModal from '../components/UploadRepoModal';
 import CreateTeamModal from '../components/CreateTeamModal';
@@ -85,7 +86,7 @@ export default function Dashboard() {
   const fetchRepos = useCallback(async () => {
     if (!session?.access_token) return;
     try {
-      const res = await fetch('/api/repos', {
+      const res = await fetch(apiUrl('/api/repos'), {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (!res.ok) throw new Error('Failed to fetch repositories');
@@ -130,7 +131,7 @@ export default function Dashboard() {
     e.stopPropagation();
     
     try {
-      const res = await fetch(`/api/repos/${repoId}/reindex`, {
+      const res = await fetch(apiUrl(`/api/repos/${repoId}/reindex`), {
         method: 'POST',
         headers: { Authorization: `Bearer ${session.access_token}` },
       });

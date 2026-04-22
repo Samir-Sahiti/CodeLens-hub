@@ -13,7 +13,13 @@ const upsertProfile = async (req, res) => {
   const { github_access_token, github_username } = req.body;
   const userId = req.user.id;
 
-  let secret_id = null;
+  const { data: existingProfile } = await supabaseAdmin
+    .from('profiles')
+    .select('github_token_secret_id')
+    .eq('id', userId)
+    .maybeSingle();
+
+  let secret_id = existingProfile?.github_token_secret_id ?? null;
   if (github_access_token) {
     const { data, error } = await supabaseAdmin.rpc('create_github_token_secret', { token: github_access_token });
     if (error) {

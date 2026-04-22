@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { apiUrl } from '../lib/api';
 
 export default function CreateTeamModal({ isOpen, onClose, onCreated }) {
   const { session } = useAuth();
@@ -16,7 +17,7 @@ export default function CreateTeamModal({ isOpen, onClose, onCreated }) {
     setError(null);
 
     try {
-      const res = await fetch('/api/teams', {
+      const res = await fetch(apiUrl('/api/teams'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

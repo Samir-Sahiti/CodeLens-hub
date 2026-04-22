@@ -50,6 +50,11 @@ console.warn = (...args) => originalWarn.apply(console, redact(args));
 // ── Middleware ────────────────────────────────────────────────────────────────
 app.use(helmet());
 app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:3000' }));
+
+// Webhook routes use express.raw per-route and must run before express.json()
+// so the signature validator receives the original request body bytes.
+app.use('/api/webhooks', webhookRoutes);
+
 app.use(express.json());
 app.use(morgan('dev'));
 
@@ -60,8 +65,6 @@ app.use('/api/repos',    repoRoutes);
 app.use('/api/search',   searchRoutes);
 app.use('/api/analysis', analysisRoutes);
 app.use('/api/review',   reviewRoutes);
-// Webhook routes use express.raw per-route (mounted before global express.json parses them)
-app.use('/api/webhooks', webhookRoutes);
 app.use('/api/teams',     teamRoutes);
 app.use('/api/file-chat', fileChatRoutes);
 app.use('/api/usage',     usageRoutes);

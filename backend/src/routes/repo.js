@@ -41,4 +41,7 @@ router.get('/:repoId/webhook', requireAuth, repoController.generateWebhook);
 // Fetch concatenated source content for a file from code_chunks
 router.get('/:repoId/file', requireAuth, repoController.getFileContent);
 
+// Fetch parsed dependency manifest data for the Dependencies tab (US-045)
+router.get('/:repoId/dependencies', requireAuth, repoController.getDependencies);
+
 module.exports = router;

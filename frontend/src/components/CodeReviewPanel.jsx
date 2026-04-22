@@ -7,6 +7,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { apiUrl } from '../lib/api';
 import { AnswerBlock, SourceCard } from './SharedAnswerComponents';
 
 // ---------------------------------------------------------------------------
@@ -67,7 +68,7 @@ export default function CodeReviewPanel({ repoId }) {
     setHasSubmitted(true);
 
     try {
-      const res = await fetch(`/api/review/${repoId}`, {
+      const res = await fetch(apiUrl(`/api/review/${repoId}`), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
