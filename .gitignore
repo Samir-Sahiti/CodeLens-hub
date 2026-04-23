@@ -424,3 +424,6 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Personal / local notes
+DEMO_GUIDE.md

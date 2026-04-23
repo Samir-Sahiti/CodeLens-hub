@@ -8,7 +8,6 @@ const { scanDependencies } = require('./osvScanner'); // US-045
 const { OpenAI } = require('openai');
 const { supabaseAdmin } = require('../db/supabase');
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || 'sk-dummy' });
-const { Octokit } = require('octokit');
 const pLimit = require('p-limit');
 const fs = require('fs/promises');
 const path = require('path');
@@ -23,43 +22,25 @@ function chunkArray(arr, size) {
   return chunks;
 }
 
-async function fetchGithubFiles(owner, name, token) {
-  const octokit = new Octokit({ auth: token });
-  let treeSha;
-  try {
-    const { data: commit } = await octokit.rest.repos.getCommit({
-      owner,
-      repo: name,
-      ref: 'HEAD',
-    });
-    treeSha = commit.commit.tree.sha;
-  } catch (err) {
-    if (err.status === 404) {
-      throw new Error(`GitHub repository '${owner}/${name}' not found or insufficient OAuth permissions. (Ensure 'repo' scope is granted in Supabase/GitHub)`);
+async function fetchGithubZipAndExtract(owner, name, token, destDir) {
+  const res = await fetch(`https://api.github.com/repos/${owner}/${name}/zipball/HEAD`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github.v3+json'
     }
-    throw err;
-  }
-
-  const { data: tree } = await octokit.rest.git.getTree({
-    owner,
-    repo: name,
-    tree_sha: treeSha,
-    recursive: '1',
   });
 
-  const sourceFiles   = [];
-  const manifestFiles = [];
-
-  for (const item of tree.tree) {
-    if (item.type !== 'blob') continue;
-    if (VALID_EXTENSIONS.has(path.extname(item.path).toLowerCase())) {
-      sourceFiles.push({ path: item.path, sha: item.sha, content: null });
-    } else if (isManifestFile(item.path)) {
-      manifestFiles.push({ path: item.path, sha: item.sha, content: null });
+  if (!res.ok) {
+    if (res.status === 404) {
+      throw new Error(`GitHub repository '${owner}/${name}' not found or insufficient OAuth permissions.`);
     }
+    throw new Error(`Failed to download zipball: ${res.statusText}`);
   }
 
-  return { sourceFiles, manifestFiles };
+  const arrayBuffer = await res.arrayBuffer();
+  const AdmZip = require('adm-zip');
+  const zip = new AdmZip(Buffer.from(arrayBuffer));
+  zip.extractAllTo(destDir, true);
 }
 
 async function fetchLocalFiles(dir, baseDir = dir, results = []) {
@@ -83,12 +64,7 @@ async function fetchLocalFiles(dir, baseDir = dir, results = []) {
   return results;
 }
 
-async function getGithubFileContent(octokit, owner, name, sha) {
-  const { data: blob } = await octokit.rest.git.getBlob({
-    owner, repo: name, file_sha: sha
-  });
-  return Buffer.from(blob.content, blob.encoding).toString('utf-8');
-}
+
 
 /**
  * Full indexing pipeline for a repository.
@@ -101,6 +77,7 @@ async function getGithubFileContent(octokit, owner, name, sha) {
  * @param {string} params.source - 'github' or 'upload'
  */
 const indexRepository = async ({ repoId, owner, name, token, extractPath, source }) => {
+  let zipTempDir = null;
   try {
     console.log(`[indexer] Starting indexing for repoId: ${repoId} (source: ${source})`);
     console.time(`[indexer] Total pipeline (${repoId})`);
@@ -125,21 +102,37 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     console.time(`[indexer] Phase 1: File discovery (${repoId})`);
     let pendingFiles = [];
     const manifestFiles = [];
+    let extractDir = extractPath;
+    
     if (source === 'github') {
-      // Single tree fetch returns both source files and manifest files (US-045)
-      const { sourceFiles, manifestFiles: githubManifests } = await fetchGithubFiles(owner, name, token);
-      pendingFiles = sourceFiles;
-      manifestFiles.push(...githubManifests);
+      const os = require('os');
+      zipTempDir = await fs.mkdtemp(path.join(os.tmpdir(), `codelens-github-${repoId}-`));
+      extractDir = zipTempDir;
+      await fetchGithubZipAndExtract(owner, name, token, extractDir);
+
+      // The zip extracts into a subfolder like `owner-repo-commitSha`.
+      // We want to fetch all files starting from that subfolder so relative paths are correct.
+      const entries = await fs.readdir(extractDir, { withFileTypes: true });
+      const rootFolder = entries.find(e => e.isDirectory());
+      if (rootFolder) {
+        extractDir = path.join(extractDir, rootFolder.name);
+      }
+      pendingFiles = await fetchLocalFiles(extractDir);
     } else if (source === 'upload') {
       pendingFiles = await fetchLocalFiles(extractPath);
     }
+
+    // Sort so the same repo produces the same node/edge array on every re-index.
+    // fs.readdir returns entries in filesystem order, which varies across hosts
+    // and zipball extractions, and that non-determinism propagates through the
+    // whole pipeline into the D3 graph layout.
+    pendingFiles.sort((a, b) => a.path.localeCompare(b.path));
 
     const getAllFilesSet = new Set(pendingFiles.map(f => f.path));
     console.timeEnd(`[indexer] Phase 1: File discovery (${repoId})`);
     console.log(`[indexer] Discovered ${pendingFiles.length} files to index.`);
 
-    // US-045: For upload source, scan filesystem for manifest files
-    if (source === 'upload') {
+    // US-045: Scan filesystem for manifest files (now for both github and upload)
       console.time(`[indexer] Phase 1b: Manifest discovery (${repoId})`);
       const scanForManifests = async (dir, baseDir) => {
         try {
@@ -158,14 +151,11 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
           console.warn(`[indexer] Manifest scan failed for ${dir}: ${scanDirErr.message}`);
         }
       };
-      await scanForManifests(extractPath, extractPath);
+      await scanForManifests(extractDir, extractDir);
+      manifestFiles.sort((a, b) => a.path.localeCompare(b.path));
       console.timeEnd(`[indexer] Phase 1b: Manifest discovery (${repoId})`);
-    }
 
     console.log(`[indexer] Discovered ${manifestFiles.length} manifest file(s) for SCA.`);
-
-    // octokit instance for github fetching inside pLimit
-    const octokit = source === 'github' ? new Octokit({ auth: token }) : null;
 
     const limit = pLimit(10);
     const issues = [];
@@ -196,9 +186,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
           limit(async () => {
             if (!file.path.toLowerCase().endsWith('.cs')) return;
             try {
-              if (source === 'github') {
-                file.content = await getGithubFileContent(octokit, owner, name, file.sha);
-              } else {
+              if (!file.content) {
                 file.content = await fs.readFile(file.fsPath, 'utf-8');
               }
               const parsed = parseFile(file.path, file.content, getAllFilesSet);
@@ -229,11 +217,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
           try {
             // Content might already be loaded from pre-pass
             if (!file.content) {
-              if (source === 'github') {
-                file.content = await getGithubFileContent(octokit, owner, name, file.sha);
-              } else {
-                file.content = await fs.readFile(file.fsPath, 'utf-8');
-              }
+              file.content = await fs.readFile(file.fsPath, 'utf-8');
             }
             // Parse file directly, passing namespaceMap for C# resolution
             const parsed = parseFile(file.path, file.content, isCSharpRepo ? namespaceMap : getAllFilesSet);
@@ -495,14 +479,11 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       if (manifestFiles.length > 0) {
         console.time(`[indexer] Phase SCA: Dependency scanning (${repoId})`);
 
-        const manifestOctokit = source === 'github' ? new Octokit({ auth: token }) : null;
         const allDeps = [];
 
         for (const mf of manifestFiles) {
           try {
-            if (source === 'github') {
-              mf.content = await getGithubFileContent(manifestOctokit, owner, name, mf.sha);
-            } else {
+            if (!mf.content) {
               mf.content = await fs.readFile(mf.fsPath, 'utf-8');
             }
             const parsed = parseManifest(mf.path, mf.content);
@@ -523,8 +504,6 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
 
           // Store per-package dependency results for the Dependencies tab
           if (depResults.length > 0) {
-            await supabaseAdmin.from('dependency_manifests').delete().eq('repo_id', repoId);
-
             // Deduplicate by the upsert conflict key before inserting — duplicate tuples
             // within a single batch cause "ON CONFLICT DO UPDATE command cannot affect row
             // a second time" (package-lock.json v2/v3 lists packages in both the legacy
@@ -572,7 +551,6 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     }
 
     // 10. Store full file contents (US-043) — independent of OpenAI key
-    await supabaseAdmin.from('file_contents').delete().eq('repo_id', repoId);
     const FILE_SIZE_CAP = 1024 * 1024; // 1 MB
     const fileContentRows = [];
     for (const file of pendingFiles) {
@@ -604,9 +582,8 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       try {
         console.log(`[indexer] Starting semantic chunking and embedding for ${repoId}`);
 
-        // Wipe obsolete chunks before re-embedding
-        await supabaseAdmin.from('code_chunks').delete().eq('repo_id', repoId);
-
+        // Wipe obsolete chunks before re-embedding (Handled by clear_repo_derived_data RPC earlier)
+        
         // Extract local raw chunks
         const allExtractedChunks = [];
         for (const file of pendingFiles) {
@@ -715,6 +692,12 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     }
 
     console.error(`[indexer] Failed pipeline for repoId ${repoId}:`, error.message);
+  } finally {
+    // Remove the zipball temp directory regardless of success/failure so /tmp
+    // doesn't fill up with multi-MB extracted repos over repeated re-indexes.
+    if (zipTempDir) {
+      await fs.rm(zipTempDir, { recursive: true, force: true }).catch(() => {});
+    }
   }
 };
 
