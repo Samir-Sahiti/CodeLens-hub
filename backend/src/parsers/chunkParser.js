@@ -5,6 +5,18 @@ const Python = require('tree-sitter-python');
 const CSharp = require('tree-sitter-c-sharp');
 const path = require('path');
 
+// Per-language Parser cache — see repositoryParser.js for rationale.
+const parserCache = new Map();
+function getParser(language) {
+  let p = parserCache.get(language);
+  if (!p) {
+    p = new Parser();
+    p.setLanguage(language);
+    parserCache.set(language, p);
+  }
+  return p;
+}
+
 const LANGUAGE_MAP = {
   '.js': JavaScript,
   '.jsx': JavaScript,
@@ -119,8 +131,7 @@ const extractChunksFromFile = (filePath, sourceContent, repoId) => {
   }
 
   try {
-    const parser = new Parser();
-    parser.setLanguage(language);
+    const parser = getParser(language);
     const src = typeof sourceContent === 'string' ? sourceContent : (sourceContent == null ? '' : String(sourceContent));
     // tree-sitter v0.21.x rejects strings longer than 32767 chars; use callback for large files
     const tree = src.length < 32768

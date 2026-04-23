@@ -11,6 +11,21 @@ const { parseJava } = require('./parseJava');
 const { parseRust } = require('./parseRust');
 const { parseRuby } = require('./parseRuby');
 const { calculateComplexity } = require('./complexity');
+
+// Reuse one Parser per language — tree-sitter parsers are synchronous and safe
+// to reuse in Node's single-threaded event loop, and this avoids re-setting the
+// grammar on every file across a large repo.
+const parserCache = new Map();
+function getParser(language) {
+  let p = parserCache.get(language);
+  if (!p) {
+    p = new Parser();
+    p.setLanguage(language);
+    parserCache.set(language, p);
+  }
+  return p;
+}
+
 const LANGUAGE_MAP = {
   '.js': JavaScript,
   '.jsx': TSX,
@@ -205,8 +220,7 @@ const parseFile = (filePath, source, allFiles = new Set()) => {
 
     if (!language || !queryStr) return { filePath, imports: [], exports: [] };
 
-    const parser = new Parser();
-    parser.setLanguage(language);
+    const parser = getParser(language);
     const src = typeof source === 'string' ? source : (source == null ? '' : String(source));
     // tree-sitter v0.21.x rejects strings longer than 32767 chars; use callback for large files
     const tree = src.length < 32768

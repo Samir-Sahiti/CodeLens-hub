@@ -38,6 +38,18 @@ const LANG_CONFIG = {
   '.cs':  { grammar: CSharp,     ruleKey: 'cs' },
 };
 
+// Per-language Parser cache — see repositoryParser.js for rationale.
+const parserCache = new Map();
+function getParser(language) {
+  let p = parserCache.get(language);
+  if (!p) {
+    p = new Parser();
+    p.setLanguage(language);
+    parserCache.set(language, p);
+  }
+  return p;
+}
+
 const runAstRules = (tree, grammar, rules, disabledRules) => {
   const findings = [];
   for (const rule of rules) {
@@ -98,8 +110,7 @@ const scanFileForInsecurePatterns = async (filePath, content, disabledRules = []
   // AST-based rules
   if (langConfig) {
     try {
-      const parser = new Parser();
-      parser.setLanguage(langConfig.grammar);
+      const parser = getParser(langConfig.grammar);
       const src = typeof content === 'string' ? content : (content == null ? '' : String(content));
       // tree-sitter v0.21.x rejects strings longer than 32767 chars; use callback for large files
       const tree = src.length < 32768

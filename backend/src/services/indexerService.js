@@ -8,7 +8,6 @@ const { scanDependencies } = require('./osvScanner'); // US-045
 const { OpenAI } = require('openai');
 const { supabaseAdmin } = require('../db/supabase');
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || 'sk-dummy' });
-const { Octokit } = require('octokit');
 const pLimit = require('p-limit');
 const fs = require('fs/promises');
 const path = require('path');
@@ -78,6 +77,7 @@ async function fetchLocalFiles(dir, baseDir = dir, results = []) {
  * @param {string} params.source - 'github' or 'upload'
  */
 const indexRepository = async ({ repoId, owner, name, token, extractPath, source }) => {
+  let zipTempDir = null;
   try {
     console.log(`[indexer] Starting indexing for repoId: ${repoId} (source: ${source})`);
     console.time(`[indexer] Total pipeline (${repoId})`);
@@ -106,9 +106,10 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     
     if (source === 'github') {
       const os = require('os');
-      extractDir = await fs.mkdtemp(path.join(os.tmpdir(), `codelens-github-${repoId}-`));
+      zipTempDir = await fs.mkdtemp(path.join(os.tmpdir(), `codelens-github-${repoId}-`));
+      extractDir = zipTempDir;
       await fetchGithubZipAndExtract(owner, name, token, extractDir);
-      
+
       // The zip extracts into a subfolder like `owner-repo-commitSha`.
       // We want to fetch all files starting from that subfolder so relative paths are correct.
       const entries = await fs.readdir(extractDir, { withFileTypes: true });
@@ -120,6 +121,12 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     } else if (source === 'upload') {
       pendingFiles = await fetchLocalFiles(extractPath);
     }
+
+    // Sort so the same repo produces the same node/edge array on every re-index.
+    // fs.readdir returns entries in filesystem order, which varies across hosts
+    // and zipball extractions, and that non-determinism propagates through the
+    // whole pipeline into the D3 graph layout.
+    pendingFiles.sort((a, b) => a.path.localeCompare(b.path));
 
     const getAllFilesSet = new Set(pendingFiles.map(f => f.path));
     console.timeEnd(`[indexer] Phase 1: File discovery (${repoId})`);
@@ -145,6 +152,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
         }
       };
       await scanForManifests(extractDir, extractDir);
+      manifestFiles.sort((a, b) => a.path.localeCompare(b.path));
       console.timeEnd(`[indexer] Phase 1b: Manifest discovery (${repoId})`);
 
     console.log(`[indexer] Discovered ${manifestFiles.length} manifest file(s) for SCA.`);
@@ -471,7 +479,6 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       if (manifestFiles.length > 0) {
         console.time(`[indexer] Phase SCA: Dependency scanning (${repoId})`);
 
-        const manifestOctokit = source === 'github' ? new Octokit({ auth: token }) : null;
         const allDeps = [];
 
         for (const mf of manifestFiles) {
@@ -685,6 +692,12 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     }
 
     console.error(`[indexer] Failed pipeline for repoId ${repoId}:`, error.message);
+  } finally {
+    // Remove the zipball temp directory regardless of success/failure so /tmp
+    // doesn't fill up with multi-MB extracted repos over repeated re-indexes.
+    if (zipTempDir) {
+      await fs.rm(zipTempDir, { recursive: true, force: true }).catch(() => {});
+    }
   }
 };
 

@@ -20,7 +20,7 @@ function StatusBadge({ status }) {
   }
 }
 
-function RepoCard({ repo, onRetry, onDelete }) {
+function RepoCard({ repo, onRetry, onDelete, isRetrying }) {
   return (
     <Link
       key={repo.id}
@@ -62,9 +62,10 @@ function RepoCard({ repo, onRetry, onDelete }) {
           {repo.status !== 'ready' && !repo.shared && (
             <button
               onClick={(e) => onRetry(e, repo.id)}
-              className="rounded bg-red-900/40 px-3 py-1 text-xs font-semibold text-red-300 hover:bg-red-800/60 transition"
+              disabled={isRetrying}
+              className="rounded bg-red-900/40 px-3 py-1 text-xs font-semibold text-red-300 hover:bg-red-800/60 transition disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              Retry
+              {isRetrying ? 'Starting…' : 'Retry'}
             </button>
           )}
           {!repo.shared && (
@@ -92,6 +93,7 @@ export default function Dashboard() {
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const [isCreateTeamOpen, setIsCreateTeamOpen] = useState(false);
   const [teamCreatedMsg, setTeamCreatedMsg] = useState(null);
+  const [retryingIds, setRetryingIds] = useState(() => new Set());
 
   const fetchRepos = useCallback(async () => {
     if (!session?.access_token) return;
@@ -138,19 +140,30 @@ export default function Dashboard() {
   const handleRetry = async (e, repoId) => {
     e.preventDefault(); // prevent link navigation
     e.stopPropagation();
-    
+
+    if (retryingIds.has(repoId)) return;
+    setRetryingIds(prev => new Set(prev).add(repoId));
+
     try {
       const res = await fetch(apiUrl(`/api/repos/${repoId}/reindex`), {
         method: 'POST',
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
-      if (!res.ok) throw new Error('Failed to restart indexing');
-      
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || 'Failed to restart indexing');
+      }
+
       // Fetch fresh so polling starts immediately
       await fetchRepos();
     } catch (err) {
-      console.error(err);
       toast.error(err.message);
+    } finally {
+      setRetryingIds(prev => {
+        const next = new Set(prev);
+        next.delete(repoId);
+        return next;
+      });
     }
   };
 
@@ -245,7 +258,7 @@ export default function Dashboard() {
               <>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {ownedRepos.map(repo => (
-                    <RepoCard key={repo.id} repo={repo} onRetry={handleRetry} onDelete={handleDelete} />
+                    <RepoCard key={repo.id} repo={repo} onRetry={handleRetry} onDelete={handleDelete} isRetrying={retryingIds.has(repo.id)} />
                   ))}
                 </div>
 
@@ -254,7 +267,7 @@ export default function Dashboard() {
                     <h2 className="mb-4 text-lg font-semibold text-gray-300">Team Repositories</h2>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       {sharedRepos.map(repo => (
-                        <RepoCard key={repo.id} repo={repo} onRetry={handleRetry} onDelete={handleDelete} />
+                        <RepoCard key={repo.id} repo={repo} onRetry={handleRetry} onDelete={handleDelete} isRetrying={retryingIds.has(repo.id)} />
                       ))}
                     </div>
                   </div>
