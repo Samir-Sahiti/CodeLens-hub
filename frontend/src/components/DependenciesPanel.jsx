@@ -42,7 +42,7 @@ function SortIcon({ columnKey, sortConfig }) {
 
 // ── Main Component ────────────────────────────────────────────────────────────
 
-export default function DependenciesPanel({ repoId }) {
+export default function DependenciesPanel({ repoId, refreshKey = 0 }) {
   const { session } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const [deps, setDeps]         = useState([]);
@@ -57,6 +57,7 @@ export default function DependenciesPanel({ repoId }) {
   useEffect(() => {
     if (!session?.access_token) return;
     let cancelled = false;
+    setLoading(true);
 
     const fetchDeps = async () => {
       try {
@@ -78,7 +79,7 @@ export default function DependenciesPanel({ repoId }) {
 
     fetchDeps();
     return () => { cancelled = true; };
-  }, [repoId, session?.access_token]);
+  }, [repoId, session?.access_token, refreshKey]);
 
   const ecosystems = useMemo(() => ['all', ...new Set(deps.map(d => d.ecosystem))], [deps]);
   const highlightedPackage = searchParams.get('dep') || '';
@@ -170,8 +171,9 @@ export default function DependenciesPanel({ repoId }) {
 
   if (loading) {
     return (
-      <div className="flex h-[40rem] items-center justify-center">
+      <div className="flex h-[40rem] flex-col items-center justify-center">
         <div className="h-8 w-8 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent" />
+        <p className="mt-3 text-sm text-gray-400">Loading dependencies…</p>
       </div>
     );
   }

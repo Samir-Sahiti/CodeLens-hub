@@ -193,18 +193,23 @@ export default function SearchPanel({ repoId }) {
             disabled={isStreaming}
             className="flex-1 rounded-xl border border-gray-700 bg-gray-900 px-5 py-3 text-sm text-white placeholder-gray-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-colors disabled:opacity-60"
           />
-          <button
-            type="submit"
-            disabled={!inputValue.trim() || isStreaming}
-            className="rounded-xl bg-indigo-600 px-5 py-3 text-sm font-semibold text-white hover:bg-indigo-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
-          >
-            {isStreaming ? (
-              <span className="flex items-center gap-2">
-                <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                Thinking…
-              </span>
-            ) : 'Ask'}
-          </button>
+          {isStreaming ? (
+            <button
+              type="button"
+              onClick={() => { abortRef.current?.abort(); setIsStreaming(false); }}
+              className="rounded-xl bg-gray-700 px-5 py-3 text-sm font-semibold text-white hover:bg-gray-600 transition-colors shadow-sm"
+            >
+              Cancel
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={!inputValue.trim()}
+              className="rounded-xl bg-indigo-600 px-5 py-3 text-sm font-semibold text-white hover:bg-indigo-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+            >
+              Ask
+            </button>
+          )}
         </form>
 
         {/* Content area */}

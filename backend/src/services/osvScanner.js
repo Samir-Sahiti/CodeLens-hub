@@ -51,78 +51,107 @@ async function scanDependencies(deps, repoId) {
 
     console.log(`[SCA] Scanning ${uniqueDeps.length} unique dependencies...`);
 
-    // 2. Cache lookup: query each dep individually to safely handle special chars
-    //    (scoped npm names like @scope/pkg, version strings with + or %, etc.)
+    // 2. Cache lookup: batch fetch all deps in a single query, then filter client-side.
+    //    Individual-query approach created N DB round trips for N unique deps.
     const cached   = new Map(); // key -> vulns[]
     const uncached = [];
 
     const cutoff = new Date(Date.now() - CACHE_TTL_HOURS * 3_600_000).toISOString();
-    const cacheLimit = pLimit(10);
 
-    await Promise.all(
-      uniqueDeps.map(dep =>
-        cacheLimit(async () => {
-          const { data } = await supabaseAdmin
-            .from('vulnerability_cache')
-            .select('vulns')
-            .eq('ecosystem', dep.ecosystem)
-            .eq('package_name', dep.name)
-            .eq('pkg_version', dep.version)
-            .gt('created_at', cutoff)
-            .maybeSingle();
+    // Fetch all cache rows for this set of (ecosystem, name, version) tuples in one shot.
+    // We page in chunks of 1000 to stay within PostgREST row limits.
+    const CACHE_FETCH_SIZE = 1000;
+    for (let offset = 0; offset < uniqueDeps.length; offset += CACHE_FETCH_SIZE) {
+      const slice = uniqueDeps.slice(offset, offset + CACHE_FETCH_SIZE);
+      // Build an OR filter: ecosystem=A&package_name=B&pkg_version=C for each dep.
+      // Supabase JS v2 doesn't support multi-column OR natively, so we use a raw
+      // .or() with a constructed filter string.
+      const orParts = slice.map(d =>
+        `and(ecosystem.eq.${d.ecosystem},package_name.eq.${encodeURIComponent(d.name)},pkg_version.eq.${encodeURIComponent(d.version)})`
+      );
+      // PostgREST OR filter can get very large for huge dependency sets; fall back to
+      // individual queries if the slice is small (< 20) to avoid URL-length issues.
+      if (slice.length <= 20) {
+        // Small slice — individual queries are fine and avoid URL-length issues
+        const cacheLimit = pLimit(10);
+        await Promise.all(
+          slice.map(dep =>
+            cacheLimit(async () => {
+              const { data } = await supabaseAdmin
+                .from('vulnerability_cache')
+                .select('ecosystem, package_name, pkg_version, vulns')
+                .eq('ecosystem', dep.ecosystem)
+                .eq('package_name', dep.name)
+                .eq('pkg_version', dep.version)
+                .gt('created_at', cutoff)
+                .maybeSingle();
+              if (data) cached.set(makeKey(dep), data.vulns);
+            })
+          )
+        );
+      } else {
+        // Larger slice — use a single query with an OR filter string.
+        // We match on all three columns for each dep tuple.
+        const { data: rows } = await supabaseAdmin
+          .from('vulnerability_cache')
+          .select('ecosystem, package_name, pkg_version, vulns')
+          .or(orParts.join(','))
+          .gt('created_at', cutoff);
 
-          if (data) {
-            cached.set(makeKey(dep), data.vulns);
-          }
-        })
-      )
-    );
+        for (const row of (rows || [])) {
+          const key = `${row.ecosystem}::${row.package_name}::${row.pkg_version}`;
+          cached.set(key, row.vulns);
+        }
+      }
+    }
 
     for (const dep of uniqueDeps) {
-      if (cached.has(makeKey(dep))) {
-        // Already cached — nothing extra needed
-      } else {
+      if (!cached.has(makeKey(dep))) {
         uncached.push(dep);
       }
     }
 
     console.log(`[SCA] Cache hits: ${cached.size} | OSV queries needed: ${uncached.length}`);
 
-    // 3. Query OSV in batches for uncached deps
+    // 3. Query OSV in batches for uncached deps — run up to 5 batches concurrently
     const osvVulnIds = new Map(); // key -> vulnId[]
 
     const osvBatches = chunkArray(uncached, BATCH_SIZE);
-    for (const batch of osvBatches) {
-      try {
-        const queries = batch.map(d => ({
-          package: { name: d.name, ecosystem: d.ecosystem },
-          version: d.version,
-        }));
+    const batchLimit = pLimit(5);
+    await Promise.all(
+      osvBatches.map((batch, batchIndex) =>
+        batchLimit(async () => {
+          try {
+            const queries = batch.map(d => ({
+              package: { name: d.name, ecosystem: d.ecosystem },
+              version: d.version,
+            }));
 
-        const res = await fetch(OSV_BATCH_URL, {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ queries }),
-        });
+            const res = await fetch(OSV_BATCH_URL, {
+              method:  'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body:    JSON.stringify({ queries }),
+            });
 
-        if (!res.ok) {
-          console.warn(`[SCA] OSV batch query returned HTTP ${res.status} — skipping batch`);
-          // Mark all in batch as empty so we don't retry this run
-          for (const dep of batch) osvVulnIds.set(makeKey(dep), []);
-          continue;
-        }
+            if (!res.ok) {
+              console.warn(`[SCA] OSV batch ${batchIndex} returned HTTP ${res.status} — skipping`);
+              for (const dep of batch) osvVulnIds.set(makeKey(dep), []);
+              return;
+            }
 
-        const { results } = await res.json();
-        for (let i = 0; i < batch.length; i++) {
-          const key     = makeKey(batch[i]);
-          const vulnIds = (results[i]?.vulns || []).map(v => v.id);
-          osvVulnIds.set(key, vulnIds);
-        }
-      } catch (err) {
-        console.warn(`[SCA] OSV batch request failed: ${err.message} — skipping batch`);
-        for (const dep of batch) osvVulnIds.set(makeKey(dep), []);
-      }
-    }
+            const { results } = await res.json();
+            for (let i = 0; i < batch.length; i++) {
+              const key     = makeKey(batch[i]);
+              const vulnIds = (results[i]?.vulns || []).map(v => v.id);
+              osvVulnIds.set(key, vulnIds);
+            }
+          } catch (err) {
+            console.warn(`[SCA] OSV batch ${batchIndex} failed: ${err.message} — skipping`);
+            for (const dep of batch) osvVulnIds.set(makeKey(dep), []);
+          }
+        })
+      )
+    );
 
     // 4. Collect all unique vuln IDs that need detail enrichment
     const allVulnIds = new Set();
@@ -130,10 +159,10 @@ async function scanDependencies(deps, repoId) {
       ids.forEach(id => allVulnIds.add(id));
     }
 
-    // 5. Fetch full vuln details concurrently (limit 5 in-flight)
+    // 5. Fetch full vuln details concurrently (limit 15 in-flight)
     const vulnDetails = new Map(); // vulnId -> detail object
     if (allVulnIds.size > 0) {
-      const detailLimit = pLimit(5);
+      const detailLimit = pLimit(15);
       await Promise.all(
         [...allVulnIds].map(vulnId =>
           detailLimit(async () => {

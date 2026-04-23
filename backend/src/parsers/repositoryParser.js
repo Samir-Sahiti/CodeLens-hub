@@ -207,7 +207,11 @@ const parseFile = (filePath, source, allFiles = new Set()) => {
 
     const parser = new Parser();
     parser.setLanguage(language);
-    const tree = parser.parse(source);
+    const src = typeof source === 'string' ? source : (source == null ? '' : String(source));
+    // tree-sitter v0.21.x rejects strings longer than 32767 chars; use callback for large files
+    const tree = src.length < 32768
+      ? parser.parse(src)
+      : parser.parse((i) => i < src.length ? src.slice(i, i + 8192) : null);
 
     const complexity = calculateComplexity(tree, queryKey);
 
