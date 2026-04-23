@@ -490,22 +490,10 @@ const getDependencies = async (req, res) => {
       return res.status(404).json({ error: 'Repository not found or unauthorized' });
     }
 
-    if (repo.source === 'github') {
-      const githubToken = await getGithubTokenForUser(req.user.id);
-      if (githubToken) {
-        try {
-          const dependencies = await fetchLiveGitHubDependencies({
-            repoId,
-            repoFullName: repo.full_name || repo.name,
-            githubToken,
-          });
-          return res.json({ dependencies, source: 'github_live' });
-        } catch (liveErr) {
-          console.warn(`[getDependencies] Live GitHub dependency fetch failed for ${repo.id}: ${liveErr.message}`);
-        }
-      }
-    }
-
+    // Always serve from the indexed dependency_manifests table — data is stored during
+    // indexing (indexerService SCA phase). The previous live-GitHub-fetch path re-ran
+    // OSV scanning on every request, causing 5-20 s tab load times with no benefit
+    // (the data is already fresh from the last index run).
     const dependencies = await getStoredDependenciesWithIssues(repoId);
     res.json({ dependencies });
   } catch (err) {
@@ -595,11 +583,25 @@ async function getStoredDependenciesWithIssues(repoId) {
     { data: dependencyRows, error: dependencyError },
     { data: issueRows, error: issuesError },
   ] = await Promise.all([
-    supabaseAdmin
-      .from('dependency_manifests')
-      .select('*')
-      .eq('repo_id', repoId)
-      .order('vuln_count', { ascending: false }),
+    (async () => {
+      const PAGE = 1000;
+      const rows = [];
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supabaseAdmin
+          .from('dependency_manifests')
+          .select('*')
+          .eq('repo_id', repoId)
+          .order('vuln_count', { ascending: false })
+          .range(from, from + PAGE - 1);
+        // PGRST103 = 416 Range Not Satisfiable — offset is past the last row, we're done
+        if (error) {
+          if (error.code === 'PGRST103') return { data: rows, error: null };
+          return { data: null, error };
+        }
+        rows.push(...(data || []));
+        if (!data || data.length < PAGE) return { data: rows, error: null };
+      }
+    })(),
     supabaseAdmin
       .from('analysis_issues')
       .select('severity, description, file_paths')

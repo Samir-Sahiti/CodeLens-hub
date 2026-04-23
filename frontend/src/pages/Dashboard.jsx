@@ -93,7 +93,6 @@ export default function Dashboard() {
       const data = await res.json();
       setRepos(data.repos || []);
     } catch (err) {
-      console.error(err);
       setError(err.message);
     } finally {
       setIsLoading(false);

@@ -61,7 +61,6 @@ export default function ConnectGitHubModal({ isOpen, onClose, existingRepos, onC
           return unique;
         });
       } catch (err) {
-        console.error(err);
         if (err.status === 401) setIsTokenMissing(true);
       } finally {
         setIsLoading(false);
@@ -110,7 +109,6 @@ export default function ConnectGitHubModal({ isOpen, onClose, existingRepos, onC
       onConnected();
       onClose();
     } catch (err) {
-      console.error(err);
       toast.error(err.message);
     } finally {
       setIsConnecting(null);

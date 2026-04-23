@@ -560,6 +560,7 @@ export default function RepoView() {
   const [isLoading, setIsLoading]     = useState(true);
   const [error, setError]             = useState(null);
   const [isReindexing, setIsReindexing] = useState(false);
+  const [depsRefreshKey, setDepsRefreshKey] = useState(0);
 
   const handleNodeSelect = useCallback((nodeIdOrIds, options = {}) => {
     setSelectedNodeId(nodeIdOrIds);
@@ -612,7 +613,6 @@ export default function RepoView() {
       setHasFetchedData(true);
       setAnalysisError(null);
     } catch (err) {
-      console.error('Failed to fetch analysis datasets:', err);
       setAnalysisError(err.message || 'Failed to load analysis data');
     }
   }, [repoId, hasFetchedData, session?.access_token]);
@@ -636,7 +636,6 @@ export default function RepoView() {
         fetchAnalysisData(true);
       }
     } catch (err) {
-      console.error(err);
       setError(err.message);
     } finally {
       setIsLoading(false);
@@ -692,8 +691,6 @@ export default function RepoView() {
   const handleReindex = async () => {
     if (!session?.access_token) return;
     setIsReindexing(true);
-    setHasFetchedData(false);
-    setImpactSourcePath(null);
 
     try {
       const res = await fetch(apiUrl(`/api/repos/${repoId}/reindex`), {
@@ -702,10 +699,16 @@ export default function RepoView() {
       });
       if (!res.ok) throw new Error('Failed to start re-indexing');
 
-      await fetchRepo();
+      // Batch all resets + optimistic status change in one render so the UI
+      // jumps straight to the "Indexing…" screen without flashing stale data
+      setHasFetchedData(false);
+      setAnalysisData({ nodes: [], edges: [], issues: [] });
+      setDepsRefreshKey(k => k + 1);
+      setImpactSourcePath(null);
+      setRepo(prev => prev ? { ...prev, status: 'pending' } : prev);
     } catch (err) {
-      console.error(err);
       toast.error(err.message);
+    } finally {
       setIsReindexing(false);
     }
   };
@@ -832,6 +835,11 @@ export default function RepoView() {
           <div className="rounded-md bg-red-900/50 p-4 border border-red-800 text-red-200">
             {analysisError}
           </div>
+        ) : !hasFetchedData ? (
+          <div className="flex flex-col items-center justify-center py-32 rounded-xl border border-dashed border-gray-800 bg-gray-900/30">
+            <div className="h-8 w-8 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent mb-3" />
+            <p className="text-sm text-gray-400">Loading analysis…</p>
+          </div>
         ) : (
           <div className="h-full relative">
             <div className={activeTab === 'graph' ? 'block h-full' : 'hidden'}>
@@ -892,7 +900,7 @@ export default function RepoView() {
 
             {/* Dependencies tab — package vulnerability scanning (US-045) */}
             <div className={activeTab === 'dependencies' ? 'block h-full' : 'hidden'}>
-              <DependenciesPanel repoId={repoId} />
+              <DependenciesPanel repoId={repoId} refreshKey={depsRefreshKey} />
             </div>
           </div>
         )}

@@ -105,17 +105,12 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     console.log(`[indexer] Starting indexing for repoId: ${repoId} (source: ${source})`);
     console.time(`[indexer] Total pipeline (${repoId})`);
 
-    // Ensure each indexing run replaces prior derived analysis data instead of
-    // accumulating stale rows across webhook syncs or repeated background jobs.
-    const derivedTables = ['code_chunks', 'file_contents', 'analysis_issues', 'graph_edges', 'graph_nodes', 'dependency_manifests'];
-    for (const table of derivedTables) {
-      const { error: deleteError } = await supabaseAdmin
-        .from(table)
-        .delete()
-        .eq('repo_id', repoId);
-      if (deleteError) {
-        console.warn(`[indexer] Failed clearing ${table} before reindex: ${deleteError.message}`);
-      }
+    // Clear all derived tables in a single DB round trip via RPC instead of 6
+    // separate PostgREST calls.  The function runs all DELETEs in one transaction,
+    // avoiding repeated FK lock acquisitions on the repositories parent row.
+    const { error: clearError } = await supabaseAdmin.rpc('clear_repo_derived_data', { p_repo_id: repoId });
+    if (clearError) {
+      console.warn(`[indexer] Failed clearing derived data before reindex: ${clearError.message}`);
     }
 
     // Fetch repo owner for usage tracking (US-042)
@@ -529,16 +524,29 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
           // Store per-package dependency results for the Dependencies tab
           if (depResults.length > 0) {
             await supabaseAdmin.from('dependency_manifests').delete().eq('repo_id', repoId);
-            const depRows = depResults.map(d => ({
-              repo_id: repoId,
-              manifest_path: d.manifest_path,
-              ecosystem: d.ecosystem,
-              package_name: d.package_name,
-              pkg_version: d.version,
-              is_transitive: d.is_transitive,
-              vuln_count: d.vuln_count,
-              vulns_json: d.vulns_json,
-            }));
+
+            // Deduplicate by the upsert conflict key before inserting — duplicate tuples
+            // within a single batch cause "ON CONFLICT DO UPDATE command cannot affect row
+            // a second time" (package-lock.json v2/v3 lists packages in both the legacy
+            // `dependencies` and the new `packages` sections, producing the same row twice).
+            const seen = new Set();
+            const depRows = [];
+            for (const d of depResults) {
+              const key = `${d.manifest_path}::${d.ecosystem}::${d.package_name}::${d.version}`;
+              if (seen.has(key)) continue;
+              seen.add(key);
+              depRows.push({
+                repo_id: repoId,
+                manifest_path: d.manifest_path,
+                ecosystem: d.ecosystem,
+                package_name: d.package_name,
+                pkg_version: d.version,
+                is_transitive: d.is_transitive,
+                vuln_count: d.vuln_count,
+                vulns_json: d.vulns_json,
+              });
+            }
+
             const depChunks = chunkArray(depRows, 200);
             for (const chunk of depChunks) {
               const { error: depErr } = await supabaseAdmin

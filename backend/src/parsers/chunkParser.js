@@ -121,7 +121,11 @@ const extractChunksFromFile = (filePath, sourceContent, repoId) => {
   try {
     const parser = new Parser();
     parser.setLanguage(language);
-    const tree = parser.parse(sourceContent);
+    const src = typeof sourceContent === 'string' ? sourceContent : (sourceContent == null ? '' : String(sourceContent));
+    // tree-sitter v0.21.x rejects strings longer than 32767 chars; use callback for large files
+    const tree = src.length < 32768
+      ? parser.parse(src)
+      : parser.parse((i) => i < src.length ? src.slice(i, i + 8192) : null);
     const query = new Parser.Query(language, queryStr);
     const matches = query.matches(tree.rootNode);
 

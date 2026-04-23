@@ -208,6 +208,8 @@ CREATE INDEX IF NOT EXISTS code_chunks_hnsw_idx
   ON code_chunks USING hnsw (embedding vector_cosine_ops)
   WITH (m = 16, ef_construction = 64);
 
+CREATE INDEX IF NOT EXISTS code_chunks_repo_id_idx ON code_chunks (repo_id);
+
 -- =============================================================================
 -- ANALYSIS ISSUES
 -- =============================================================================
@@ -447,6 +449,30 @@ CREATE POLICY "Users can access dependency manifests for their repos"
       )
     )
   );
+
+-- =============================================================================
+-- REINDEX CLEAR FUNCTION
+-- Deletes all derived data for a repo in a single transaction (1 RPC round
+-- trip instead of 6 separate PostgREST calls, avoiding per-table FK lock
+-- contention on the repositories parent row).
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION clear_repo_derived_data(p_repo_id UUID)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  DELETE FROM code_chunks          WHERE repo_id = p_repo_id;
+  DELETE FROM file_contents        WHERE repo_id = p_repo_id;
+  DELETE FROM analysis_issues      WHERE repo_id = p_repo_id;
+  DELETE FROM graph_edges          WHERE repo_id = p_repo_id;
+  DELETE FROM graph_nodes          WHERE repo_id = p_repo_id;
+  DELETE FROM dependency_manifests WHERE repo_id = p_repo_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION clear_repo_derived_data(UUID) TO service_role;
 
 -- =============================================================================
 -- END OF SCHEMA

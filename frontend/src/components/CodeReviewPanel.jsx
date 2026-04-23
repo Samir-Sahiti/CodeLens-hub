@@ -184,28 +184,35 @@ export default function CodeReviewPanel({ repoId }) {
 
         {/* Action buttons row */}
         <div className="flex items-center gap-3">
-          {/* Review Code — primary */}
-          <button
-            onClick={() => runReview('review')}
-            disabled={!canSubmit}
-            className="rounded-xl bg-indigo-600 px-5 py-3 text-sm font-semibold text-white hover:bg-indigo-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
-          >
-            {isStreaming ? (
-              <span className="flex items-center gap-2">
-                <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                Reviewing…
-              </span>
-            ) : 'Review Code'}
-          </button>
+          {isStreaming ? (
+            <button
+              type="button"
+              onClick={() => { abortRef.current?.abort(); setIsStreaming(false); }}
+              className="rounded-xl bg-gray-700 px-5 py-3 text-sm font-semibold text-white hover:bg-gray-600 transition-colors shadow-sm"
+            >
+              Cancel
+            </button>
+          ) : (
+            <>
+              {/* Review Code — primary */}
+              <button
+                onClick={() => runReview('review')}
+                disabled={!canSubmit}
+                className="rounded-xl bg-indigo-600 px-5 py-3 text-sm font-semibold text-white hover:bg-indigo-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+              >
+                Review Code
+              </button>
 
-          {/* Clean up this code — secondary/outlined */}
-          <button
-            onClick={() => runReview('cleanup')}
-            disabled={!canSubmit}
-            className="rounded-xl border border-gray-700 bg-transparent px-5 py-3 text-sm font-semibold text-gray-200 hover:bg-gray-800 hover:border-gray-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {isStreaming ? 'Working…' : 'Clean up this code'}
-          </button>
+              {/* Clean up this code — secondary/outlined */}
+              <button
+                onClick={() => runReview('cleanup')}
+                disabled={!canSubmit}
+                className="rounded-xl border border-gray-700 bg-transparent px-5 py-3 text-sm font-semibold text-gray-200 hover:bg-gray-800 hover:border-gray-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Clean up this code
+              </button>
+            </>
+          )}
         </div>
       </div>
 
