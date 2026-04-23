@@ -100,7 +100,11 @@ const scanFileForInsecurePatterns = async (filePath, content, disabledRules = []
     try {
       const parser = new Parser();
       parser.setLanguage(langConfig.grammar);
-      const tree = parser.parse(content);
+      const src = typeof content === 'string' ? content : (content == null ? '' : String(content));
+      // tree-sitter v0.21.x rejects strings longer than 32767 chars; use callback for large files
+      const tree = src.length < 32768
+        ? parser.parse(src)
+        : parser.parse((i) => i < src.length ? src.slice(i, i + 8192) : null);
       const langRules = rules[langConfig.ruleKey] || [];
       const findings = runAstRules(tree, langConfig.grammar, langRules, disabledRules);
       for (const { rule, lineNumber } of findings) {

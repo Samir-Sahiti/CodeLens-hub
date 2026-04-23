@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { useAuth } from '../context/AuthContext';
+import { apiUrl } from '../lib/api';
 import { useToast } from './Toast';
 
 // Same colours as DependencyGraph.jsx
@@ -182,7 +183,7 @@ export default function FileBrowser({ repoId, nodes }) {
 
     try {
       const res = await fetch(
-        `/api/repos/${repoId}/file?path=${encodeURIComponent(filePath)}`,
+        apiUrl(`/api/repos/${repoId}/file?path=${encodeURIComponent(filePath)}`),
         { headers: { Authorization: `Bearer ${session.access_token}` } }
       );
 

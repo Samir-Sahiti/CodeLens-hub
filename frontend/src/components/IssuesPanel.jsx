@@ -1,6 +1,9 @@
 import { useMemo, useState, useEffect } from 'react';
+import { useAuth } from '../context/AuthContext';
+import { apiUrl } from '../lib/api';
 
 export default function IssuesPanel({ nodes, issues, onNodeSelect, repoId }) {
+  const { session } = useAuth();
   // Local state to hide suppressed issues instantly without full page reload
   const [localIssues, setLocalIssues] = useState(issues || []);
 
@@ -28,6 +31,7 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, repoId }) {
   }
 
   const GROUP_ORDER = [
+<<<<<<< HEAD
     { type: 'hardcoded_secret',     label: 'Hardcoded Secrets',         icon: '🔒' },
     { type: 'vulnerable_dependency', label: 'Vulnerable Dependencies',   icon: '🛡️' },
     { type: 'insecure_pattern',     label: 'Insecure Code Patterns',     icon: '⚠️' },
@@ -35,6 +39,15 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, repoId }) {
     { type: 'god_file',             label: 'God Files',                  icon: '⚡' },
     { type: 'high_coupling',        label: 'High Coupling',              icon: '🔗' },
     { type: 'dead_code',            label: 'Dead Code',                  icon: '💀' },
+=======
+    { type: 'vulnerable_dependency', label: 'Vulnerable Dependencies' },
+    { type: 'hardcoded_secret', label: 'Hardcoded Secrets' },
+    { type: 'insecure_pattern', label: 'Insecure Code Patterns' },
+    { type: 'circular_dependency', label: 'Circular Dependencies' },
+    { type: 'god_file', label: 'God Files' },
+    { type: 'high_coupling', label: 'High Coupling' },
+    { type: 'dead_code', label: 'Dead Code' },
+>>>>>>> 864ff60768d4dc9244c3ac9267886cfcdaeea7eb
   ];
 
   const getBadgeStyles = (severity) => {
@@ -77,10 +90,20 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, repoId }) {
     };
 
     try {
+<<<<<<< HEAD
       const response = await fetch(`/api/repos/${repoId}/issues/suppress`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify(payload),
+=======
+      const response = await fetch(apiUrl(`/api/analysis/${repoId}/issues/suppress`), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify(payload)
+>>>>>>> 864ff60768d4dc9244c3ac9267886cfcdaeea7eb
       });
 
       if (!response.ok) throw new Error('Failed to suppress issue');
@@ -103,16 +126,33 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, repoId }) {
     const ruleId = ruleIdMatch[1];
 
     try {
+<<<<<<< HEAD
       const repoRes = await fetch(`/api/repos/${repoId}/status`);
+=======
+      // Fetch current disabled rules first, then append
+      const repoRes = await fetch(apiUrl(`/api/repos/${repoId}/status`), {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+>>>>>>> 864ff60768d4dc9244c3ac9267886cfcdaeea7eb
       const repoData = await repoRes.json();
       const currentDisabled = repoData.sast_disabled_rules || [];
 
       if (currentDisabled.includes(ruleId)) return;
 
+<<<<<<< HEAD
       const response = await fetch(`/api/repos/${repoId}`, {
         method:  'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ sast_disabled_rules: [...currentDisabled, ruleId] }),
+=======
+      const response = await fetch(apiUrl(`/api/repos/${repoId}`), {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ sast_disabled_rules: [...currentDisabled, ruleId] })
+>>>>>>> 864ff60768d4dc9244c3ac9267886cfcdaeea7eb
       });
 
       if (!response.ok) throw new Error('Failed to disable rule');
@@ -204,9 +244,16 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, repoId }) {
         return (
           <div key={type} className="mb-8 last:mb-0">
             <h2 className="text-lg font-semibold text-gray-200 border-b border-gray-800 pb-2 mb-4 sticky top-0 bg-gray-950 z-10 flex items-center">
+<<<<<<< HEAD
               {icon && <span className="mr-2">{icon}</span>}
               {label}{' '}
               <span className="text-gray-500 text-sm ml-2 font-normal">({groupIssues.length})</span>
+=======
+              {type === 'vulnerable_dependency' && <span className="mr-2">📦</span>}
+              {type === 'hardcoded_secret' && <span className="mr-2">🔒</span>}
+              {type === 'insecure_pattern' && <span className="mr-2">🛡️</span>}
+              {label} <span className="text-gray-500 text-sm ml-2 font-normal">({groupIssues.length})</span>
+>>>>>>> 864ff60768d4dc9244c3ac9267886cfcdaeea7eb
             </h2>
             <div className="grid gap-4">
               {groupIssues.map((issue, idx) => {

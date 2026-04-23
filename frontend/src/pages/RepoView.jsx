@@ -2,13 +2,18 @@ import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useRepo } from '../context/RepoContext';
+import { apiUrl } from '../lib/api';
 import DependencyGraph from '../components/DependencyGraph';
 import SearchPanel from '../components/SearchPanel';
 import CodeReviewPanel from '../components/CodeReviewPanel';
 import VirtualTable from '../components/VirtualTable';
 import FileChatPanel from '../components/FileChatPanel';
 import FileBrowser from '../components/FileBrowser';
+<<<<<<< HEAD
 import DependenciesPanel from '../components/DependenciesPanel'; // US-045
+=======
+import DependenciesPanel from '../components/DependenciesPanel';
+>>>>>>> 864ff60768d4dc9244c3ac9267886cfcdaeea7eb
 import { useToast } from '../components/Toast';
 
 function formatLanguage(str) {
@@ -289,12 +294,111 @@ function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact }) {
   );
 }
 
+<<<<<<< HEAD
 // ── IssuesPanel (inline — passes repoId) ─────────────────────────────────────
 
 function IssuesPanelWrapper({ nodes, issues, onNodeSelect, repoId }) {
   // Import is dynamic to avoid circular deps in the same file
   const IssuesPanel = require('../components/IssuesPanel').default;
   return <IssuesPanel nodes={nodes} issues={issues} onNodeSelect={onNodeSelect} repoId={repoId} />;
+=======
+function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDependencies }) {
+  const nodeMap = useMemo(
+    () => new Map(nodes.map(n => [n.file_path, n.id || n.file_path])),
+    [nodes]
+  );
+
+  if (!issues || issues.length === 0) {
+    return (
+      <div className="flex h-[40rem] flex-col items-center justify-center rounded-xl border border-dashed border-gray-700 bg-gray-900/30">
+        <div className="flex items-center justify-center w-16 h-16 rounded-full bg-green-500/10 mb-4">
+          <svg className="w-8 h-8 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+          </svg>
+        </div>
+        <h3 className="text-lg font-medium text-gray-200">No issues detected — your codebase looks healthy 🎉</h3>
+      </div>
+    );
+  }
+
+  const GROUP_ORDER = [
+    { type: 'vulnerable_dependency', label: 'Vulnerable Dependencies', icon: '📦' },
+    { type: 'hardcoded_secret',      label: 'Hardcoded Secrets',        icon: '🔒' },
+    { type: 'insecure_pattern',      label: 'Insecure Code Patterns',   icon: '🛡️' },
+    { type: 'circular_dependency',   label: 'Circular Dependencies',    icon: null },
+    { type: 'god_file',              label: 'God Files',                icon: null },
+    { type: 'high_coupling',         label: 'High Coupling',            icon: null },
+    { type: 'dead_code',             label: 'Dead Code',                icon: null },
+  ];
+
+  const getBadgeStyles = (severity) => {
+    switch (severity?.toLowerCase()) {
+      case 'high':   return 'bg-red-500/20 text-red-400 ring-1 ring-inset ring-red-500/30';
+      case 'medium': return 'bg-orange-500/20 text-orange-400 ring-1 ring-inset ring-orange-500/30';
+      case 'low':    return 'bg-yellow-500/20 text-yellow-400 ring-1 ring-inset ring-yellow-500/30';
+      default:       return 'bg-gray-500/20 text-gray-400 ring-1 ring-inset ring-gray-500/30';
+    }
+  };
+
+  const handleIssueClick = (issue) => {
+    if (issue.type === 'vulnerable_dependency') {
+      onOpenDependencies(issue);
+      return;
+    }
+
+    const resolvedIds = issue.file_paths
+      .map(p => nodeMap.get(p))
+      .filter(Boolean);
+
+    if (resolvedIds.length > 0) {
+      onNodeSelect(resolvedIds);
+    }
+  };
+
+  return (
+    <div className="flex flex-col h-[40rem] overflow-auto bg-gray-950 rounded-xl space-y-8 p-1 relative">
+      <div className="rounded-xl border border-gray-800 bg-gray-900/40 px-4 py-3 text-sm text-gray-400">
+        Issues is the triage view. It shows only actionable problems, including vulnerable dependencies. Click a dependency issue to jump into the `Dependencies` tab with that package pre-filtered.
+      </div>
+      {GROUP_ORDER.map(({ type, label, icon }) => {
+        const groupIssues = issues.filter(i => i.type === type);
+        if (groupIssues.length === 0) return null;
+
+        return (
+          <div key={type} className="mb-8 last:mb-0">
+            <h2 className="text-lg font-semibold text-gray-200 border-b border-gray-800 pb-2 mb-4 sticky top-0 bg-gray-950 z-10 flex items-center">
+              {icon && <span className="mr-2">{icon}</span>}
+              {label} <span className="text-gray-500 text-sm ml-2 font-normal">({groupIssues.length})</span>
+            </h2>
+            <div className="grid gap-4">
+              {groupIssues.map((issue, idx) => (
+                <div
+                  key={issue.id || `${type}-${idx}`}
+                  onClick={() => handleIssueClick(issue)}
+                  className="flex flex-col bg-gray-900/50 hover:bg-gray-800/80 border border-gray-800 hover:border-gray-700 rounded-lg p-5 cursor-pointer transition-all duration-200"
+                >
+                  <div className="flex items-start justify-between mb-3">
+                    <span className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium uppercase tracking-wider ${getBadgeStyles(issue.severity)}`}>
+                      {issue.severity || 'UNKNOWN'}
+                    </span>
+                  </div>
+                  <p className="text-gray-300 text-sm mb-4 leading-relaxed">
+                    {issue.description || 'No description available.'}
+                  </p>
+                  <div className="mt-auto bg-gray-950/50 rounded-md p-3 border border-gray-800 break-words">
+                    <span className="font-mono text-xs text-gray-400 leading-loose">
+                      {issue.file_paths.join(' → ')}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+>>>>>>> 864ff60768d4dc9244c3ac9267886cfcdaeea7eb
 }
 
 // ── SettingsPanel ─────────────────────────────────────────────────────────────
@@ -312,7 +416,7 @@ function SettingsPanel({ repo, session, onRepoUpdated }) {
     const next = !autoSync;
     setIsSaving(true);
     try {
-      const res = await fetch(`/api/repos/${repo.id}`, {
+      const res = await fetch(apiUrl(`/api/repos/${repo.id}`), {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -334,7 +438,7 @@ function SettingsPanel({ repo, session, onRepoUpdated }) {
     setIsGenerating(true);
     setWebhookInfo(null);
     try {
-      const res = await fetch(`/api/repos/${repo.id}/webhook`, {
+      const res = await fetch(apiUrl(`/api/repos/${repo.id}/webhook`), {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (!res.ok) throw new Error('Failed to generate webhook');
@@ -458,6 +562,7 @@ export default function RepoView() {
   const [repo, setRepo]         = useState(null);
   const [selectedNodeId, setSelectedNodeId]   = useState(null);
   const [impactSourcePath, setImpactSourcePath] = useState(null);
+<<<<<<< HEAD
   const [chatFilePath, setChatFilePath]         = useState(null);
   const [analysisData, setAnalysisData]         = useState({ nodes: [], edges: [], issues: [] });
   const [hasFetchedData, setHasFetchedData]     = useState(false);
@@ -465,6 +570,18 @@ export default function RepoView() {
   const [isLoading, setIsLoading]               = useState(true);
   const [error, setError]                       = useState(null);
   const [isReindexing, setIsReindexing]         = useState(false);
+=======
+  const [chatFilePath, setChatFilePath] = useState(null);
+
+  const [analysisData, setAnalysisData]   = useState({ nodes: [], edges: [], issues: [] });
+  const [hasFetchedData, setHasFetchedData] = useState(false);
+  const [analysisError, setAnalysisError] = useState(null);
+
+  const [isLoading, setIsLoading]     = useState(true);
+  const [error, setError]             = useState(null);
+  const [isReindexing, setIsReindexing] = useState(false);
+  const [depsRefreshKey, setDepsRefreshKey] = useState(0);
+>>>>>>> 864ff60768d4dc9244c3ac9267886cfcdaeea7eb
 
   const handleNodeSelect = useCallback((nodeIdOrIds, options = {}) => {
     setSelectedNodeId(nodeIdOrIds);
@@ -500,7 +617,7 @@ export default function RepoView() {
   const fetchAnalysisData = useCallback(async (force = false) => {
     if ((hasFetchedData && !force) || !session?.access_token) return;
     try {
-      const res = await fetch(`/api/repos/${repoId}/analysis`, {
+      const res = await fetch(apiUrl(`/api/repos/${repoId}/analysis`), {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (!res.ok) throw new Error('Failed to fetch analysis metadata');
@@ -509,7 +626,6 @@ export default function RepoView() {
       setHasFetchedData(true);
       setAnalysisError(null);
     } catch (err) {
-      console.error('Failed to fetch analysis datasets:', err);
       setAnalysisError(err.message || 'Failed to load analysis data');
     }
   }, [repoId, hasFetchedData, session?.access_token]);
@@ -517,7 +633,7 @@ export default function RepoView() {
   const fetchRepo = useCallback(async () => {
     if (!session?.access_token) return;
     try {
-      const res = await fetch('/api/repos', {
+      const res = await fetch(apiUrl('/api/repos'), {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (!res.ok) throw new Error('Failed to fetch repositories');
@@ -529,7 +645,6 @@ export default function RepoView() {
         fetchAnalysisData(true);
       }
     } catch (err) {
-      console.error(err);
       setError(err.message);
     } finally {
       setIsLoading(false);
@@ -577,22 +692,38 @@ export default function RepoView() {
   const handleReindex = async () => {
     if (!session?.access_token) return;
     setIsReindexing(true);
+<<<<<<< HEAD
     setHasFetchedData(false);
     setImpactSourcePath(null);
+=======
+
+>>>>>>> 864ff60768d4dc9244c3ac9267886cfcdaeea7eb
     try {
-      const res = await fetch(`/api/repos/${repoId}/reindex`, {
+      const res = await fetch(apiUrl(`/api/repos/${repoId}/reindex`), {
         method: 'POST',
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (!res.ok) throw new Error('Failed to start re-indexing');
+<<<<<<< HEAD
       await fetchRepo();
+=======
+
+      // Batch all resets + optimistic status change in one render so the UI
+      // jumps straight to the "Indexing…" screen without flashing stale data
+      setHasFetchedData(false);
+      setAnalysisData({ nodes: [], edges: [], issues: [] });
+      setDepsRefreshKey(k => k + 1);
+      setImpactSourcePath(null);
+      setRepo(prev => prev ? { ...prev, status: 'pending' } : prev);
+>>>>>>> 864ff60768d4dc9244c3ac9267886cfcdaeea7eb
     } catch (err) {
-      console.error(err);
       toast.error(err.message);
+    } finally {
       setIsReindexing(false);
     }
   };
 
+<<<<<<< HEAD
   // Count vuln issues for badge
   const vulnIssueCount = useMemo(
     () => (analysisData.issues || []).filter((issue) => issue?.type === 'vulnerable_dependency').length,
@@ -610,6 +741,25 @@ export default function RepoView() {
     { key: 'files',        label: 'Files' },
     { key: 'settings',     label: 'Settings' },
   ];
+=======
+  const handleOpenDependencies = useCallback((issue) => {
+    const packageName = issue?.description?.match(/:\s(@?[^@\s:]+(?:\/[^@\s:]+)?)@/)?.[1] || '';
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.set('tab', 'dependencies');
+      next.set('vulnerable', '1');
+      if (packageName) next.set('dep', packageName);
+      else next.delete('dep');
+      if (issue?.description) next.set('dep_description', issue.description);
+      else next.delete('dep_description');
+      if (issue?.file_paths?.[0]) next.set('dep_manifest', issue.file_paths[0]);
+      else next.delete('dep_manifest');
+      if (issue?.severity) next.set('dep_severity', issue.severity);
+      else next.delete('dep_severity');
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
+>>>>>>> 864ff60768d4dc9244c3ac9267886cfcdaeea7eb
 
   if (isLoading && !repo) {
     return (
@@ -734,6 +884,11 @@ export default function RepoView() {
           <div className="rounded-md bg-red-900/50 p-4 border border-red-800 text-red-200">
             {analysisError}
           </div>
+        ) : !hasFetchedData ? (
+          <div className="flex flex-col items-center justify-center py-32 rounded-xl border border-dashed border-gray-800 bg-gray-900/30">
+            <div className="h-8 w-8 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent mb-3" />
+            <p className="text-sm text-gray-400">Loading analysis…</p>
+          </div>
         ) : (
           <div className="h-full relative">
             {/* Graph */}
@@ -768,7 +923,11 @@ export default function RepoView() {
                 nodes={analysisData.nodes}
                 issues={analysisData.issues}
                 onNodeSelect={(nodeIds) => handleNodeSelect(nodeIds, { openGraph: true })}
+<<<<<<< HEAD
                 repoId={repoId}
+=======
+                onOpenDependencies={handleOpenDependencies}
+>>>>>>> 864ff60768d4dc9244c3ac9267886cfcdaeea7eb
               />
             </div>
 
@@ -803,6 +962,11 @@ export default function RepoView() {
             {/* Files */}
             <div className={activeTab === 'files' ? 'block h-full' : 'hidden'}>
               <FileBrowser repoId={repoId} nodes={analysisData.nodes} />
+            </div>
+
+            {/* Dependencies tab — package vulnerability scanning (US-045) */}
+            <div className={activeTab === 'dependencies' ? 'block h-full' : 'hidden'}>
+              <DependenciesPanel repoId={repoId} refreshKey={depsRefreshKey} />
             </div>
           </div>
         )}

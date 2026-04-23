@@ -27,7 +27,9 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- Add enum values introduced in later sprints (safe to re-run)
+COMMIT;
 ALTER TYPE issue_type ADD VALUE IF NOT EXISTS 'insecure_pattern';
+COMMIT;
 ALTER TYPE issue_type ADD VALUE IF NOT EXISTS 'hardcoded_secret';
 
 -- =============================================================================
@@ -206,6 +208,8 @@ CREATE INDEX IF NOT EXISTS code_chunks_hnsw_idx
   ON code_chunks USING hnsw (embedding vector_cosine_ops)
   WITH (m = 16, ef_construction = 64);
 
+CREATE INDEX IF NOT EXISTS code_chunks_repo_id_idx ON code_chunks (repo_id);
+
 -- =============================================================================
 -- ANALYSIS ISSUES
 -- =============================================================================
@@ -239,6 +243,19 @@ CREATE TABLE IF NOT EXISTS issue_suppressions (
 );
 
 CREATE INDEX IF NOT EXISTS issue_suppressions_repo_id_idx ON issue_suppressions (repo_id);
+
+ALTER TABLE issue_suppressions ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can only access suppressions for their repos" ON issue_suppressions;
+CREATE POLICY "Users can only access suppressions for their repos"
+  ON issue_suppressions FOR ALL
+  USING (
+    EXISTS (
+      SELECT 1 FROM repositories
+      WHERE repositories.id = issue_suppressions.repo_id
+        AND repositories.user_id = auth.uid()
+    )
+  );
 
 -- =============================================================================
 -- TEAMS / ORGANIZATIONS
@@ -354,6 +371,108 @@ CREATE POLICY "Access file contents via repo ownership"
       )
     )
   );
+
+-- =============================================================================
+-- DEPENDENCY VULNERABILITY SCANNING (US-045)
+-- vulnerability_cache is shared across all users/repos and NOT cleared on
+-- re-index — it is an application-level cache with a 24-hour TTL.
+-- dependency_manifests is per-repo and cleared via ON DELETE CASCADE.
+-- =============================================================================
+
+-- New enum value
+COMMIT;
+ALTER TYPE issue_type ADD VALUE IF NOT EXISTS 'vulnerable_dependency';
+
+-- Both tables are safe to drop on re-run: vulnerability_cache is an OSV API
+-- cache (repopulates on next indexing run) and dependency_manifests is wiped
+-- and rebuilt on every re-index anyway. Explicit DROP avoids IF NOT EXISTS
+-- silently preserving a table that was partially created with wrong column names.
+DROP TABLE IF EXISTS dependency_manifests CASCADE;
+DROP TABLE IF EXISTS vulnerability_cache  CASCADE;
+
+CREATE TABLE vulnerability_cache (
+  id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  ecosystem    TEXT        NOT NULL,
+  package_name TEXT        NOT NULL,
+  pkg_version  TEXT        NOT NULL,
+  vulns        JSONB       NOT NULL DEFAULT '[]',
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (ecosystem, package_name, pkg_version)
+);
+
+CREATE INDEX vulnerability_cache_lookup_idx
+  ON vulnerability_cache (ecosystem, package_name, pkg_version);
+
+CREATE INDEX vulnerability_cache_created_at_idx
+  ON vulnerability_cache (created_at);
+
+ALTER TABLE vulnerability_cache ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Authenticated users can use vulnerability cache"
+  ON vulnerability_cache FOR ALL
+  TO authenticated
+  USING (true)
+  WITH CHECK (true);
+
+-- Per-repo detected dependency manifests (rebuilt on every re-index via CASCADE).
+CREATE TABLE dependency_manifests (
+  id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  repo_id       UUID        NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+  manifest_path TEXT        NOT NULL,
+  ecosystem     TEXT        NOT NULL,
+  package_name  TEXT        NOT NULL,
+  pkg_version   TEXT,
+  is_transitive BOOLEAN     NOT NULL DEFAULT false,
+  vuln_count    INT         NOT NULL DEFAULT 0,
+  vulns_json    JSONB       NOT NULL DEFAULT '[]',
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (repo_id, manifest_path, ecosystem, package_name, pkg_version)
+);
+
+CREATE INDEX dependency_manifests_repo_id_idx
+  ON dependency_manifests (repo_id);
+
+ALTER TABLE dependency_manifests ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can access dependency manifests for their repos" ON dependency_manifests;
+CREATE POLICY "Users can access dependency manifests for their repos"
+  ON dependency_manifests FOR ALL
+  USING (
+    repo_id IN (
+      SELECT id FROM repositories
+      WHERE  user_id = auth.uid()
+      OR id IN (
+        SELECT repo_id FROM team_repositories
+        WHERE team_id IN (
+          SELECT team_id FROM team_members WHERE user_id = auth.uid()
+        )
+      )
+    )
+  );
+
+-- =============================================================================
+-- REINDEX CLEAR FUNCTION
+-- Deletes all derived data for a repo in a single transaction (1 RPC round
+-- trip instead of 6 separate PostgREST calls, avoiding per-table FK lock
+-- contention on the repositories parent row).
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION clear_repo_derived_data(p_repo_id UUID)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  DELETE FROM code_chunks          WHERE repo_id = p_repo_id;
+  DELETE FROM file_contents        WHERE repo_id = p_repo_id;
+  DELETE FROM analysis_issues      WHERE repo_id = p_repo_id;
+  DELETE FROM graph_edges          WHERE repo_id = p_repo_id;
+  DELETE FROM graph_nodes          WHERE repo_id = p_repo_id;
+  DELETE FROM dependency_manifests WHERE repo_id = p_repo_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION clear_repo_derived_data(UUID) TO service_role;
 
 -- =============================================================================
 -- END OF SCHEMA

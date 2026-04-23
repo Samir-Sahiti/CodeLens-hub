@@ -2,8 +2,12 @@
  * Repository controller
  */
 const crypto = require('crypto');
+const path = require('path');
+const { Octokit } = require('octokit');
 const { supabaseAdmin } = require('../db/supabase');
 const _indexer = require('../services/indexer');
+const { isManifestFile, parseManifest } = require('../services/manifestParser');
+const { scanDependencies } = require('../services/osvScanner');
 const indexer = new Proxy({}, {
   get: (_t, prop) => (globalThis.__CODELENS_INDEXER__ || _indexer)[prop],
 });
@@ -151,7 +155,7 @@ const getStatus = async (req, res) => {
   const { repoId } = req.params;
   const { data, error } = await supabaseAdmin
     .from('repositories')
-    .select('status, file_count')
+    .select('status, file_count, sast_disabled_rules')
     .eq('id', repoId)
     .eq('user_id', req.user.id)
     .single();
@@ -181,22 +185,25 @@ const deleteRepo = async (req, res) => {
   res.json({ ok: true });
 };
 
-/** POST /api/repos/:repoId/reindex — re-trigger indexing on a repository */
 const reindexRepo = async (req, res) => {
   const { repoId } = req.params;
+
+  const allowed = await canAccessRepo(repoId, req.user.id);
+  if (!allowed) {
+    return res.status(404).json({ error: 'Repository not found or unauthorized' });
+  }
 
   const { data: repo, error: fetchError } = await supabaseAdmin
     .from('repositories')
     .select('*')
     .eq('id', repoId)
-    .eq('user_id', req.user.id)
     .single();
 
   if (fetchError || !repo) {
     return res.status(404).json({ error: 'Repository not found or unauthorized' });
   }
 
-  const tables = ['code_chunks', 'file_contents', 'analysis_issues', 'graph_edges', 'graph_nodes'];
+  const tables = ['code_chunks', 'file_contents', 'analysis_issues', 'graph_edges', 'graph_nodes', 'dependency_manifests'];
 
   for (const table of tables) {
     const { error: deleteError } = await supabaseAdmin
@@ -205,8 +212,11 @@ const reindexRepo = async (req, res) => {
       .eq('repo_id', repoId);
 
     if (deleteError) {
-      console.error(`[reindexRepo] Failed deleting from ${table}:`, deleteError);
-      return res.status(500).json({ error: 'Failed to clear previous indexing data' });
+      if (deleteError.code === '42P01' || (deleteError.message && deleteError.message.includes('does not exist'))) {
+        console.warn(`[reindexRepo] Table ${table} does not exist, skipping deletion.`);
+      } else {
+        console.warn(`[reindexRepo] Failed deleting from ${table}, continuing anyway:`, deleteError);
+      }
     }
   }
 
@@ -459,4 +469,278 @@ const getFileContent = async (req, res) => {
   });
 };
 
-module.exports = { connectRepo, uploadRepo, listRepos, getStatus, reindexRepo, deleteRepo, getAnalysisData, updateRepo, generateWebhook, getFileContent };
+
+/** GET /api/repos/:repoId/dependencies — fetch parsed dependency manifest data for the Dependencies tab */
+const getDependencies = async (req, res) => {
+  const { repoId } = req.params;
+
+  const allowed = await canAccessRepo(repoId, req.user.id);
+  if (!allowed) {
+    return res.status(404).json({ error: 'Repository not found or unauthorized' });
+  }
+
+  try {
+    const { data: repo, error: repoError } = await supabaseAdmin
+      .from('repositories')
+      .select('id, name, full_name, source')
+      .eq('id', repoId)
+      .single();
+
+    if (repoError || !repo) {
+      return res.status(404).json({ error: 'Repository not found or unauthorized' });
+    }
+
+    // Always serve from the indexed dependency_manifests table — data is stored during
+    // indexing (indexerService SCA phase). The previous live-GitHub-fetch path re-ran
+    // OSV scanning on every request, causing 5-20 s tab load times with no benefit
+    // (the data is already fresh from the last index run).
+    const dependencies = await getStoredDependenciesWithIssues(repoId);
+    res.json({ dependencies });
+  } catch (err) {
+    console.error('[getDependencies] Error:', err);
+    res.status(500).json({ error: 'Failed to fetch dependency data' });
+  }
+};
+
+async function getGithubTokenForUser(userId) {
+  const { data: profile } = await supabaseAdmin
+    .from('profiles')
+    .select('github_token_secret_id')
+    .eq('id', userId)
+    .single();
+
+  if (!profile?.github_token_secret_id) return null;
+
+  const { data: tokenData, error: tokenError } = await supabaseAdmin
+    .rpc('get_github_token_secret', { secret_id: profile.github_token_secret_id });
+
+  if (tokenError || !tokenData) return null;
+  return tokenData;
+}
+
+async function fetchLiveGitHubDependencies({ repoId, repoFullName, githubToken }) {
+  const [owner, repo] = String(repoFullName || '').split('/');
+  if (!owner || !repo) {
+    throw new Error('Repository full name is missing or invalid');
+  }
+
+  const octokit = new Octokit({ auth: githubToken });
+  const { data: commit } = await octokit.rest.repos.getCommit({
+    owner,
+    repo,
+    ref: 'HEAD',
+  });
+  const { data: treeRef } = await octokit.rest.git.getTree({
+    owner,
+    repo,
+    tree_sha: commit.commit.tree.sha,
+    recursive: '1',
+  });
+
+  const manifestEntries = (treeRef.tree || []).filter((item) => (
+    item.type === 'blob' &&
+    item.path &&
+    !item.path.includes('node_modules/') &&
+    !item.path.includes('.git/') &&
+    isManifestFile(item.path)
+  ));
+
+  const parsedDeps = [];
+  for (const entry of manifestEntries) {
+    try {
+      const { data: blob } = await octokit.rest.git.getBlob({
+        owner,
+        repo,
+        file_sha: entry.sha,
+      });
+      const content = Buffer.from(blob.content, blob.encoding).toString('utf-8');
+      parsedDeps.push(...parseManifest(entry.path, content));
+    } catch (err) {
+      console.warn(`[getDependencies] Failed to fetch/parse manifest ${entry.path}: ${err.message}`);
+    }
+  }
+
+  if (parsedDeps.length === 0) {
+    return [];
+  }
+
+  const { depResults } = await scanDependencies(parsedDeps, repoId);
+  return depResults
+    .map((row) => ({
+      ...row,
+      version: row.version,
+    }))
+    .sort((a, b) => {
+      if ((b.vuln_count || 0) !== (a.vuln_count || 0)) {
+        return (b.vuln_count || 0) - (a.vuln_count || 0);
+      }
+      return String(a.package_name || '').localeCompare(String(b.package_name || ''));
+    });
+}
+
+async function getStoredDependenciesWithIssues(repoId) {
+  const [
+    { data: dependencyRows, error: dependencyError },
+    { data: issueRows, error: issuesError },
+  ] = await Promise.all([
+    (async () => {
+      const PAGE = 1000;
+      const rows = [];
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supabaseAdmin
+          .from('dependency_manifests')
+          .select('*')
+          .eq('repo_id', repoId)
+          .order('vuln_count', { ascending: false })
+          .range(from, from + PAGE - 1);
+        // PGRST103 = 416 Range Not Satisfiable — offset is past the last row, we're done
+        if (error) {
+          if (error.code === 'PGRST103') return { data: rows, error: null };
+          return { data: null, error };
+        }
+        rows.push(...(data || []));
+        if (!data || data.length < PAGE) return { data: rows, error: null };
+      }
+    })(),
+    supabaseAdmin
+      .from('analysis_issues')
+      .select('severity, description, file_paths')
+      .eq('repo_id', repoId)
+      .eq('type', 'vulnerable_dependency'),
+  ]);
+
+  if (dependencyError) throw dependencyError;
+  if (issuesError) throw issuesError;
+
+  const issueGroups = new Map();
+  for (const issue of issueRows || []) {
+    const parsed = parseDependencyIssue(issue);
+    if (!parsed) continue;
+
+    const groupKey = makeIssueGroupKey(parsed.manifestPath, parsed.package_name, parsed.pkg_version);
+    const existing = issueGroups.get(groupKey) || {
+      manifest_path: parsed.manifestPath,
+      ecosystem: inferEcosystemFromManifest(parsed.manifestPath),
+      package_name: parsed.package_name,
+      pkg_version: parsed.pkg_version,
+      is_transitive: false,
+      vuln_count: 0,
+      vulns_json: [],
+    };
+
+    existing.vuln_count += 1;
+    existing.vulns_json.push({
+      id: parsed.id,
+      aliases: parsed.aliases,
+      severity: parsed.severity,
+      summary: parsed.summary,
+      advisoryUrl: parsed.advisoryUrl,
+      fixedVersion: parsed.fixedVersion,
+    });
+    issueGroups.set(groupKey, existing);
+  }
+
+  const dependencies = (dependencyRows || []).map((row) => {
+    const merged = { ...row };
+    const groupKey = makeIssueGroupKey(row.manifest_path, row.package_name, row.pkg_version);
+    const matchingIssueGroup = issueGroups.get(groupKey);
+
+    if (matchingIssueGroup) {
+      merged.vuln_count = matchingIssueGroup.vuln_count;
+      merged.vulns_json = matchingIssueGroup.vulns_json;
+      issueGroups.delete(groupKey);
+    }
+
+    return {
+      ...merged,
+      version: merged.pkg_version,
+    };
+  });
+
+  for (const backfilled of issueGroups.values()) {
+    dependencies.push({
+      ...backfilled,
+      version: backfilled.pkg_version,
+      issue_backfilled: true,
+    });
+  }
+
+  dependencies.sort((a, b) => {
+    if ((b.vuln_count || 0) !== (a.vuln_count || 0)) {
+      return (b.vuln_count || 0) - (a.vuln_count || 0);
+    }
+    return String(a.package_name || '').localeCompare(String(b.package_name || ''));
+  });
+
+  return dependencies;
+}
+
+function parseDependencyIssue(issue) {
+  const description = issue?.description || '';
+  const vulnMarker = ' has a known vulnerability (';
+  const prefixEnd = description.indexOf(vulnMarker);
+  if (prefixEnd === -1) return null;
+
+  const prefix = description.slice(0, prefixEnd);
+  const colonIndex = prefix.indexOf(': ');
+  if (colonIndex === -1) return null;
+
+  const packageAndVersion = prefix.slice(colonIndex + 2).trim();
+  const versionAtIndex = packageAndVersion.lastIndexOf('@');
+  if (versionAtIndex <= 0) return null;
+
+  const advisoryMatch = description.match(/Advisory:\s(https?:\/\/\S+)/);
+  const fixedVersionMatch = description.match(/— upgrade to ([^.\s]+)/);
+
+  const vulnBody = description.slice(prefixEnd + vulnMarker.length);
+  const summaryEnd = advisoryMatch
+    ? description.indexOf('. Advisory:')
+    : vulnBody.indexOf(')');
+
+  const rawSummary = summaryEnd >= 0
+    ? description.slice(prefixEnd + vulnMarker.length, summaryEnd)
+    : vulnBody.replace(/\)$/, '');
+
+  const idPart = prefix.slice(0, colonIndex).trim();
+
+  return {
+    id: idPart,
+    aliases: idPart.startsWith('CVE-') ? [idPart] : [],
+    package_name: packageAndVersion.slice(0, versionAtIndex),
+    pkg_version: packageAndVersion.slice(versionAtIndex + 1),
+    summary: rawSummary.replace(/\)\s*$/, '').trim(),
+    severity: issue?.severity || 'medium',
+    advisoryUrl: advisoryMatch?.[1] || '',
+    fixedVersion: fixedVersionMatch?.[1] || null,
+    manifestPath: Array.isArray(issue?.file_paths) ? issue.file_paths[0] || '' : '',
+  };
+}
+
+function makeIssueGroupKey(manifestPath, packageName, version) {
+  return `${path.posix.dirname(manifestPath || '')}::${packageName || ''}::${version || ''}`;
+}
+
+function inferEcosystemFromManifest(manifestPath = '') {
+  const lower = manifestPath.toLowerCase();
+  if (lower.endsWith('package.json') || lower.endsWith('package-lock.json') || lower.endsWith('npm-shrinkwrap.json') || lower.endsWith('yarn.lock') || lower.endsWith('pnpm-lock.yaml')) {
+    return 'npm';
+  }
+  if (lower.endsWith('requirements.txt') || lower.endsWith('poetry.lock') || lower.endsWith('pipfile.lock') || lower.endsWith('pyproject.toml')) {
+    return 'PyPI';
+  }
+  if (lower.endsWith('go.mod') || lower.endsWith('go.sum')) {
+    return 'Go';
+  }
+  if (lower.endsWith('cargo.toml') || lower.endsWith('cargo.lock')) {
+    return 'crates.io';
+  }
+  if (lower.endsWith('gemfile') || lower.endsWith('gemfile.lock')) {
+    return 'RubyGems';
+  }
+  if (lower.endsWith('.csproj') || lower.endsWith('packages.config')) {
+    return 'NuGet';
+  }
+  return 'unknown';
+}
+
+module.exports = { connectRepo, uploadRepo, listRepos, getStatus, reindexRepo, deleteRepo, getAnalysisData, updateRepo, generateWebhook, getFileContent, getDependencies };

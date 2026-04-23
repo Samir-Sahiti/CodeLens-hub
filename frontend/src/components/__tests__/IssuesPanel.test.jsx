@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
+vi.mock('../../context/AuthContext', () => ({
+  useAuth: () => ({ session: { access_token: 'token-1' } }),
+}));
+
 import IssuesPanel from '../IssuesPanel';
 
 describe('IssuesPanel', () => {

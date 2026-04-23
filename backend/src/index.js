@@ -53,6 +53,11 @@ console.warn = (...args) => originalWarn.apply(console, redact(args));
 // ── Middleware ────────────────────────────────────────────────────────────────
 app.use(helmet());
 app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:3000' }));
+
+// Webhook routes use express.raw per-route and must run before express.json()
+// so the signature validator receives the original request body bytes.
+app.use('/api/webhooks', webhookRoutes);
+
 app.use(express.json());
 app.use(morgan('dev'));
 
@@ -67,12 +72,17 @@ app.use('/api/repos', dependenciesRoutes);
 
 app.use('/api/search', searchRoutes);
 app.use('/api/analysis', analysisRoutes);
+<<<<<<< HEAD
 app.use('/api/review', reviewRoutes);
 
 // Webhook routes use express.raw per-route
 app.use('/api/webhooks', webhookRoutes);
 
 app.use('/api/teams', teamRoutes);
+=======
+app.use('/api/review',   reviewRoutes);
+app.use('/api/teams',     teamRoutes);
+>>>>>>> 864ff60768d4dc9244c3ac9267886cfcdaeea7eb
 app.use('/api/file-chat', fileChatRoutes);
 
 // ✅ kept from file 1 (DO NOT REMOVE)

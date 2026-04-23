@@ -1,5 +1,6 @@
 import { useState, useRef } from 'react';
 import { supabase } from '../lib/supabase';
+import { apiUrl } from '../lib/api';
 
 // 50MB in bytes
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
@@ -97,7 +98,7 @@ export default function UploadRepoModal({ isOpen, onClose, onConnected }) {
           reject(new Error('Network error occurred during upload.'));
         });
 
-        xhr.open('POST', '/api/repos/upload', true);
+        xhr.open('POST', apiUrl('/api/repos/upload'), true);
         xhr.setRequestHeader('Authorization', `Bearer ${session.access_token}`);
         xhr.send(formData);
       });

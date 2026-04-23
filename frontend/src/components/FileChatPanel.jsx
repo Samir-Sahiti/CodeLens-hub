@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { apiUrl } from '../lib/api';
 import { useToast } from './Toast';
 import { AnswerBlock, SourceCard } from './SharedAnswerComponents';
 
@@ -75,7 +76,7 @@ export default function FileChatPanel({ repoId, filePath, open, onClose }) {
     setHasAsked(true);
 
     try {
-      const res = await fetch(`/api/file-chat/${repoId}`, {
+      const res = await fetch(apiUrl(`/api/file-chat/${repoId}`), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

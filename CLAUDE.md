@@ -99,6 +99,7 @@ CodeLens-hub/
 | `GET` | `/health` | Health check |
 | `*` | `/api/auth/*` | GitHub OAuth |
 | `*` | `/api/repos/*` | Connect repos, upload ZIPs |
+| `GET` | `/api/repos/:id/dependencies` | Dependency vulnerability data (US-045) |
 | `*` | `/api/search/*` | RAG code search |
 | `*` | `/api/analysis/*` | Dependency graph, metrics, issues, impact |
 | `*` | `/api/review/*` | AI code review |
@@ -113,7 +114,9 @@ Tables (all with RLS):
 - `graph_nodes` — files with metrics (line_count, **complexity_score** is true cyclomatic complexity via Tree-sitter AST, incoming/outgoing counts)
 - `graph_edges` — dependency edges (from_path → to_path)
 - `code_chunks` — chunked source code with 1536-dim pgvector embeddings (HNSW index, m=16, ef_construction=64)
-- `analysis_issues` — detected issues: `circular_dependency | god_file | dead_code | high_coupling`
+- `analysis_issues` — detected issues: `circular_dependency | god_file | dead_code | high_coupling | hardcoded_secret | insecure_pattern | vulnerable_dependency`
+- `vulnerability_cache` — caches OSV.dev vulnerability data per (ecosystem, name, version) with 24 h TTL; shared across repos/users; not cleared on re-index (US-045)
+- `dependency_manifests` — parsed dependency info per repo for the Dependencies tab (ecosystem, package, version, vuln count); cleared on re-index (US-045)
 
 ---
 
@@ -140,6 +143,7 @@ NODE_ENV, PORT
 4. Dependency graph built → stored in `graph_nodes` + `graph_edges`
 5. Source split into semantic chunks → embeddings via OpenAI → stored in `code_chunks`
 6. Analysis runs → issues stored in `analysis_issues`
+7. Manifest files parsed → dependencies checked against OSV.dev → results stored in `dependency_manifests` (US-045)
 
 ---
 
@@ -173,6 +177,40 @@ GitHub access tokens are stored encrypted in **Supabase Vault** — never in pla
 - Tokens are read via `get_github_token_secret(secret_id)` — **only callable by `service_role`**
 - `console.log`/`error`/`warn` are globally intercepted in `backend/src/index.js` to redact any `ghp_`/`gho_`/`ghu_`-prefixed strings from logs
 - One-time migration: `scripts/us039_migration.sql` backfills plaintext tokens and drops the old column
+
+---
+
+## Dependency Vulnerability Scanning (US-045)
+
+CodeLens performs Software Composition Analysis (SCA) during indexing using the [OSV.dev](https://osv.dev) vulnerability database (free, no API key).
+
+**Supported manifests:**
+
+| Manifest | Ecosystem | Notes |
+|---|---|---|
+| `package.json` | npm | Direct deps only |
+| `package-lock.json` | npm | Flattens full transitive tree |
+| `yarn.lock` | npm | All resolved versions |
+| `requirements.txt` | PyPI | Direct deps only (see limitation) |
+| `Pipfile.lock` | PyPI | Pinned direct + dev deps |
+| `go.mod` | Go | require block |
+| `Cargo.lock` | crates.io | All pinned |
+| `Gemfile.lock` | RubyGems | GEM specs section |
+| `*.csproj` | NuGet | PackageReference elements |
+
+**Pipeline flow:**
+1. Manifest files discovered separately from source code during indexing
+2. `manifestParser.js` extracts `(ecosystem, name, version)` tuples from each manifest
+3. `osvScanner.js` checks `vulnerability_cache` table first (24 h TTL)
+4. Uncached deps queried via `POST /v1/querybatch` in batches of 100
+5. Each returned vuln ID enriched via `GET /v1/vulns/{id}` (CVSS, CVE aliases, fix versions, concurrency limit 5)
+6. Results cached in `vulnerability_cache`; issues written to `analysis_issues`; per-package rows to `dependency_manifests`
+
+**Severity mapping:** CVSS < 4 → low, 4–7 → medium, > 7 → high
+
+**Limitation:** `requirements.txt` without a lockfile only covers direct dependencies. The UI shows a warning banner in this case.
+
+**Best-effort:** If OSV.dev is unreachable, indexing completes successfully and logs a warning.
 
 ---
 
