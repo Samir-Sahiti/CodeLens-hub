@@ -203,22 +203,7 @@ const reindexRepo = async (req, res) => {
     return res.status(404).json({ error: 'Repository not found or unauthorized' });
   }
 
-  const tables = ['code_chunks', 'file_contents', 'analysis_issues', 'graph_edges', 'graph_nodes', 'dependency_manifests'];
-
-  for (const table of tables) {
-    const { error: deleteError } = await supabaseAdmin
-      .from(table)
-      .delete()
-      .eq('repo_id', repoId);
-
-    if (deleteError) {
-      if (deleteError.code === '42P01' || (deleteError.message && deleteError.message.includes('does not exist'))) {
-        console.warn(`[reindexRepo] Table ${table} does not exist, skipping deletion.`);
-      } else {
-        console.warn(`[reindexRepo] Failed deleting from ${table}, continuing anyway:`, deleteError);
-      }
-    }
-  }
+  // The derived tables are cleared asynchronously in the background by indexerService.js
 
   const { error: updateError } = await supabaseAdmin
     .from('repositories')
