@@ -14,12 +14,20 @@ import { AnswerBlock, SourceCard } from './SharedAnswerComponents';
 // Main CodeReviewPanel
 // ---------------------------------------------------------------------------
 
+const PRESETS = [
+  { id: 'security',     label: 'Security',     hint: 'Focus on injection vulnerabilities, XSS, CSRF, secrets exposure, authentication flaws, and dangerous API usage.' },
+  { id: 'performance',  label: 'Performance',  hint: 'Focus on algorithmic complexity, unnecessary re-renders, memory leaks, N+1 queries, and inefficient operations.' },
+  { id: 'bugs',         label: 'Bug Hunt',     hint: 'Focus on off-by-one errors, null dereferences, unhandled edge cases, race conditions, and error-handling gaps.' },
+  { id: 'architecture', label: 'Architecture', hint: 'Focus on separation of concerns, coupling, abstraction leaks, SOLID principles, and long-term maintainability.' },
+];
+
 export default function CodeReviewPanel({ repoId }) {
   const { session } = useAuth();
 
   // State — same pattern as SearchPanel
   const [snippet,            setSnippet]            = useState('');
   const [contextDescription, setContextDescription] = useState('');
+  const [activePreset,       setActivePreset]       = useState(null);
   const [isStreaming,        setIsStreaming]         = useState(false);
   const [answer,             setAnswer]             = useState('');
   const [sources,            setSources]            = useState([]);
@@ -76,7 +84,10 @@ export default function CodeReviewPanel({ repoId }) {
         },
         body: JSON.stringify({
           snippet:  snippet.trim(),
-          context:  contextDescription.trim() || undefined,
+          context:  [
+            activePreset ? PRESETS.find(p => p.id === activePreset)?.hint : '',
+            contextDescription.trim(),
+          ].filter(Boolean).join('\n\n') || undefined,
           mode,
         }),
         signal: controller.signal,
@@ -171,6 +182,27 @@ export default function CodeReviewPanel({ repoId }) {
             Snippet exceeds 200 lines. Please trim it before submitting.
           </p>
         )}
+
+        {/* Review focus presets */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs text-gray-500 shrink-0">Focus:</span>
+          {PRESETS.map((preset) => (
+            <button
+              key={preset.id}
+              type="button"
+              disabled={isStreaming}
+              onClick={() => setActivePreset(p => p === preset.id ? null : preset.id)}
+              title={preset.hint}
+              className={`rounded-full border px-3 py-1 text-xs font-medium transition disabled:opacity-50 ${
+                activePreset === preset.id
+                  ? 'border-indigo-500/50 bg-indigo-500/15 text-indigo-300'
+                  : 'border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200'
+              }`}
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
 
         {/* Context field */}
         <input

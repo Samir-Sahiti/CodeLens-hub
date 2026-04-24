@@ -1506,6 +1506,14 @@ US-026: AI Code Review Panel
 **Note**
 > Reuse the SSE streaming from `searchController.js`. The confidence field is critical — users should know when Claude is certain vs. guessing. Suggested system prompt: "You are a security engineer reviewing code for vulnerabilities. Analyse the snippet in the context of the provided codebase excerpts. For each potential issue, identify the vulnerability type, cite the specific line, rate severity (low/medium/high), estimate confidence (low/medium/high), and suggest a concrete fix. If the code looks secure, say so explicitly — do not invent issues." The whole-repo audit is capped at 20 files to keep cost bounded; file selection surfaces the highest-leverage files rather than a random sample.
 
+**⚠️ Implementation note — overlap with existing "Security" preset**
+> `CodeReviewPanel.jsx` already ships a lightweight "Security" focus preset (one of four preset buttons: Security, Performance, Bug Hunt, Architecture) that prepends a security-focused instruction to the review context. This is intentionally shallow — it does not change retrieval ranking, structured output format, or support whole-repo auditing.
+>
+> When implementing US-048, **do not add a separate toggle** alongside the existing presets. Instead:
+> 1. Remove the "Security" preset button from the four-preset row.
+> 2. Replace it with the full "Security Audit" mode toggle described in this story (with its own system prompt, re-ranked retrieval, structured findings output, and "Audit this file" / "Run full audit" actions).
+> 3. Keep the remaining three presets (Performance, Bug Hunt, Architecture) as-is — they are lightweight focus hints and do not conflict.
+
 ---
 
 ### US-049: Authentication coverage check
@@ -1651,6 +1659,14 @@ US-026: AI Code Review Panel
 
 **Note**
 > This is "is this file referenced by any test" coverage, not line-level — but the heuristic version is genuinely useful because it scales to any language without running a test runner. The LCOV upgrade path is an easy bolt-on: `lcov-parse` on npm handles it in a few lines. The combination with hotspots from US-050 is especially powerful — untested + high-churn + high-complexity = exactly where production incidents come from. Consider a later "Risk Matrix" story that visualises all three dimensions together.
+
+**⚠️ Implementation note — schema and incremental indexing**
+> `graph_nodes` already has a `content_hash TEXT` column added by the incremental re-indexing work (see `scripts/schema.sql`). Adding `has_test_coverage BOOLEAN DEFAULT FALSE` is a straightforward additional column — apply via:
+> ```sql
+> ALTER TABLE graph_nodes ADD COLUMN IF NOT EXISTS has_test_coverage BOOLEAN DEFAULT FALSE;
+> ```
+>
+> **Incremental indexing interaction:** Coverage must be recomputed from the complete edge graph on every re-index, not just for changed files. A test file changing its imports can affect the coverage status of source files that themselves haven't changed. The implementation should compute `has_test_coverage` from the full `allEdges` set (which is always rebuilt from scratch) and update it on all nodes during the final bulk upsert — not only on files in `changedFilePaths`. This is already how coupling metrics (`incoming_count`, `outgoing_count`) work, so the pattern is established.
 
 ---
 

@@ -319,7 +319,17 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
               rowHeight={44}
               bufferRows={20}
               containerHeight="100%"
-              tableClassName="w-full text-left text-sm whitespace-nowrap"
+              tableClassName="w-full text-left text-sm table-fixed"
+              colGroup={
+                <colgroup>
+                  <col style={{ width: '36%' }} />
+                  <col style={{ width: '11%' }} />
+                  <col style={{ width: '10%' }} />
+                  <col style={{ width: '10%' }} />
+                  <col style={{ width: '11%' }} />
+                  <col style={{ width: '12%' }} />
+                </colgroup>
+              }
               renderHeader={() => (
                 <thead className="bg-gray-800/95 backdrop-blur text-gray-300 z-10 shadow-sm border-b border-gray-700">
                   <tr>
@@ -329,16 +339,16 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
                     <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none" onClick={() => handleSort('language')}>
                       Language <SortIcon columnKey="language" />
                     </th>
-                    <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none" onClick={() => handleSort('line_count')}>
+                    <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none text-center" onClick={() => handleSort('line_count')}>
                       Lines <SortIcon columnKey="line_count" />
                     </th>
-                    <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none" onClick={() => handleSort('outgoing_count')}>
+                    <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none text-center" onClick={() => handleSort('outgoing_count')}>
                       Imports <SortIcon columnKey="outgoing_count" />
                     </th>
-                    <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none" onClick={() => handleSort('incoming_count')}>
+                    <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none text-center" onClick={() => handleSort('incoming_count')}>
                       Dependents <SortIcon columnKey="incoming_count" />
                     </th>
-                    <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none" onClick={() => handleSort('complexity_score')}>
+                    <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none text-center" onClick={() => handleSort('complexity_score')}>
                       Complexity <SortIcon columnKey="complexity_score" />
                     </th>
                   </tr>
@@ -370,21 +380,23 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
 
                 return (
                   <tr key={node.id || node.file_path} onClick={() => onNodeSelect(node.id || node.file_path, { openGraph: true })} className={rowClass} style={{ height: 44 }}>
-                    <td className={`px-6 py-3 font-mono text-xs ${textFade}`}>{node.file_path}</td>
+                    <td className={`px-6 py-3 font-mono text-xs ${textFade} max-w-0`}>
+                    <span className="block truncate" title={node.file_path}>{node.file_path}</span>
+                  </td>
                     <td className={`px-6 py-3 ${metaFade}`}>{formatLanguage(node.language)}</td>
-                    <td className="px-6 py-3 relative" style={{ minWidth: 80 }}>
+                    <td className="px-6 py-3 relative text-center">
                       <span className={metaFade}>{node.line_count}</span>
                       <div className="absolute bottom-0 left-0 h-0.5 rounded-full opacity-35 bg-sky-400" style={{ width: `${((node.line_count || 0) / maxLineCount) * 100}%` }} />
                     </td>
-                    <td className="px-6 py-3 relative" style={{ minWidth: 70 }}>
+                    <td className="px-6 py-3 relative text-center">
                       <span className={metaFade}>{node.outgoing_count}</span>
                       <div className="absolute bottom-0 left-0 h-0.5 rounded-full opacity-35 bg-indigo-400" style={{ width: `${((node.outgoing_count || 0) / maxOutgoing) * 100}%` }} />
                     </td>
-                    <td className="px-6 py-3 relative" style={{ minWidth: 80 }}>
+                    <td className="px-6 py-3 relative text-center">
                       <span className={metaFade}>{node.incoming_count}</span>
                       <div className="absolute bottom-0 left-0 h-0.5 rounded-full opacity-35 bg-violet-400" style={{ width: `${((node.incoming_count || 0) / maxIncoming) * 100}%` }} />
                     </td>
-                    <td className="px-6 py-3 relative" style={{ minWidth: 90 }}>
+                    <td className="px-6 py-3 relative text-center">
                       <span className={`font-medium ${textFade}`}>{Number(node.complexity_score).toFixed(2)}</span>
                       <div className="absolute bottom-0 left-0 h-0.5 rounded-full opacity-40" style={{ width: `${complexityRatio * 100}%`, backgroundColor: complexityBarColor }} />
                     </td>

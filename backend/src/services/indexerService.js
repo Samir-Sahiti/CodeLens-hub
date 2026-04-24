@@ -11,6 +11,11 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || 'sk-dummy' });
 const pLimit = require('p-limit');
 const fs = require('fs/promises');
 const path = require('path');
+const crypto = require('crypto');
+
+function sha256(content) {
+  return crypto.createHash('sha256').update(content).digest('hex');
+}
 
 const VALID_EXTENSIONS = new Set(['.js', '.jsx', '.ts', '.tsx', '.py', '.cs', '.go', '.java', '.rs', '.rb']);
 
@@ -82,13 +87,20 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     console.log(`[indexer] Starting indexing for repoId: ${repoId} (source: ${source})`);
     console.time(`[indexer] Total pipeline (${repoId})`);
 
-    // Clear all derived tables in a single DB round trip via RPC instead of 6
-    // separate PostgREST calls.  The function runs all DELETEs in one transaction,
-    // avoiding repeated FK lock acquisitions on the repositories parent row.
-    const { error: clearError } = await supabaseAdmin.rpc('clear_repo_derived_data', { p_repo_id: repoId });
-    if (clearError) {
-      console.warn(`[indexer] Failed clearing derived data before reindex: ${clearError.message}`);
-    }
+    // Fetch existing node hashes BEFORE clearing — used for incremental indexing.
+    // If the content_hash column doesn't exist yet (old schema), we get an empty result
+    // and fall back to a full index on this run.
+    const { data: existingNodeRows } = await supabaseAdmin
+      .from('graph_nodes')
+      .select('file_path, content_hash, language, line_count, complexity_score')
+      .eq('repo_id', repoId);
+    const existingNodeMap = new Map((existingNodeRows || []).map(n => [n.file_path, n]));
+
+    // Also pre-fetch existing edges for unchanged files (we'll reuse them to skip re-parsing imports)
+    const { data: existingEdgeRows } = await supabaseAdmin
+      .from('graph_edges')
+      .select('from_path, to_path')
+      .eq('repo_id', repoId);
 
     // Fetch repo owner for usage tracking (US-042)
     const { data: repoMeta } = await supabaseAdmin
@@ -157,8 +169,74 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
 
     console.log(`[indexer] Discovered ${manifestFiles.length} manifest file(s) for SCA.`);
 
+    // ── Incremental delta: read all content + compute hashes ──────────────────
+    console.time(`[indexer] Phase 1c: Hash computation (${repoId})`);
+    const readLimit = pLimit(20);
+    await Promise.all(pendingFiles.map(file => readLimit(async () => {
+      try {
+        if (!file.content) file.content = await fs.readFile(file.fsPath, 'utf-8');
+        file.contentHash = sha256(file.content);
+      } catch (readErr) {
+        console.warn(`[indexer] Failed to read ${file.path}: ${readErr.message}`);
+      }
+    })));
+    console.timeEnd(`[indexer] Phase 1c: Hash computation (${repoId})`);
+
+    const currentFilePaths = new Set(pendingFiles.map(f => f.path));
+    const deletedFilePaths = [...existingNodeMap.keys()].filter(p => !currentFilePaths.has(p));
+
+    const unchangedFilePaths = new Set();
+    const changedFilePaths = new Set();
+    for (const file of pendingFiles) {
+      const existing = existingNodeMap.get(file.path);
+      if (existing && existing.content_hash && existing.content_hash === file.contentHash) {
+        unchangedFilePaths.add(file.path);
+      } else {
+        changedFilePaths.add(file.path);
+      }
+    }
+
+    console.log(`[indexer] Incremental: ${unchangedFilePaths.size} unchanged, ${changedFilePaths.size} changed/new, ${deletedFilePaths.length} deleted`);
+
+    const changedOrDeletedPaths = [...changedFilePaths, ...deletedFilePaths];
+
+    // ── Targeted clearing instead of blanket wipe ─────────────────────────────
+    // Pre-fetch per-file issues (secrets + SAST) for unchanged files before clearing.
+    // We skip scanning unchanged files so we need to re-inject their existing issues.
+    const PER_FILE_ISSUE_TYPES = ['hardcoded_secret', 'insecure_pattern'];
+    let preservedPerFileIssues = [];
+    if (unchangedFilePaths.size > 0) {
+      const unchangedArr = [...unchangedFilePaths];
+      const batches = chunkArray(unchangedArr, 150);
+      for (const batch of batches) {
+        const { data: existing } = await supabaseAdmin
+          .from('analysis_issues')
+          .select('*')
+          .eq('repo_id', repoId)
+          .in('type', PER_FILE_ISSUE_TYPES)
+          .overlaps('file_paths', batch);
+        if (existing) preservedPerFileIssues.push(...existing);
+      }
+    }
+
+    // Always clear: issues, dependency_manifests, all edges (coupling counts change)
+    // Partial clear: nodes/chunks/file_contents only for changed or deleted files
+    await supabaseAdmin.from('analysis_issues').delete().eq('repo_id', repoId);
+    await supabaseAdmin.from('dependency_manifests').delete().eq('repo_id', repoId);
+    await supabaseAdmin.from('graph_edges').delete().eq('repo_id', repoId);
+
+    if (changedOrDeletedPaths.length > 0) {
+      const pathBatches = chunkArray(changedOrDeletedPaths, 150);
+      for (const batch of pathBatches) {
+        await supabaseAdmin.from('graph_nodes').delete().eq('repo_id', repoId).in('file_path', batch);
+        await supabaseAdmin.from('code_chunks').delete().eq('repo_id', repoId).in('file_path', batch);
+        await supabaseAdmin.from('file_contents').delete().eq('repo_id', repoId).in('file_path', batch);
+      }
+    }
+
     const limit = pLimit(10);
-    const issues = [];
+    // Seed with pre-fetched per-file issues from unchanged files (secrets + SAST)
+    const issues = [...preservedPerFileIssues];
 
     // Fetch existing suppressions for this repo BEFORE scanning
     const { data: suppressions } = await supabaseAdmin
@@ -177,12 +255,15 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
 
     // 2.5 Optional Pre-pass for C# Namespaces (US-011)
     const namespaceMap = new Map();
+    // Files that need to be parsed (changed or new) — defined here for use by pre-pass and parsing phase
+    const filesToProcess = pendingFiles.filter(f => changedFilePaths.has(f.path));
+
     const isCSharpRepo = pendingFiles.some(f => f.path.toLowerCase().endsWith('.cs'));
 
     if (isCSharpRepo) {
-      console.log(`[indexer] C# files detected. Running namespace pre-pass...`);
+      console.log(`[indexer] C# files detected. Running namespace pre-pass on changed files...`);
       await Promise.all(
-        pendingFiles.map(file =>
+        filesToProcess.map(file =>
           limit(async () => {
             if (!file.path.toLowerCase().endsWith('.cs')) return;
             try {
@@ -210,9 +291,11 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     let parsedCount = 0;
 
     // 3. parse (with concurrency) and 4. resolve imports
+    // Only process files that changed or are new — unchanged files reuse their DB state.
     console.time(`[indexer] Phase 2: Parsing (${repoId})`);
+    console.log(`[indexer] Parsing ${filesToProcess.length} changed/new files (skipping ${unchangedFilePaths.size} unchanged)`);
     await Promise.all(
-      pendingFiles.map(file =>
+      filesToProcess.map(file =>
         limit(async () => {
           try {
             // Content might already be loaded from pre-pass
@@ -269,14 +352,38 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     console.timeEnd(`[indexer] Phase 2: Parsing (${repoId})`);
 
     // 5. dedupe nodes (in memory)
+    // Seed with unchanged nodes from DB so they still appear in the final graph.
     const nodeMap = new Map();
     const allEdges = [];
-    let fileCount = pendingFiles.length; // From acceptance criteria or just matched valid files
+    let fileCount = pendingFiles.length;
+
+    // Reconstruct unchanged nodes from DB snapshot
+    for (const filePath of unchangedFilePaths) {
+      const existing = existingNodeMap.get(filePath);
+      if (existing) {
+        nodeMap.set(filePath, {
+          repo_id: repoId,
+          file_path: filePath,
+          language: existing.language || 'unknown',
+          line_count: existing.line_count || 0,
+          complexity_score: existing.complexity_score || 1,
+          content_hash: existing.content_hash,
+          outgoing_count: 0,
+          incoming_count: 0,
+        });
+      }
+    }
+
+    // Reconstruct edges originating from unchanged files
+    for (const edge of (existingEdgeRows || [])) {
+      if (unchangedFilePaths.has(edge.from_path)) {
+        allEdges.push({ repo_id: repoId, from_path: edge.from_path, to_path: edge.to_path });
+      }
+    }
 
     for (const file of parsedFiles) {
-      if (!file) continue; // In case of skipped parse
+      if (!file) continue;
 
-      // Find original file body to count lines
       const originalFile = pendingFiles.find(f => f.path === file.filePath);
       const lineCount = (originalFile && originalFile.content) ? originalFile.content.split('\n').length : 0;
 
@@ -299,7 +406,8 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
         line_count: lineCount,
         outgoing_count: 0,
         incoming_count: 0,
-        complexity_score: file.complexity || 1
+        complexity_score: file.complexity || 1,
+        content_hash: originalFile?.contentHash || null,
       });
 
       for (const imp of file.imports) {
@@ -550,10 +658,12 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       }
     }
 
-    // 10. Store full file contents (US-043) — independent of OpenAI key
+    // 10. Store full file contents (US-043) — only for changed/new files
+    // Unchanged files already have their content rows in the DB.
     const FILE_SIZE_CAP = 1024 * 1024; // 1 MB
     const fileContentRows = [];
     for (const file of pendingFiles) {
+      if (!changedFilePaths.has(file.path)) continue; // skip unchanged
       if (!file.content) continue;
       const raw = file.content;
       const truncated = raw.length > FILE_SIZE_CAP;
@@ -582,17 +692,16 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       try {
         console.log(`[indexer] Starting semantic chunking and embedding for ${repoId}`);
 
-        // Wipe obsolete chunks before re-embedding (Handled by clear_repo_derived_data RPC earlier)
-        
-        // Extract local raw chunks
+        // Only embed changed/new files — unchanged files keep their existing code_chunks rows.
         const allExtractedChunks = [];
         for (const file of pendingFiles) {
+          if (!changedFilePaths.has(file.path)) continue;
           if (!file.content) continue;
           const fileChunks = extractChunksFromFile(file.path, file.content, repoId);
           allExtractedChunks.push(...fileChunks);
         }
 
-        console.log(`[indexer] Generated ${allExtractedChunks.length} raw chunks. Proceeding to OpenAI.`);
+        console.log(`[indexer] Generated ${allExtractedChunks.length} raw chunks for ${changedFilePaths.size} changed files. Proceeding to OpenAI.`);
 
         // 10c. Batch API vectors — batch size of 100 (OpenAI supports up to 2048 inputs)
         console.time(`[indexer] Phase 5: Embedding (${repoId})`);
