@@ -139,7 +139,7 @@ export default function CodeReviewPanel({ repoId }) {
   // ---------------------------------------------------------------------------
 
   return (
-    <div className="flex h-[40rem] flex-col gap-4">
+    <div className="flex h-[calc(100vh-12rem)] min-h-[30rem] flex-col gap-4">
 
       {/* Input area */}
       <div className="flex flex-col gap-3">

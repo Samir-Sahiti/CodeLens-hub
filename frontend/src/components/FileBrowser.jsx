@@ -224,14 +224,14 @@ export default function FileBrowser({ repoId, nodes }) {
 
   if (nodes.length === 0) {
     return (
-      <div className="flex h-[40rem] items-center justify-center rounded-xl border border-dashed border-gray-800 bg-gray-900/30">
+      <div className="flex h-[calc(100vh-12rem)] min-h-[30rem] items-center justify-center rounded-xl border border-dashed border-gray-800 bg-gray-900/30">
         <p className="text-sm text-gray-500">No files indexed yet. Re-index the repository first.</p>
       </div>
     );
   }
 
   return (
-    <div className="flex h-[40rem] gap-4">
+    <div className="flex h-[calc(100vh-12rem)] min-h-[30rem] gap-4">
       {/* File tree — left panel */}
       <div className="w-64 shrink-0 overflow-y-auto rounded-xl border border-gray-800 bg-gray-900/30 py-2">
         {/* Root-level files */}

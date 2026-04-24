@@ -61,14 +61,14 @@ export default function Layout() {
   ];
 
   return (
-    <div className="flex min-h-screen bg-gray-950">
+    <div className="flex min-h-screen bg-[#0c0d14]">
       {/* ── Sidebar ───────────────────────────────────────────────────── */}
       {/*
         Responsive behaviour:
         - < lg  (< 1024px): icon-only, w-14
         - >= lg (≥ 1024px): full width, w-64
       */}
-      <div className="flex w-14 lg:w-64 shrink-0 flex-col border-r border-gray-800 bg-gray-900">
+      <div className="flex w-14 lg:w-64 shrink-0 flex-col border-r border-gray-800/60 bg-[#111218]">
 
         {/* Brand */}
         <div className="flex h-16 items-center justify-center lg:justify-start px-0 lg:px-6 border-b border-gray-800">
@@ -116,10 +116,10 @@ export default function Layout() {
                     key={tab}
                     to={`/repo/${repoId}?tab=${tab}`}
                     title={label}
-                    className={`flex items-center justify-center lg:justify-start gap-3 rounded-md px-2 lg:px-3 py-2 text-sm font-medium transition-colors ${
+                    className={`flex items-center justify-center lg:justify-start gap-3 rounded-md px-2 lg:px-3 py-2 text-sm font-medium transition-colors border-l-2 ${
                       isActive
-                        ? 'bg-gray-800 text-white'
-                        : 'text-gray-400 hover:bg-gray-800 hover:text-white'
+                        ? 'bg-indigo-500/10 border-indigo-500 text-white'
+                        : 'text-gray-400 border-transparent hover:bg-gray-800/60 hover:text-white'
                     }`}
                   >
                     <Icon className="h-5 w-5 shrink-0" />
@@ -138,10 +138,10 @@ export default function Layout() {
             <Link
               to="/dashboard"
               title="Dashboard"
-              className={`flex items-center justify-center lg:justify-start gap-3 rounded-md px-2 lg:px-3 py-2 text-sm font-medium transition-colors ${
+              className={`flex items-center justify-center lg:justify-start gap-3 rounded-md px-2 lg:px-3 py-2 text-sm font-medium transition-colors border-l-2 ${
                 location.pathname.startsWith('/dashboard') || location.pathname === '/'
-                  ? 'bg-gray-800 text-white'
-                  : 'text-gray-400 hover:bg-gray-800 hover:text-white'
+                  ? 'bg-indigo-500/10 border-indigo-500 text-white'
+                  : 'text-gray-400 border-transparent hover:bg-gray-800/60 hover:text-white'
               }`}
             >
               <HomeIcon className="h-5 w-5 shrink-0" />

@@ -7,6 +7,42 @@ import UploadRepoModal from '../components/UploadRepoModal';
 import CreateTeamModal from '../components/CreateTeamModal';
 import { useToast } from '../components/Toast';
 
+const LANGUAGE_COLORS = {
+  javascript: '#60a5fa',
+  typescript: '#60a5fa',
+  python: '#facc15',
+  c_sharp: '#a78bfa',
+  go: '#06b6d4',
+  java: '#f97316',
+  rust: '#ea580c',
+  ruby: '#ef4444',
+  unknown: '#94a3b8',
+};
+
+function getHealthDot(repo) {
+  // Red: failed. Amber: has issues / pending. Green: ready + no obvious problems.
+  if (repo.status === 'failed') return { color: 'bg-red-500', label: 'Failed' };
+  if (repo.status === 'indexing' || repo.status === 'pending') return { color: 'bg-amber-400 animate-pulse', label: 'Indexing' };
+  return { color: 'bg-emerald-400', label: 'Healthy' };
+}
+
+function LanguageMiniBar({ languages }) {
+  if (!languages || languages.length === 0) return null;
+  const total = languages.reduce((s, l) => s + l.count, 0);
+  if (total === 0) return null;
+  return (
+    <div className="flex h-1 w-full overflow-hidden rounded-full mb-4" title="Language distribution">
+      {languages.map((l) => (
+        <div
+          key={l.language}
+          style={{ width: `${(l.count / total) * 100}%`, backgroundColor: LANGUAGE_COLORS[l.language] || LANGUAGE_COLORS.unknown }}
+          title={l.language}
+        />
+      ))}
+    </div>
+  );
+}
+
 function StatusBadge({ status }) {
   switch (status) {
     case 'ready':
@@ -21,61 +57,75 @@ function StatusBadge({ status }) {
 }
 
 function RepoCard({ repo, onRetry, onDelete, isRetrying }) {
+  const health = getHealthDot(repo);
+  const languages = repo.languages || [];
+
   return (
     <Link
       key={repo.id}
       to={`/repo/${repo.id}`}
-      className="group relative flex flex-col justify-between rounded-xl border border-gray-800 bg-gray-900 p-6 transition hover:border-gray-700 hover:bg-gray-800/80 hover:shadow-lg"
+      className="group relative flex flex-col justify-between rounded-xl border border-gray-700 bg-gray-900 overflow-hidden transition-all duration-200 hover:border-gray-600 hover:bg-gray-800/80 hover:shadow-xl hover:shadow-indigo-500/5"
     >
-      <div className="mb-4 flex items-start justify-between">
-        <div>
-          <h2 className="text-xl font-semibold text-gray-100 group-hover:text-indigo-400 transition-colors">
-            {repo.name}
-          </h2>
-          <p className="text-sm text-gray-500 mt-1">
-            {repo.source === 'github' ? 'GitHub' : 'Upload'} • {repo.file_count || 0} files
-            {repo.shared && repo.team_name && (
-              <span className="ml-2 inline-flex items-center rounded-full bg-violet-500/10 px-2 py-0.5 text-xs font-medium text-violet-400 ring-1 ring-inset ring-violet-500/20">
-                {repo.team_name}
+      {/* Gradient top border */}
+      <div className="h-0.5 w-full bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500" />
+
+      <div className="p-6">
+        {/* Language mini-bar */}
+        <LanguageMiniBar languages={languages} />
+
+        <div className="mb-4 flex items-start justify-between">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className={`h-2 w-2 shrink-0 rounded-full ${health.color}`} title={health.label} />
+              <h2 className="text-xl font-semibold text-gray-100 group-hover:text-indigo-400 transition-colors truncate">
+                {repo.name}
+              </h2>
+            </div>
+            <p className="text-sm text-gray-500 mt-1">
+              {repo.source === 'github' ? 'GitHub' : 'Upload'} • {repo.file_count || 0} files
+              {repo.shared && repo.team_name && (
+                <span className="ml-2 inline-flex items-center rounded-full bg-violet-500/10 px-2 py-0.5 text-xs font-medium text-violet-400 ring-1 ring-inset ring-violet-500/20">
+                  {repo.team_name}
+                </span>
+              )}
+            </p>
+          </div>
+          <div className="flex flex-col items-end gap-1.5 ml-3 shrink-0">
+            <StatusBadge status={repo.status} />
+            {repo.auto_sync_enabled && (
+              <span className="inline-flex items-center rounded-full bg-indigo-500/10 px-2 py-0.5 text-xs font-medium text-indigo-400 ring-1 ring-inset ring-indigo-500/20">
+                Auto-sync
               </span>
             )}
-          </p>
+          </div>
         </div>
-        <div className="flex flex-col items-end gap-1.5">
-          <StatusBadge status={repo.status} />
-          {repo.auto_sync_enabled && (
-            <span className="inline-flex items-center rounded-full bg-indigo-500/10 px-2 py-0.5 text-xs font-medium text-indigo-400 ring-1 ring-inset ring-indigo-500/20">
-              Auto-sync
-            </span>
-          )}
-        </div>
-      </div>
 
-      <div className="flex items-center justify-between border-t border-gray-800/50 pt-4 mt-2">
-        <span className="text-xs text-gray-500">
-          {repo.indexed_at
-            ? `Indexed on ${new Date(repo.indexed_at).toLocaleDateString()}`
-            : `Added on ${new Date(repo.created_at).toLocaleDateString()}`}
-        </span>
+        <div className="flex items-center justify-between border-t border-gray-800/50 pt-4 mt-2">
+          <span className="text-xs text-gray-500">
+            {repo.indexed_at
+              ? `Indexed ${new Date(repo.indexed_at).toLocaleDateString()}`
+              : `Added ${new Date(repo.created_at).toLocaleDateString()}`}
+          </span>
 
-        <div className="flex gap-2">
-          {repo.status !== 'ready' && !repo.shared && (
-            <button
-              onClick={(e) => onRetry(e, repo.id)}
-              disabled={isRetrying}
-              className="rounded bg-red-900/40 px-3 py-1 text-xs font-semibold text-red-300 hover:bg-red-800/60 transition disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {isRetrying ? 'Starting…' : 'Retry'}
-            </button>
-          )}
-          {!repo.shared && (
-            <button
-              onClick={(e) => onDelete(e, repo.id)}
-              className="rounded bg-gray-800/40 px-3 py-1 text-xs font-semibold text-gray-400 hover:bg-red-900/40 hover:text-red-300 transition"
-            >
-              Delete
-            </button>
-          )}
+          <div className="flex gap-2">
+            {repo.status !== 'ready' && !repo.shared && (
+              <button
+                onClick={(e) => onRetry(e, repo.id)}
+                disabled={isRetrying}
+                className="rounded bg-red-900/40 px-3 py-1 text-xs font-semibold text-red-300 hover:bg-red-800/60 transition disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isRetrying ? 'Starting…' : 'Retry'}
+              </button>
+            )}
+            {!repo.shared && (
+              <button
+                onClick={(e) => onDelete(e, repo.id)}
+                className="rounded bg-gray-800/40 px-3 py-1 text-xs font-semibold text-gray-400 hover:bg-red-900/40 hover:text-red-300 transition"
+              >
+                Delete
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </Link>
@@ -192,14 +242,42 @@ export default function Dashboard() {
 
   if (isLoading) {
     return (
-      <div className="flex h-full items-center justify-center p-8">
-        <div className="h-8 w-8 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent" />
+      <div className="min-h-screen bg-[#0c0d14] p-8 text-white">
+        <div className="mb-8 flex items-center justify-between">
+          <div className="h-8 w-48 animate-pulse rounded-lg bg-gray-800" />
+          <div className="flex gap-3">
+            <div className="h-9 w-28 animate-pulse rounded-md bg-gray-800" />
+            <div className="h-9 w-36 animate-pulse rounded-md bg-gray-800" />
+            <div className="h-9 w-36 animate-pulse rounded-md bg-gray-700" />
+          </div>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {[...Array(4)].map((_, i) => (
+            <div key={i} className="rounded-xl border border-gray-800 bg-gray-900 overflow-hidden">
+              <div className="h-0.5 w-full bg-gradient-to-r from-gray-700 via-gray-600 to-gray-700 animate-pulse" />
+              <div className="p-6 space-y-4">
+                <div className="h-1.5 w-full rounded-full bg-gray-800 animate-pulse" />
+                <div className="flex justify-between">
+                  <div className="space-y-2">
+                    <div className="h-5 w-40 rounded bg-gray-700 animate-pulse" />
+                    <div className="h-3 w-28 rounded bg-gray-800 animate-pulse" />
+                  </div>
+                  <div className="h-6 w-16 rounded-full bg-gray-800 animate-pulse" />
+                </div>
+                <div className="border-t border-gray-800/50 pt-4 flex justify-between">
+                  <div className="h-3 w-32 rounded bg-gray-800 animate-pulse" />
+                  <div className="h-6 w-16 rounded bg-gray-800 animate-pulse" />
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gray-950 p-8 text-white">
+    <div className="min-h-screen bg-[#0c0d14] p-8 text-white">
       <div className="mb-8 flex items-center justify-between">
         <h1 className="text-3xl font-bold tracking-tight">Your Repositories</h1>
         <div className="flex gap-3">
