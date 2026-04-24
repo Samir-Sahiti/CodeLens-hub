@@ -52,5 +52,14 @@
     "description": "yaml.load() without an explicit Loader can deserialize and execute arbitrary Python objects.",
     "fixHint": "Use yaml.safe_load() or pass Loader=yaml.SafeLoader explicitly.",
     "pattern": "yaml\\.load\\s*\\([^)]*\\)"
+  },
+  {
+    "id": "py_sql_fstring",
+    "name": "Raw SQL with f-string formatting",
+    "severity": "high",
+    "cwe": "CWE-89",
+    "description": "Building SQL queries with f-strings allows SQL injection — user-controlled values land directly in the query string.",
+    "fixHint": "Use parameterised queries: cursor.execute(sql, params) with a tuple of values.",
+    "pattern": "execute\\s*\\(\\s*f['\"]"
   }
 ]

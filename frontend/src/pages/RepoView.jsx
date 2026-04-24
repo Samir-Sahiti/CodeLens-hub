@@ -420,6 +420,15 @@ export default function RepoView() {
     }
   };
 
+  const handleOpenFile = useCallback((filePath) => {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.set('tab', 'files');
+      next.set('file', filePath);
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
+
   const handleOpenDependencies = useCallback((issue) => {
     const packageName = issue?.description?.match(/:\s(@?[^@\s:]+(?:\/[^@\s:]+)?)@/)?.[1] || '';
     setSearchParams((current) => {
@@ -599,6 +608,7 @@ export default function RepoView() {
                 issues={analysisData.issues}
                 onNodeSelect={(nodeIds) => handleNodeSelect(nodeIds, { openGraph: true })}
                 onOpenDependencies={handleOpenDependencies}
+                onOpenFile={handleOpenFile}
                 repoId={repoId}
               />
             </div>

@@ -2,7 +2,7 @@ import { useMemo, useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { apiUrl } from '../lib/api';
 
-export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDependencies, repoId }) {
+export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDependencies, onOpenFile, repoId }) {
   const { session } = useAuth();
   // Local state to hide suppressed issues instantly without full page reload
   const [localIssues, setLocalIssues] = useState(issues || []);
@@ -202,10 +202,26 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
                     {issue.description || 'No description available.'}
                   </p>
 
-                  <div className="mt-auto bg-gray-950/50 rounded-md p-3 border border-gray-800 break-words">
-                    <span className="font-mono text-xs text-gray-400 leading-loose">
-                      {issue.file_paths.join(' → ')}
-                    </span>
+                  <div className="mt-auto bg-gray-950/50 rounded-md p-3 border border-gray-800 flex flex-wrap gap-y-1 gap-x-2">
+                    {issue.file_paths.map((fp, i) => (
+                      <span key={fp} className="flex items-center gap-1.5">
+                        {i > 0 && <span className="text-gray-600 text-xs">→</span>}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (type !== 'vulnerable_dependency') onOpenFile?.(fp);
+                          }}
+                          title={type !== 'vulnerable_dependency' ? `Open ${fp} in Files tab` : fp}
+                          className={`font-mono text-xs text-gray-400 leading-loose break-all text-left ${
+                            type !== 'vulnerable_dependency'
+                              ? 'hover:text-indigo-300 transition-colors cursor-pointer'
+                              : 'cursor-default'
+                          }`}
+                        >
+                          {fp}
+                        </button>
+                      </span>
+                    ))}
                   </div>
                 </div>
               ))}

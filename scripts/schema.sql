@@ -168,8 +168,12 @@ CREATE TABLE IF NOT EXISTS graph_nodes (
   outgoing_count   INT   DEFAULT 0,
   incoming_count   INT   DEFAULT 0,
   complexity_score FLOAT DEFAULT 0,
+  content_hash     TEXT,
   UNIQUE (repo_id, file_path)
 );
+
+-- Migration for existing deployments: add content_hash if it doesn't exist
+ALTER TABLE graph_nodes ADD COLUMN IF NOT EXISTS content_hash TEXT;
 
 CREATE INDEX IF NOT EXISTS graph_nodes_repo_id_idx ON graph_nodes (repo_id);
 

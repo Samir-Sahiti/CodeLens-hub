@@ -118,6 +118,13 @@ export default function DependenciesPanel({ repoId, refreshKey = 0 }) {
   const totalVulnerable = useMemo(() => deps.filter(d => d.vuln_count > 0).length, [deps]);
   const totalClean      = useMemo(() => deps.filter(d => d.vuln_count === 0).length, [deps]);
 
+  const SEVERITY_RANK = { high: 3, medium: 2, low: 1, none: 0 };
+  const getMaxSeverity = (dep) => {
+    const vulns = dep.vulns_json || [];
+    if (!vulns.length) return 0;
+    return Math.max(...vulns.map(v => SEVERITY_RANK[v.severity] || 0));
+  };
+
   const filteredDeps = useMemo(() => {
     let result = [...deps];
     if (searchQuery) {
@@ -131,15 +138,22 @@ export default function DependenciesPanel({ repoId, refreshKey = 0 }) {
       result = result.filter(d => d.vuln_count > 0);
     }
     result.sort((a, b) => {
-      let valA = a[sortConfig.key];
-      let valB = b[sortConfig.key];
-      if (typeof valA === 'string') valA = valA.toLowerCase();
-      if (typeof valB === 'string') valB = valB.toLowerCase();
+      let valA, valB;
+      if (sortConfig.key === 'max_severity') {
+        valA = getMaxSeverity(a);
+        valB = getMaxSeverity(b);
+      } else {
+        valA = a[sortConfig.key];
+        valB = b[sortConfig.key];
+        if (typeof valA === 'string') valA = valA.toLowerCase();
+        if (typeof valB === 'string') valB = valB.toLowerCase();
+      }
       if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
       if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
       return 0;
     });
     return result;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deps, searchQuery, filterEcosystem, showOnlyVulnerable, sortConfig]);
 
   const handleSort = useCallback((key) => {
@@ -337,6 +351,13 @@ export default function DependenciesPanel({ repoId, refreshKey = 0 }) {
               </th>
               <th className="px-5 py-3 font-semibold text-gray-400">Manifest</th>
               <th
+                id="dep-col-severity"
+                className="px-5 py-3 font-semibold cursor-pointer hover:text-white transition-colors select-none"
+                onClick={() => handleSort('max_severity')}
+              >
+                Severity <SortIcon columnKey="max_severity" sortConfig={sortConfig} />
+              </th>
+              <th
                 id="dep-col-status"
                 className="px-5 py-3 font-semibold cursor-pointer hover:text-white transition-colors select-none"
                 onClick={() => handleSort('vuln_count')}
@@ -348,7 +369,7 @@ export default function DependenciesPanel({ repoId, refreshKey = 0 }) {
           <tbody className="divide-y divide-gray-800/60">
             {filteredDeps.length === 0 ? (
               <tr>
-                <td colSpan={5} className="px-5 py-10 text-center text-sm text-gray-500">
+                <td colSpan={6} className="px-5 py-10 text-center text-sm text-gray-500">
                   No packages match your search.
                 </td>
               </tr>
@@ -489,6 +510,17 @@ function Dependency({ id, dep, vulns, hasVulns, isExpanded, onToggle }) {
           </span>
         </td>
 
+        {/* Max severity */}
+        <td className="px-5 py-3">
+          {hasVulns ? (() => {
+            const top = vulns.reduce((best, v) => {
+              const rank = { high: 3, medium: 2, low: 1 };
+              return (rank[v.severity] || 0) > (rank[best?.severity] || 0) ? v : best;
+            }, vulns[0]);
+            return <SeverityBadge severity={top?.severity} />;
+          })() : <span className="text-gray-700 text-xs">—</span>}
+        </td>
+
         {/* Status */}
         <td className="px-5 py-3">
           {hasVulns ? (
@@ -508,7 +540,7 @@ function Dependency({ id, dep, vulns, hasVulns, isExpanded, onToggle }) {
       {/* Expanded vulnerability details */}
       {isExpanded && hasVulns && (
         <tr id={`dep-detail-${id}`} className="bg-gray-950/60">
-          <td colSpan={5} className="px-5 pb-4 pt-2">
+          <td colSpan={6} className="px-5 pb-4 pt-2">
             <div className="ml-5 space-y-3">
               {vulns.map((vuln, idx) => (
                 <div

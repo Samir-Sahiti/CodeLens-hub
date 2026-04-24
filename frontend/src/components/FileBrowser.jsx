@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { useAuth } from '../context/AuthContext';
@@ -147,6 +148,7 @@ function RootFiles({ files, selectedPath, onSelect, depth = 0 }) {
 export default function FileBrowser({ repoId, nodes }) {
   const { session } = useAuth();
   const toast = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [selectedPath, setSelectedPath] = useState(null);
   const [content, setContent]           = useState(null);
@@ -173,6 +175,31 @@ export default function FileBrowser({ repoId, nodes }) {
       return next;
     });
   }, []);
+
+  // Auto-open file from ?file= URL param (set by Issues tab "Open in Files")
+  const fileParam = searchParams.get('file');
+  useEffect(() => {
+    if (!fileParam || !nodes.length || !session?.access_token) return;
+    const matchingNode = nodes.find((n) => n.file_path === fileParam);
+    if (!matchingNode) return;
+
+    // Expand all ancestor directories of the target file
+    const parts = fileParam.replace(/\\/g, '/').split('/');
+    const ancestorPaths = [];
+    for (let i = 1; i < parts.length; i++) {
+      ancestorPaths.push(parts.slice(0, i).join('/'));
+    }
+    setExpandedDirs((prev) => new Set([...prev, ...ancestorPaths]));
+    setSelectedPath(fileParam);
+
+    // Clear the param so navigating away and back doesn't re-trigger
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.delete('file');
+      return next;
+    }, { replace: true });
+  // fetchFile is defined after this effect; call it imperatively via ref below
+  }, [fileParam, nodes, session?.access_token, setSearchParams]);
 
   const fetchFile = useCallback(async (filePath) => {
     if (!session?.access_token) return;
@@ -206,10 +233,16 @@ export default function FileBrowser({ repoId, nodes }) {
     }
   }, [repoId, session?.access_token]);
 
+  // Fetch content whenever selectedPath changes (handles both manual clicks and URL-param auto-open)
+  useEffect(() => {
+    if (selectedPath) fetchFile(selectedPath);
+  // fetchFile identity is stable (useCallback with stable deps)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPath]);
+
   const handleSelect = useCallback((filePath) => {
     setSelectedPath(filePath);
-    fetchFile(filePath);
-  }, [fetchFile]);
+  }, []);
 
   const handleLineCopy = useCallback(async (lineNum) => {
     if (!selectedPath) return;

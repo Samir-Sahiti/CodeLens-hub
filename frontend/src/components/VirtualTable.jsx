@@ -24,6 +24,7 @@ export default function VirtualTable({
   renderHeader,
   renderRow,
   tableClassName = '',
+  colGroup,
 }) {
   const scrollRef = useRef(null);
   const rafRef = useRef(null);
@@ -78,6 +79,7 @@ export default function VirtualTable({
       {/* Sticky header outside scroll area */}
       {renderHeader && (
         <table className={tableClassName}>
+          {colGroup}
           {renderHeader()}
         </table>
       )}
@@ -89,6 +91,7 @@ export default function VirtualTable({
         className="flex-1 overflow-y-auto overflow-x-auto"
       >
         <table className={tableClassName}>
+          {colGroup}
           <tbody>
             {/* Top spacer */}
             {topPadding > 0 && (
