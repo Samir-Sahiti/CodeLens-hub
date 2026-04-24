@@ -50,7 +50,6 @@ export function useGraphSimulation({
   onNodeContextMenu,
   onNodeDoubleClick,
   onBackgroundClick,
-  onNodeHover,
 }) {
   const zoomBehaviorRef = useRef(null);
   const canvasTransformRef = useRef(d3.zoomIdentity);
@@ -340,22 +339,6 @@ export function useGraphSimulation({
         draw();
       }
 
-      // Hover tracking
-      let lastHoveredId = null;
-      canvasSelection.on('mousemove', (event) => {
-        const [x, y] = d3.pointer(event, canvas);
-        const graphPoint = canvasTransformRef.current.invert([x, y]);
-        const hitNode = getNodeAtPoint(localNodes, graphPoint);
-        const hitId = hitNode?.graphId || null;
-        if (hitId !== lastHoveredId) {
-          lastHoveredId = hitId;
-          onNodeHover?.(hitNode && !hitNode.isCluster ? hitNode : null, hitNode ? event : null);
-        }
-      });
-      canvasSelection.on('mouseleave', () => {
-        lastHoveredId = null;
-        onNodeHover?.(null, null);
-      });
 
       const handlePointer = (event) => {
         const [x, y] = d3.pointer(event, canvas);
@@ -403,8 +386,6 @@ export function useGraphSimulation({
         canvasSelection.on('.zoom', null);
         canvasSelection.on('click', null);
         canvasSelection.on('contextmenu', null);
-        canvasSelection.on('mousemove', null);
-        canvasSelection.on('mouseleave', null);
       };
     }
 
@@ -551,13 +532,6 @@ export function useGraphSimulation({
       onNodeContextMenu?.(node, event);
     });
 
-    nodeSelection.on('mouseenter', (event, node) => {
-      if (!node.isCluster) onNodeHover?.(node, event);
-    });
-    nodeSelection.on('mouseleave', () => {
-      onNodeHover?.(null, null);
-    });
-
     svg.on('click', (event) => {
       if (event.target === svg.node()) {
         onBackgroundClick?.();
@@ -613,7 +587,6 @@ export function useGraphSimulation({
       localLinks.length = 0;
       svg.on('.zoom', null);
       svg.on('click', null);
-      onNodeHover?.(null, null);
     };
   }, [
     canvasRef,
@@ -627,7 +600,6 @@ export function useGraphSimulation({
     onNodeClick,
     onNodeContextMenu,
     onNodeDoubleClick,
-    onNodeHover,
     renderMode,
     selection,
     svgRef,

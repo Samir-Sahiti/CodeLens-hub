@@ -372,10 +372,6 @@ export default function DependencyGraph({
   const [expandedClusters, setExpandedClusters] = useState(new Set());
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
 
-  // Hover tooltip state
-  const [hoveredNode, setHoveredNode] = useState(null);
-  const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
-
   // Search state
   const [searchBarOpen, setSearchBarOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -612,6 +608,34 @@ export default function DependencyGraph({
     return () => window.removeEventListener('pointerdown', handleOutsideClick);
   }, [contextMenu, exportMenuOpen]);
 
+  const handleNodeClick = useCallback((node) => {
+    if (node.isCluster && handleClusterClick(node)) return;
+    onNodeSelect(node.graphId);
+  }, [handleClusterClick, onNodeSelect]);
+
+  const handleNodeContextMenu = useCallback((node, event) => {
+    if (node.isCluster) return;
+    setContextMenu({ node, x: event.clientX, y: event.clientY });
+  }, []);
+
+  const handleNodeDoubleClick = useCallback(async (node) => {
+    if (node.isCluster) {
+      handleClusterClick(node);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(node.file_path);
+      setToastVisible(true);
+    } catch (error) {
+      console.error('Failed to copy file path:', error);
+    }
+  }, [handleClusterClick]);
+
+  const handleBackgroundClick = useCallback(() => {
+    setContextMenu(null);
+    onNodeSelect(null);
+  }, [onNodeSelect]);
+
   const { resetView } = useGraphSimulation({
     containerRef,
     svgRef,
@@ -622,43 +646,10 @@ export default function DependencyGraph({
     selection: effectiveSelection,
     impactAnalysis,
     focusNodeId: searchCurrentNode?.graphId || selection.primaryId,
-    onNodeHover: useCallback((node, event) => {
-      if (node && event) {
-        setHoveredNode(node);
-        setTooltipPos({ x: event.clientX + 14, y: event.clientY - 8 });
-      } else {
-        setHoveredNode(null);
-      }
-    }, []),
-    onNodeClick: (node) => {
-      // If it's a cluster node, toggle expansion instead of selecting
-      if (node.isCluster && handleClusterClick(node)) return;
-      onNodeSelect(node.graphId);
-    },
-    onNodeContextMenu: (node, event) => {
-      if (node.isCluster) return; // No context menu for clusters
-      setContextMenu({
-        node,
-        x: event.clientX,
-        y: event.clientY,
-      });
-    },
-    onNodeDoubleClick: async (node) => {
-      if (node.isCluster) {
-        handleClusterClick(node);
-        return;
-      }
-      try {
-        await navigator.clipboard.writeText(node.file_path);
-        setToastVisible(true);
-      } catch (error) {
-        console.error('Failed to copy file path:', error);
-      }
-    },
-    onBackgroundClick: () => {
-      setContextMenu(null);
-      onNodeSelect(null);
-    },
+    onNodeClick: handleNodeClick,
+    onNodeContextMenu: handleNodeContextMenu,
+    onNodeDoubleClick: handleNodeDoubleClick,
+    onBackgroundClick: handleBackgroundClick,
   });
 
 
@@ -793,33 +784,6 @@ export default function DependencyGraph({
         </div>
 
         <GraphToast message="File path copied to clipboard" visible={toastVisible} />
-
-        {/* Hover tooltip */}
-        {hoveredNode && !contextMenu && (
-          <div
-            className="pointer-events-none fixed z-50"
-            style={{ left: tooltipPos.x, top: tooltipPos.y }}
-          >
-            <div
-              className="rounded-xl border border-gray-700 bg-gray-900/96 p-3 shadow-2xl shadow-black/50 backdrop-blur-sm min-w-[200px]"
-              style={{ borderLeftColor: LANGUAGE_COLORS[hoveredNode.language] || LANGUAGE_COLORS.unknown, borderLeftWidth: 3 }}
-            >
-              <p className="mb-2 break-all font-mono text-xs font-medium text-gray-200">
-                {hoveredNode.file_path.split('/').pop()}
-              </p>
-              <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-                <span className="text-gray-500">Language</span>
-                <span className="text-gray-300">{formatLanguage(hoveredNode.language)}</span>
-                <span className="text-gray-500">Lines</span>
-                <span className="text-gray-300">{hoveredNode.line_count || 0}</span>
-                <span className="text-gray-500">Complexity</span>
-                <span className="text-gray-300">{Number(hoveredNode.complexity_score || 0).toFixed(1)}</span>
-                <span className="text-gray-500">Dependents</span>
-                <span className="text-gray-300">{hoveredNode.incoming_count || 0}</span>
-              </div>
-            </div>
-          </div>
-        )}
 
         {contextMenu && (
           <div
