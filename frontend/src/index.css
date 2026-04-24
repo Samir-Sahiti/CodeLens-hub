@@ -2,6 +2,12 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Warm body override ───────────────────────────────────────────────────── */
+html, body, #root {
+  background-color: #0c0d14;
+}
+
+/* ── Graph node/edge transitions ─────────────────────────────────────────── */
 .graph-node,
 .graph-edge {
   transition: opacity 180ms ease;
@@ -10,4 +16,40 @@
 .graph-node.is-dimmed,
 .graph-edge.is-dimmed {
   opacity: 0.15;
+}
+
+/* ── Edge flow animation (1D) ─────────────────────────────────────────────── */
+@keyframes dashFlow {
+  to { stroke-dashoffset: -20; }
+}
+
+.graph-edge-flow {
+  stroke-dasharray: 6, 4;
+  animation: dashFlow 1.8s linear infinite;
+}
+
+/* ── Tab panel transitions (3C) ──────────────────────────────────────────── */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.tab-panel-active {
+  animation: fadeInUp 180ms ease forwards;
+  position: relative;
+}
+
+.tab-panel-hidden {
+  opacity: 0;
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
 }

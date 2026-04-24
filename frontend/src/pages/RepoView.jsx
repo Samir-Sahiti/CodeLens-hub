@@ -10,6 +10,8 @@ import VirtualTable from '../components/VirtualTable';
 import FileChatPanel from '../components/FileChatPanel';
 import FileBrowser from '../components/FileBrowser';
 import DependenciesPanel from '../components/DependenciesPanel';
+import MetricsPanel from '../components/MetricsPanel';
+import IssuesPanel from '../components/IssuesPanel';
 import { useToast } from '../components/Toast';
 
 function formatLanguage(str) {
@@ -95,301 +97,6 @@ function buildImpactAnalysis(sourcePath, nodes, edges) {
 }
 
 // --- Child Panels ---
-function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact }) {
-  const [searchQuery, setSearchQuery] = useState('');
-  const [sortConfig, setSortConfig] = useState({ key: 'complexity_score', direction: 'desc' });
-
-  const filteredNodes = nodes.filter(n => n.file_path.toLowerCase().includes(searchQuery.toLowerCase()));
-
-  const sortedNodes = [...filteredNodes].sort((a, b) => {
-    const valA = a[sortConfig.key] || 0;
-    const valB = b[sortConfig.key] || 0;
-
-    if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
-    if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
-    return 0;
-  });
-
-  const handleSort = (key) => {
-    setSortConfig(prev => {
-      if (prev.key === key) {
-        return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
-      }
-      return { key, direction: 'desc' };
-    });
-  };
-
-  const calc90th = (arr, key) => {
-    if (!arr || arr.length === 0) return 0;
-    const sortedVals = arr.map(n => n[key] || 0).sort((a, b) => a - b);
-    const index = Math.floor(0.9 * sortedVals.length);
-    return sortedVals[Math.min(index, sortedVals.length - 1)] || 0;
-  };
-
-  const p90Complexity = calc90th(nodes, 'complexity_score');
-  const p90Incoming   = calc90th(nodes, 'incoming_count');
-
-  let criticalCount = 0;
-  let atRiskCount   = 0;
-
-  nodes.forEach(n => {
-    const isHighComplex  = n.complexity_score > p90Complexity;
-    const isHighIncoming = n.incoming_count > p90Incoming;
-    if (isHighComplex && isHighIncoming) criticalCount++;
-    else if (isHighComplex || isHighIncoming) atRiskCount++;
-  });
-
-  const SortIcon = ({ columnKey }) => {
-    if (sortConfig.key !== columnKey) return <span className="ml-2 text-gray-600 font-mono">↕</span>;
-    return <span className="ml-2 text-indigo-400 font-mono">{sortConfig.direction === 'asc' ? '↑' : '↓'}</span>;
-  };
-
-  return (
-    <div className="flex h-[40rem] gap-4">
-      <div className="flex flex-1 flex-col overflow-hidden rounded-xl border border-gray-800 bg-gray-900/30 relative">
-        <div className="flex items-center justify-between border-b border-gray-800 bg-gray-900/80 p-4">
-          <p className="text-sm text-gray-400 font-medium">
-            {nodes.length} files total &middot;
-            <span className="text-red-400 ml-2">{criticalCount} critical</span> &middot;
-            <span className="text-yellow-400 ml-2">{atRiskCount} at-risk</span>
-          </p>
-          <input
-            type="text"
-            placeholder="Search by file path..."
-            className="bg-gray-950 border border-gray-700 text-sm text-white rounded-md px-3 py-1.5 focus:outline-none focus:border-indigo-500 w-72 transition-colors placeholder:text-gray-600"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
-        </div>
-
-        <div className="flex-1 overflow-hidden">
-          <VirtualTable
-            rows={sortedNodes}
-            rowHeight={44}
-            bufferRows={20}
-            containerHeight="100%"
-            tableClassName="w-full text-left text-sm whitespace-nowrap"
-            renderHeader={() => (
-              <thead className="bg-gray-800/95 backdrop-blur text-gray-300 z-10 shadow-sm border-b border-gray-700">
-                <tr>
-                  <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('file_path')}>
-                    File Path <SortIcon columnKey="file_path" />
-                  </th>
-                  <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('language')}>
-                    Language <SortIcon columnKey="language" />
-                  </th>
-                  <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('line_count')}>
-                    Lines <SortIcon columnKey="line_count" />
-                  </th>
-                  <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('outgoing_count')}>
-                    Imports (Outgoing) <SortIcon columnKey="outgoing_count" />
-                  </th>
-                  <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('incoming_count')}>
-                    Dependents (Incoming) <SortIcon columnKey="incoming_count" />
-                  </th>
-                  <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none group" onClick={() => handleSort('complexity_score')}>
-                    Complexity Score <SortIcon columnKey="complexity_score" />
-                  </th>
-                </tr>
-              </thead>
-            )}
-            renderRow={(node) => {
-              const isHighComplex  = node.complexity_score > p90Complexity;
-              const isHighIncoming = node.incoming_count > p90Incoming;
-              const isSelected     = selectedNode && (selectedNode.id || selectedNode.file_path) === (node.id || node.file_path);
-
-              let rowClass  = 'hover:bg-gray-800/60 cursor-pointer transition-colors';
-              let textFade  = 'text-gray-300';
-              let metaFade  = 'text-gray-500';
-
-              if (isHighComplex && isHighIncoming) {
-                rowClass = 'bg-red-900/30 hover:bg-red-900/50 cursor-pointer transition-colors';
-                textFade = 'text-red-100 font-medium';
-                metaFade = 'text-red-300';
-              } else if (isHighComplex || isHighIncoming) {
-                rowClass = 'bg-yellow-900/20 hover:bg-yellow-900/40 cursor-pointer transition-colors';
-                textFade = 'text-yellow-100';
-                metaFade = 'text-yellow-300/80';
-              }
-
-              if (isSelected) {
-                rowClass = `${rowClass} ring-1 ring-inset ring-sky-400/70 bg-sky-500/10`;
-              }
-
-              return (
-                <tr key={node.id || node.file_path} onClick={() => onNodeSelect(node.id || node.file_path, { openGraph: true })} className={rowClass} style={{ height: 44 }}>
-                  <td className={`px-6 py-3 font-mono text-xs ${textFade}`}>{node.file_path}</td>
-                  <td className={`px-6 py-3 ${metaFade}`}>{formatLanguage(node.language)}</td>
-                  <td className={`px-6 py-3 ${metaFade}`}>{node.line_count}</td>
-                  <td className={`px-6 py-3 ${metaFade}`}>{node.outgoing_count}</td>
-                  <td className={`px-6 py-3 ${metaFade}`}>{node.incoming_count}</td>
-                  <td className={`px-6 py-3 font-medium ${textFade}`}>
-                    {Number(node.complexity_score).toFixed(2)}
-                  </td>
-                </tr>
-              );
-            }}
-          />
-          {sortedNodes.length === 0 && (
-            <div className="flex items-center justify-center py-12 text-gray-500 text-sm">
-              No files found matching &quot;{searchQuery}&quot;
-            </div>
-          )}
-        </div>
-      </div>
-
-      <aside
-        className={`w-72 shrink-0 rounded-2xl border border-gray-800 bg-gray-900/80 p-5 shadow-2xl shadow-black/20 transition-all duration-300 ${
-          selectedNode ? 'translate-x-0 opacity-100' : 'pointer-events-none translate-x-8 opacity-0 -mr-72'
-        }`}
-      >
-        {selectedNode && (
-          <div className="flex h-full flex-col">
-            <div className="mb-5">
-              <p className="text-xs uppercase tracking-[0.2em] text-gray-500">File Details</p>
-              <h3 className="mt-2 break-all font-mono text-sm text-gray-100">{selectedNode.file_path}</h3>
-            </div>
-
-            <div className="space-y-3 text-sm">
-              <div className="rounded-xl border border-gray-800 bg-gray-950/70 p-3">
-                <p className="text-xs uppercase tracking-[0.16em] text-gray-500">Language</p>
-                <p className="mt-1 text-gray-100">{formatLanguage(selectedNode.language)}</p>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="rounded-xl border border-gray-800 bg-gray-950/70 p-3">
-                  <p className="text-xs uppercase tracking-[0.16em] text-gray-500">Lines</p>
-                  <p className="mt-1 text-lg font-semibold text-white">{selectedNode.line_count || 0}</p>
-                </div>
-                <div className="rounded-xl border border-gray-800 bg-gray-950/70 p-3">
-                  <p className="text-xs uppercase tracking-[0.16em] text-gray-500">Complexity</p>
-                  <p className="mt-1 text-lg font-semibold text-white">{Number(selectedNode.complexity_score || 0).toFixed(2)}</p>
-                </div>
-                <div className="rounded-xl border border-gray-800 bg-gray-950/70 p-3">
-                  <p className="text-xs uppercase tracking-[0.16em] text-gray-500">Imports</p>
-                  <p className="mt-1 text-lg font-semibold text-white">{selectedNode.outgoing_count || 0}</p>
-                </div>
-                <div className="rounded-xl border border-gray-800 bg-gray-950/70 p-3">
-                  <p className="text-xs uppercase tracking-[0.16em] text-gray-500">Dependents</p>
-                  <p className="mt-1 text-lg font-semibold text-white">{selectedNode.incoming_count || 0}</p>
-                </div>
-              </div>
-            </div>
-
-            <button
-              onClick={() => onAnalyseImpact(selectedNode)}
-              className="mt-5 rounded-xl bg-amber-500 px-4 py-3 text-sm font-semibold text-gray-950 transition hover:bg-amber-400"
-            >
-              Analyse impact
-            </button>
-
-            <p className="mt-auto pt-5 text-xs text-gray-500">
-              Select a row to inspect a file, then launch blast radius analysis from here.
-            </p>
-          </div>
-        )}
-      </aside>
-    </div>
-  );
-}
-
-function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDependencies }) {
-  const nodeMap = useMemo(
-    () => new Map(nodes.map(n => [n.file_path, n.id || n.file_path])),
-    [nodes]
-  );
-
-  if (!issues || issues.length === 0) {
-    return (
-      <div className="flex h-[40rem] flex-col items-center justify-center rounded-xl border border-dashed border-gray-700 bg-gray-900/30">
-        <div className="flex items-center justify-center w-16 h-16 rounded-full bg-green-500/10 mb-4">
-          <svg className="w-8 h-8 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-          </svg>
-        </div>
-        <h3 className="text-lg font-medium text-gray-200">No issues detected — your codebase looks healthy 🎉</h3>
-      </div>
-    );
-  }
-
-  const GROUP_ORDER = [
-    { type: 'vulnerable_dependency', label: 'Vulnerable Dependencies', icon: '📦' },
-    { type: 'hardcoded_secret',      label: 'Hardcoded Secrets',        icon: '🔒' },
-    { type: 'insecure_pattern',      label: 'Insecure Code Patterns',   icon: '🛡️' },
-    { type: 'circular_dependency',   label: 'Circular Dependencies',    icon: null },
-    { type: 'god_file',              label: 'God Files',                icon: null },
-    { type: 'high_coupling',         label: 'High Coupling',            icon: null },
-    { type: 'dead_code',             label: 'Dead Code',                icon: null },
-  ];
-
-  const getBadgeStyles = (severity) => {
-    switch (severity?.toLowerCase()) {
-      case 'high':   return 'bg-red-500/20 text-red-400 ring-1 ring-inset ring-red-500/30';
-      case 'medium': return 'bg-orange-500/20 text-orange-400 ring-1 ring-inset ring-orange-500/30';
-      case 'low':    return 'bg-yellow-500/20 text-yellow-400 ring-1 ring-inset ring-yellow-500/30';
-      default:       return 'bg-gray-500/20 text-gray-400 ring-1 ring-inset ring-gray-500/30';
-    }
-  };
-
-  const handleIssueClick = (issue) => {
-    if (issue.type === 'vulnerable_dependency') {
-      onOpenDependencies(issue);
-      return;
-    }
-
-    const resolvedIds = issue.file_paths
-      .map(p => nodeMap.get(p))
-      .filter(Boolean);
-
-    if (resolvedIds.length > 0) {
-      onNodeSelect(resolvedIds);
-    }
-  };
-
-  return (
-    <div className="flex flex-col h-[40rem] overflow-auto bg-gray-950 rounded-xl space-y-8 p-1 relative">
-      <div className="rounded-xl border border-gray-800 bg-gray-900/40 px-4 py-3 text-sm text-gray-400">
-        Issues is the triage view. It shows only actionable problems, including vulnerable dependencies. Click a dependency issue to jump into the `Dependencies` tab with that package pre-filtered.
-      </div>
-      {GROUP_ORDER.map(({ type, label, icon }) => {
-        const groupIssues = issues.filter(i => i.type === type);
-        if (groupIssues.length === 0) return null;
-
-        return (
-          <div key={type} className="mb-8 last:mb-0">
-            <h2 className="text-lg font-semibold text-gray-200 border-b border-gray-800 pb-2 mb-4 sticky top-0 bg-gray-950 z-10 flex items-center">
-              {icon && <span className="mr-2">{icon}</span>}
-              {label} <span className="text-gray-500 text-sm ml-2 font-normal">({groupIssues.length})</span>
-            </h2>
-            <div className="grid gap-4">
-              {groupIssues.map((issue, idx) => (
-                <div
-                  key={issue.id || `${type}-${idx}`}
-                  onClick={() => handleIssueClick(issue)}
-                  className="flex flex-col bg-gray-900/50 hover:bg-gray-800/80 border border-gray-800 hover:border-gray-700 rounded-lg p-5 cursor-pointer transition-all duration-200"
-                >
-                  <div className="flex items-start justify-between mb-3">
-                    <span className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium uppercase tracking-wider ${getBadgeStyles(issue.severity)}`}>
-                      {issue.severity || 'UNKNOWN'}
-                    </span>
-                  </div>
-                  <p className="text-gray-300 text-sm mb-4 leading-relaxed">
-                    {issue.description || 'No description available.'}
-                  </p>
-                  <div className="mt-auto bg-gray-950/50 rounded-md p-3 border border-gray-800 break-words">
-                    <span className="font-mono text-xs text-gray-400 leading-loose">
-                      {issue.file_paths.join(' → ')}
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 
 function SettingsPanel({ repo, session, onRepoUpdated }) {
   const [autoSync, setAutoSync] = useState(repo?.auto_sync_enabled ?? false);
@@ -451,7 +158,7 @@ function SettingsPanel({ repo, session, onRepoUpdated }) {
 
   if (!isGitHub) {
     return (
-      <div className="flex h-[40rem] flex-col items-center justify-center rounded-xl border border-dashed border-gray-700 bg-gray-900/30">
+      <div className="h-[calc(100vh-12rem)] min-h-[30rem] flex flex-col items-center justify-center rounded-xl border border-dashed border-gray-700 bg-gray-900/30">
         <p className="text-sm text-gray-500">Webhook auto-sync is only available for GitHub repositories.</p>
       </div>
     );
@@ -733,8 +440,28 @@ export default function RepoView() {
 
   if (isLoading && !repo) {
     return (
-      <div className="flex min-h-screen bg-gray-950 items-center justify-center p-8">
-        <div className="h-8 w-8 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent" />
+      <div className="flex min-h-screen bg-[#0c0d14] p-8">
+        <div className="flex-1 space-y-6">
+          {/* Header skeleton */}
+          <div className="flex items-center justify-between">
+            <div className="space-y-2">
+              <div className="h-7 w-48 rounded-lg bg-gray-800 animate-pulse" />
+              <div className="h-4 w-64 rounded bg-gray-800/60 animate-pulse" />
+            </div>
+            <div className="h-9 w-24 rounded-md bg-gray-800 animate-pulse" />
+          </div>
+          {/* Table skeleton */}
+          <div className="rounded-xl border border-gray-800 bg-gray-900/30 overflow-hidden">
+            <div className="border-b border-gray-800 bg-gray-800/95 px-6 py-4 flex gap-8">
+              {[120,80,60,100,120,110].map((w,i) => <div key={i} className={`h-3 rounded bg-gray-700 animate-pulse`} style={{width: w}} />)}
+            </div>
+            {[...Array(8)].map((_,i) => (
+              <div key={i} className="flex gap-8 px-6 py-3 border-b border-gray-800/40">
+                {[200,70,50,60,80,80].map((w,j) => <div key={j} className="h-3 rounded bg-gray-800 animate-pulse" style={{width: w}} />)}
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
     );
   }
@@ -755,7 +482,7 @@ export default function RepoView() {
   const isWorking = repo.status === 'pending' || repo.status === 'indexing';
 
   return (
-    <div className="flex flex-col min-h-screen bg-gray-950 text-white">
+    <div className="flex flex-col min-h-screen bg-[#0c0d14] text-white">
 
       {/* Header Container */}
       <div className="border-b border-gray-800 bg-gray-900/50 px-8 py-6">
@@ -842,7 +569,7 @@ export default function RepoView() {
           </div>
         ) : (
           <div className="h-full relative">
-            <div className={activeTab === 'graph' ? 'block h-full' : 'hidden'}>
+            <div className={activeTab === 'graph' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
               <DependencyGraph
                 nodes={analysisData.nodes}
                 edges={analysisData.edges}
@@ -857,7 +584,7 @@ export default function RepoView() {
               />
             </div>
 
-            <div className={activeTab === 'metrics' ? 'block h-full' : 'hidden'}>
+            <div className={activeTab === 'metrics' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
               <MetricsPanel
                 nodes={analysisData.nodes}
                 selectedNode={selectedNode}
@@ -866,26 +593,27 @@ export default function RepoView() {
               />
             </div>
 
-            <div className={activeTab === 'issues' ? 'block h-full' : 'hidden'}>
+            <div className={activeTab === 'issues' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
               <IssuesPanel
                 nodes={analysisData.nodes}
                 issues={analysisData.issues}
                 onNodeSelect={(nodeIds) => handleNodeSelect(nodeIds, { openGraph: true })}
                 onOpenDependencies={handleOpenDependencies}
+                repoId={repoId}
               />
             </div>
 
-            <div className={activeTab === 'search' ? 'block h-full' : 'hidden'}>
+            <div className={activeTab === 'search' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
               <SearchPanel repoId={repoId} />
             </div>
 
             {/* Review tab — CodeReviewPanel */}
-            <div className={activeTab === 'review' ? 'block h-full' : 'hidden'}>
+            <div className={activeTab === 'review' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
               <CodeReviewPanel repoId={repoId} />
             </div>
 
             {/* Settings tab — webhook / auto-sync */}
-            <div className={activeTab === 'settings' ? 'block h-full' : 'hidden'}>
+            <div className={activeTab === 'settings' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
               <SettingsPanel
                 repo={repo}
                 session={session}
@@ -894,12 +622,12 @@ export default function RepoView() {
             </div>
 
             {/* Files tab — repository file browser */}
-            <div className={activeTab === 'files' ? 'block h-full' : 'hidden'}>
+            <div className={activeTab === 'files' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
               <FileBrowser repoId={repoId} nodes={analysisData.nodes} />
             </div>
 
             {/* Dependencies tab — package vulnerability scanning (US-045) */}
-            <div className={activeTab === 'dependencies' ? 'block h-full' : 'hidden'}>
+            <div className={activeTab === 'dependencies' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
               <DependenciesPanel repoId={repoId} refreshKey={depsRefreshKey} />
             </div>
           </div>

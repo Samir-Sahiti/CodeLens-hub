@@ -50,6 +50,7 @@ export function useGraphSimulation({
   onNodeContextMenu,
   onNodeDoubleClick,
   onBackgroundClick,
+  onNodeHover,
 }) {
   const zoomBehaviorRef = useRef(null);
   const canvasTransformRef = useRef(d3.zoomIdentity);
@@ -113,7 +114,8 @@ export function useGraphSimulation({
       x: width / 2,
       y: height / 2,
     }));
-      const localLinks = edges.map((edge) => ({ ...edge }));
+    const localLinks = edges.map((edge) => ({ ...edge }));
+    const maxIncoming = Math.max(1, ...nodes.map((n) => n.incoming_count || 0));
 
     const pretickCount = nodes.length < 100 ? PRETICK_CLUSTERED : PRETICK_FULL;
 
@@ -210,6 +212,9 @@ export function useGraphSimulation({
       let lastClickAt = 0;
       let lastClickedNodeId = null;
 
+      let dashOffset = 0;
+      let animFrame = null;
+
       const draw = () => {
         context.save();
         context.clearRect(0, 0, width, height);
@@ -230,14 +235,24 @@ export function useGraphSimulation({
           const endY = target.y - ((target.radius + 8) * Math.sin(angle));
 
           const lineOpacity = getEdgeOpacity(link);
+          const isHighlightedEdge = highlightedEdgeIds.has(link.id) || isImpactActive;
           const edgeColor = isImpactActive ? `rgba(245, 158, 11, ${lineOpacity})` : `rgba(148, 163, 184, ${lineOpacity})`;
 
           context.strokeStyle = edgeColor;
-          context.lineWidth = isImpactActive ? 1.8 : highlightedEdgeIds.has(link.id) ? 1.8 : 1.2;
+          context.lineWidth = isImpactActive ? 1.8 : isHighlightedEdge ? 1.8 : 1.2;
+
+          if (isHighlightedEdge) {
+            context.setLineDash([6, 4]);
+            context.lineDashOffset = -dashOffset;
+          } else {
+            context.setLineDash([]);
+          }
+
           context.beginPath();
           context.moveTo(startX, startY);
           context.lineTo(endX, endY);
           context.stroke();
+          context.setLineDash([]);
 
           drawArrowhead(context, startX, startY, endX, endY, 7, edgeColor);
         });
@@ -246,7 +261,6 @@ export function useGraphSimulation({
           context.globalAlpha = getNodeOpacity(node.graphId);
 
           if (node.isCluster) {
-            // Cluster node: dashed border, semi-transparent fill, hexagonal feel
             context.fillStyle = node.fill;
             context.globalAlpha *= 0.35;
             context.beginPath();
@@ -254,31 +268,32 @@ export function useGraphSimulation({
             context.fill();
             context.globalAlpha = getNodeOpacity(node.graphId);
 
-            // Dashed ring
             context.setLineDash([4, 3]);
             context.strokeStyle = node.fill;
             context.lineWidth = 2;
             context.stroke();
             context.setLineDash([]);
 
-            // Inner count badge
             context.fillStyle = '#f8fafc';
             context.font = 'bold 11px ui-sans-serif, system-ui, sans-serif';
             context.textAlign = 'center';
             context.textBaseline = 'middle';
             context.fillText(String(node.childCount), node.x, node.y);
 
-            // Directory label below
             const dirLabel = node.file_path.split('/').pop() || node.file_path;
             context.fillStyle = 'rgba(248, 250, 252, 0.7)';
             context.font = '10px ui-sans-serif, system-ui, sans-serif';
             context.fillText(dirLabel, node.x, node.y + node.radius + 14);
           } else {
-            // Standard file node
-            context.fillStyle = getNodeFill(node);
+            const nodeFill = getNodeFill(node);
+            const glowIntensity = 8 + (12 * (node.incoming_count || 0) / maxIncoming);
+            context.shadowColor = nodeFill;
+            context.shadowBlur = glowIntensity;
+            context.fillStyle = nodeFill;
             context.beginPath();
             context.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
             context.fill();
+            context.shadowBlur = 0;
 
             context.strokeStyle = getNodeStroke(node);
             context.lineWidth = getNodeStrokeWidth(node);
@@ -288,6 +303,12 @@ export function useGraphSimulation({
 
         context.globalAlpha = 1;
         context.restore();
+      };
+
+      const animateDraw = () => {
+        dashOffset = (dashOffset + 0.4) % 20;
+        draw();
+        animFrame = requestAnimationFrame(animateDraw);
       };
 
       const zoomBehavior = d3.zoom()
@@ -313,7 +334,28 @@ export function useGraphSimulation({
         canvasSelection.call(zoomBehavior.transform, d3.zoomIdentity);
       }
 
-      draw();
+      if (isSelectionActive || isImpactActive) {
+        animateDraw();
+      } else {
+        draw();
+      }
+
+      // Hover tracking
+      let lastHoveredId = null;
+      canvasSelection.on('mousemove', (event) => {
+        const [x, y] = d3.pointer(event, canvas);
+        const graphPoint = canvasTransformRef.current.invert([x, y]);
+        const hitNode = getNodeAtPoint(localNodes, graphPoint);
+        const hitId = hitNode?.graphId || null;
+        if (hitId !== lastHoveredId) {
+          lastHoveredId = hitId;
+          onNodeHover?.(hitNode && !hitNode.isCluster ? hitNode : null, hitNode ? event : null);
+        }
+      });
+      canvasSelection.on('mouseleave', () => {
+        lastHoveredId = null;
+        onNodeHover?.(null, null);
+      });
 
       const handlePointer = (event) => {
         const [x, y] = d3.pointer(event, canvas);
@@ -353,15 +395,16 @@ export function useGraphSimulation({
 
       return () => {
         simulation.stop();
-        // Explicitly release d3-force graph copies for GC
+        if (animFrame) cancelAnimationFrame(animFrame);
         localNodes.length = 0;
         localLinks.length = 0;
-        // Clear canvas GPU texture memory
         const ctx = canvas.getContext('2d');
         if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
         canvasSelection.on('.zoom', null);
         canvasSelection.on('click', null);
         canvasSelection.on('contextmenu', null);
+        canvasSelection.on('mousemove', null);
+        canvasSelection.on('mouseleave', null);
       };
     }
 
@@ -382,13 +425,16 @@ export function useGraphSimulation({
       .attr('d', 'M0,-5L10,0L0,5')
       .attr('fill', '#94a3b8');
 
-    // Drop shadow filter for nodes to look premium
-    const filter = defs.append('filter')
-      .attr('id', 'node-shadow')
-      .attr('x', '-20%').attr('y', '-20%').attr('width', '140%').attr('height', '140%');
-    filter.append('feDropShadow')
-      .attr('dx', '0').attr('dy', '4').attr('stdDeviation', '4')
-      .attr('flood-color', 'rgba(0, 0, 0, 0.5)');
+    // Glow filter — blurs the node's own color to create a bloom effect
+    const glowFilter = defs.append('filter')
+      .attr('id', 'node-glow')
+      .attr('x', '-60%').attr('y', '-60%').attr('width', '220%').attr('height', '220%');
+    glowFilter.append('feGaussianBlur')
+      .attr('stdDeviation', '5')
+      .attr('result', 'coloredBlur');
+    const feMerge = glowFilter.append('feMerge');
+    feMerge.append('feMergeNode').attr('in', 'coloredBlur');
+    feMerge.append('feMergeNode').attr('in', 'SourceGraphic');
 
     const viewport = svg.append('g').attr('class', 'graph-viewport');
     const edgeLayer = viewport.append('g').attr('class', 'graph-edge-layer');
@@ -398,7 +444,11 @@ export function useGraphSimulation({
       .selectAll('path')
       .data(localLinks, (edge) => edge.id)
       .join('path')
-      .attr('class', (edge) => `graph-edge${!isImpactActive && isSelectionActive && !highlightedEdgeIds.has(edge.id) ? ' is-dimmed' : ''}`)
+      .attr('class', (edge) => {
+        const isDimmed = !isImpactActive && isSelectionActive && !highlightedEdgeIds.has(edge.id);
+        const isFlow = (isImpactActive || highlightedEdgeIds.has(edge.id)) && !isDimmed;
+        return `graph-edge${isDimmed ? ' is-dimmed' : ''}${isFlow ? ' graph-edge-flow' : ''}`;
+      })
       .attr('d', (edge) => {
         const dx = edge.target.x - edge.source.x;
         const dy = edge.target.y - edge.source.y;
@@ -443,7 +493,7 @@ export function useGraphSimulation({
       })
       .attr('stroke-width', (node) => (node.isCluster ? 2 : getNodeStrokeWidth(node)))
       .attr('stroke-dasharray', (node) => (node.isCluster ? '5,3' : 'none'))
-      .attr('filter', (node) => (node.isCluster ? 'none' : 'url(#node-shadow)'));
+      .attr('filter', (node) => (node.isCluster ? 'none' : 'url(#node-glow)'));
 
     // Child count badge for cluster nodes
     nodeGroups.filter((node) => node.isCluster)
@@ -501,6 +551,13 @@ export function useGraphSimulation({
       onNodeContextMenu?.(node, event);
     });
 
+    nodeSelection.on('mouseenter', (event, node) => {
+      if (!node.isCluster) onNodeHover?.(node, event);
+    });
+    nodeSelection.on('mouseleave', () => {
+      onNodeHover?.(null, null);
+    });
+
     svg.on('click', (event) => {
       if (event.target === svg.node()) {
         onBackgroundClick?.();
@@ -552,11 +609,11 @@ export function useGraphSimulation({
 
     return () => {
       simulation.stop();
-      // Explicitly release d3-force graph copies for GC
       localNodes.length = 0;
       localLinks.length = 0;
       svg.on('.zoom', null);
       svg.on('click', null);
+      onNodeHover?.(null, null);
     };
   }, [
     canvasRef,
@@ -570,6 +627,7 @@ export function useGraphSimulation({
     onNodeClick,
     onNodeContextMenu,
     onNodeDoubleClick,
+    onNodeHover,
     renderMode,
     selection,
     svgRef,

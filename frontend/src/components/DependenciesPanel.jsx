@@ -171,7 +171,7 @@ export default function DependenciesPanel({ repoId, refreshKey = 0 }) {
 
   if (loading) {
     return (
-      <div className="flex h-[40rem] flex-col items-center justify-center">
+      <div className="flex h-[calc(100vh-12rem)] min-h-[30rem] flex-col items-center justify-center">
         <div className="h-8 w-8 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent" />
         <p className="mt-3 text-sm text-gray-400">Loading dependencies…</p>
       </div>
@@ -193,7 +193,7 @@ export default function DependenciesPanel({ repoId, refreshKey = 0 }) {
   if (deps.length === 0) {
     if (fallbackIssue) {
       return (
-        <div className="flex flex-col gap-5 h-[40rem]">
+        <div className="flex flex-col gap-5 h-[calc(100vh-12rem)] min-h-[30rem]">
           <div className="shrink-0 rounded-xl border border-indigo-500/30 bg-indigo-500/10 px-4 py-3 text-sm text-indigo-200">
             Dependency inventory data is unavailable for this repository, but the issue you clicked is preserved below so you can still inspect it.
           </div>
@@ -203,7 +203,7 @@ export default function DependenciesPanel({ repoId, refreshKey = 0 }) {
     }
 
     return (
-      <div className="flex h-[40rem] flex-col items-center justify-center rounded-xl border border-dashed border-gray-700 bg-gray-900/30">
+      <div className="flex h-[calc(100vh-12rem)] min-h-[30rem] flex-col items-center justify-center rounded-xl border border-dashed border-gray-700 bg-gray-900/30">
         <div className="flex items-center justify-center w-16 h-16 rounded-full bg-indigo-500/10 mb-4">
           <svg className="w-8 h-8 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
@@ -220,19 +220,19 @@ export default function DependenciesPanel({ repoId, refreshKey = 0 }) {
   // ── Main render ─────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex flex-col gap-5 h-[40rem]">
+    <div className="flex flex-col gap-5 h-[calc(100vh-12rem)] min-h-[30rem]">
 
       {/* Summary Cards */}
       <div className="grid grid-cols-3 gap-4 shrink-0">
-        <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-4">
+        <div className="rounded-xl border border-gray-700 bg-gray-900/50 p-4 border-l-4 border-l-indigo-500">
           <p className="text-xs uppercase tracking-widest text-gray-500 mb-1">Total Packages</p>
           <p className="text-2xl font-bold text-white">{deps.length}</p>
         </div>
-        <div className="rounded-xl border border-red-900/40 bg-red-900/10 p-4">
+        <div className="rounded-xl border border-red-900/40 bg-red-900/10 p-4 border-l-4 border-l-red-500">
           <p className="text-xs uppercase tracking-widest text-red-400/80 mb-1">Vulnerable</p>
           <p className="text-2xl font-bold text-red-400">{totalVulnerable}</p>
         </div>
-        <div className="rounded-xl border border-green-900/40 bg-green-900/10 p-4">
+        <div className="rounded-xl border border-green-900/40 bg-green-900/10 p-4 border-l-4 border-l-emerald-500">
           <p className="text-xs uppercase tracking-widest text-green-400/80 mb-1">Clean</p>
           <p className="text-2xl font-bold text-green-400">{totalClean}</p>
         </div>

@@ -365,13 +365,42 @@ export default function DependencyGraph({
   const containerRef = useRef(null);
   const svgRef = useRef(null);
   const canvasRef = useRef(null);
+  const searchInputRef = useRef(null);
   const [toastVisible, setToastVisible] = useState(false);
   const [contextMenu, setContextMenu] = useState(null);
   const [clusteringEnabled, setClusteringEnabled] = useState(true);
   const [expandedClusters, setExpandedClusters] = useState(new Set());
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
 
+  // Hover tooltip state
+  const [hoveredNode, setHoveredNode] = useState(null);
+  const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
+
+  // Search state
+  const [searchBarOpen, setSearchBarOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchCurrent, setSearchCurrent] = useState(0);
+
   const exportFilename = repoName ? repoName.replace(/[^\w.-]/g, '_') : 'graph';
+
+  // Ctrl+F / Cmd+F opens search
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault();
+        setSearchBarOpen(true);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  useEffect(() => {
+    if (searchBarOpen) {
+      const id = setTimeout(() => searchInputRef.current?.focus(), 50);
+      return () => clearTimeout(id);
+    }
+  }, [searchBarOpen]);
 
   const exportSVG = () => {
     const svgEl = svgRef.current;
@@ -538,6 +567,31 @@ export default function DependencyGraph({
     return simNodes.find((node) => node.graphId === primaryId) || null;
   }, [simNodes, selection.primaryId]);
 
+  // Search: filter simNodes by file path query
+  const searchMatchNodes = useMemo(() => {
+    if (!searchQuery.trim()) return [];
+    const q = searchQuery.toLowerCase();
+    return simNodes.filter((n) => !n.isCluster && n.file_path.toLowerCase().includes(q));
+  }, [simNodes, searchQuery]);
+
+  const searchCurrentNode = searchMatchNodes.length > 0
+    ? searchMatchNodes[searchCurrent % searchMatchNodes.length]
+    : null;
+
+  // When searching, override the selection to highlight matched nodes
+  const effectiveSelection = useMemo(() => {
+    if (searchMatchNodes.length > 0) {
+      const highlightedNodeIds = new Set(searchMatchNodes.map((n) => n.graphId));
+      return {
+        isActive: true,
+        primaryId: searchCurrentNode?.graphId || null,
+        highlightedNodeIds,
+        highlightedEdgeIds: new Set(),
+      };
+    }
+    return selection;
+  }, [selection, searchMatchNodes, searchCurrentNode]);
+
   const renderMode = graphNodes.length > 300 ? 'canvas' : 'svg';
 
   useEffect(() => {
@@ -565,9 +619,17 @@ export default function DependencyGraph({
     nodes: simNodes,
     edges: simEdges,
     renderMode,
-    selection,
+    selection: effectiveSelection,
     impactAnalysis,
-    focusNodeId: selection.primaryId,
+    focusNodeId: searchCurrentNode?.graphId || selection.primaryId,
+    onNodeHover: useCallback((node, event) => {
+      if (node && event) {
+        setHoveredNode(node);
+        setTooltipPos({ x: event.clientX + 14, y: event.clientY - 8 });
+      } else {
+        setHoveredNode(null);
+      }
+    }, []),
     onNodeClick: (node) => {
       // If it's a cluster node, toggle expansion instead of selecting
       if (node.isCluster && handleClusterClick(node)) return;
@@ -602,7 +664,7 @@ export default function DependencyGraph({
 
   if (graphNodes.length === 0) {
     return (
-      <div className="flex h-[40rem] items-center justify-center rounded-2xl border border-dashed border-gray-800 bg-gray-900/40 text-center">
+      <div className="flex h-[calc(100vh-12rem)] min-h-[30rem] items-center justify-center rounded-2xl border border-dashed border-gray-800 bg-gray-900/40 text-center">
         <div>
           <p className="text-base text-gray-300">No graph data yet for this repository.</p>
           <p className="mt-2 text-sm text-gray-500">Re-index the repo once parsing finishes and the dependency map will appear here.</p>
@@ -612,8 +674,41 @@ export default function DependencyGraph({
   }
 
   return (
-    <div className="flex h-[40rem] gap-4">
+    <div className="flex h-[calc(100vh-12rem)] min-h-[30rem] gap-4">
       <div className="relative flex-1 overflow-hidden rounded-2xl border border-gray-800 bg-[radial-gradient(circle_at_top,_rgba(59,130,246,0.12),_transparent_30%),linear-gradient(180deg,_rgba(2,6,23,0.95),_rgba(15,23,42,0.92))]">
+        {/* Search bar */}
+        {searchBarOpen && (
+          <div className="absolute left-4 top-16 z-20 flex items-center gap-2 rounded-xl border border-gray-600 bg-gray-900/96 px-3 py-2 shadow-2xl shadow-black/60 backdrop-blur-sm">
+            <svg className="h-3.5 w-3.5 shrink-0 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 15.803a7.5 7.5 0 0010.607 10.607z" />
+            </svg>
+            <input
+              ref={searchInputRef}
+              type="text"
+              placeholder="Search files…"
+              value={searchQuery}
+              onChange={(e) => { setSearchQuery(e.target.value); setSearchCurrent(0); }}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') { setSearchQuery(''); setSearchBarOpen(false); setSearchCurrent(0); }
+                if (e.key === 'Enter') setSearchCurrent((c) => (c + 1) % Math.max(1, searchMatchNodes.length));
+              }}
+              className="w-52 bg-transparent text-sm text-white outline-none placeholder:text-gray-500"
+            />
+            {searchQuery && (
+              <span className={`shrink-0 text-xs font-medium ${searchMatchNodes.length === 0 ? 'text-red-400' : 'text-gray-400'}`}>
+                {searchMatchNodes.length === 0 ? 'No matches' : `${(searchCurrent % searchMatchNodes.length) + 1} / ${searchMatchNodes.length}`}
+              </span>
+            )}
+            {searchMatchNodes.length > 1 && (
+              <div className="flex gap-0.5">
+                <button onClick={() => setSearchCurrent((c) => (c - 1 + searchMatchNodes.length) % searchMatchNodes.length)} className="rounded px-1.5 py-0.5 text-gray-400 hover:bg-gray-700 hover:text-white transition text-xs">↑</button>
+                <button onClick={() => setSearchCurrent((c) => (c + 1) % searchMatchNodes.length)} className="rounded px-1.5 py-0.5 text-gray-400 hover:bg-gray-700 hover:text-white transition text-xs">↓</button>
+              </div>
+            )}
+            <button onClick={() => { setSearchQuery(''); setSearchBarOpen(false); setSearchCurrent(0); }} className="shrink-0 text-gray-500 hover:text-gray-200 transition ml-1 text-sm">✕</button>
+          </div>
+        )}
+
         <div className="absolute left-4 right-4 top-4 z-10 flex flex-wrap items-center justify-between gap-3">
           <GraphLegend />
           <div className="flex items-center gap-2">
@@ -672,6 +767,13 @@ export default function DependencyGraph({
               )}
             </div>
             <button
+              onClick={() => setSearchBarOpen((v) => !v)}
+              title="Search files (Ctrl+F)"
+              className={`rounded-full border px-3 py-1 text-xs font-medium transition ${searchBarOpen ? 'border-indigo-500/50 bg-indigo-500/15 text-indigo-300' : 'border-gray-700 bg-gray-950/80 text-gray-400 hover:border-gray-500 hover:text-gray-200'}`}
+            >
+              Search
+            </button>
+            <button
               onClick={resetView}
               className="rounded-full border border-gray-700 bg-gray-950/80 px-4 py-2 text-sm font-medium text-gray-100 transition hover:border-gray-500 hover:bg-gray-900"
             >
@@ -691,6 +793,33 @@ export default function DependencyGraph({
         </div>
 
         <GraphToast message="File path copied to clipboard" visible={toastVisible} />
+
+        {/* Hover tooltip */}
+        {hoveredNode && !contextMenu && (
+          <div
+            className="pointer-events-none fixed z-50"
+            style={{ left: tooltipPos.x, top: tooltipPos.y }}
+          >
+            <div
+              className="rounded-xl border border-gray-700 bg-gray-900/96 p-3 shadow-2xl shadow-black/50 backdrop-blur-sm min-w-[200px]"
+              style={{ borderLeftColor: LANGUAGE_COLORS[hoveredNode.language] || LANGUAGE_COLORS.unknown, borderLeftWidth: 3 }}
+            >
+              <p className="mb-2 break-all font-mono text-xs font-medium text-gray-200">
+                {hoveredNode.file_path.split('/').pop()}
+              </p>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                <span className="text-gray-500">Language</span>
+                <span className="text-gray-300">{formatLanguage(hoveredNode.language)}</span>
+                <span className="text-gray-500">Lines</span>
+                <span className="text-gray-300">{hoveredNode.line_count || 0}</span>
+                <span className="text-gray-500">Complexity</span>
+                <span className="text-gray-300">{Number(hoveredNode.complexity_score || 0).toFixed(1)}</span>
+                <span className="text-gray-500">Dependents</span>
+                <span className="text-gray-300">{hoveredNode.incoming_count || 0}</span>
+              </div>
+            </div>
+          </div>
+        )}
 
         {contextMenu && (
           <div

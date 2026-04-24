@@ -2,7 +2,7 @@ import { useMemo, useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { apiUrl } from '../lib/api';
 
-export default function IssuesPanel({ nodes, issues, onNodeSelect, repoId }) {
+export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDependencies, repoId }) {
   const { session } = useAuth();
   // Local state to hide suppressed issues instantly without full page reload
   const [localIssues, setLocalIssues] = useState(issues || []);
@@ -19,7 +19,7 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, repoId }) {
 
   if (!localIssues || localIssues.length === 0) {
     return (
-      <div className="flex h-[40rem] flex-col items-center justify-center rounded-xl border border-dashed border-gray-700 bg-gray-900/30">
+      <div className="flex h-[calc(100vh-12rem)] min-h-[30rem] flex-col items-center justify-center rounded-xl border border-dashed border-gray-700 bg-gray-900/30">
         <div className="flex items-center justify-center w-16 h-16 rounded-full bg-green-500/10 mb-4">
           <svg className="w-8 h-8 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
@@ -50,6 +50,11 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, repoId }) {
   };
 
   const handleIssueClick = (issue) => {
+    if (issue.type === 'vulnerable_dependency') {
+      onOpenDependencies(issue);
+      return;
+    }
+
     const resolvedIds = issue.file_paths
       .map(path => nodeMap.get(path))
       .filter(Boolean);
@@ -144,7 +149,10 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, repoId }) {
   };
 
   return (
-    <div className="flex flex-col h-[40rem] overflow-auto bg-gray-950 rounded-xl space-y-8 p-1 relative">
+    <div className="flex flex-col h-[calc(100vh-12rem)] min-h-[30rem] overflow-auto bg-gray-950 rounded-xl space-y-8 p-1 relative">
+      <div className="rounded-xl border border-gray-800 bg-gray-900/40 px-4 py-3 text-sm text-gray-400">
+        Issues is the triage view. It shows only actionable problems, including vulnerable dependencies. Click a dependency issue to jump into the `Dependencies` tab with that package pre-filtered.
+      </div>
       {GROUP_ORDER.map(({ type, label }) => {
         const groupIssues = localIssues.filter(i => i.type === type);
         if (groupIssues.length === 0) return null;

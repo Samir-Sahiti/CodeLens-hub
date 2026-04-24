@@ -147,6 +147,30 @@ const listRepos = async (req, res) => {
     ...Array.from(sharedById.values()),
   ];
 
+  // Enrich repos with language distribution for dashboard cards
+  const repoIds = repos.map((r) => r.id);
+  if (repoIds.length > 0) {
+    const { data: langRows } = await supabaseAdmin
+      .from('graph_nodes')
+      .select('repo_id, language')
+      .in('repo_id', repoIds)
+      .limit(10000);
+
+    if (langRows && langRows.length > 0) {
+      const langByRepo = {};
+      langRows.forEach(({ repo_id, language }) => {
+        if (!langByRepo[repo_id]) langByRepo[repo_id] = {};
+        const lang = language || 'unknown';
+        langByRepo[repo_id][lang] = (langByRepo[repo_id][lang] || 0) + 1;
+      });
+      repos.forEach((r) => {
+        r.languages = Object.entries(langByRepo[r.id] || {})
+          .map(([language, count]) => ({ language, count }))
+          .sort((a, b) => b.count - a.count);
+      });
+    }
+  }
+
   res.json({ repos });
 };
 

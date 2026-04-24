@@ -163,7 +163,7 @@ export default function SearchPanel({ repoId }) {
   // ---------------------------------------------------------------------------
 
   return (
-    <div className="flex h-[40rem] gap-6">
+    <div className="flex h-[calc(100vh-12rem)] min-h-[30rem] gap-6">
 
       {/* Left: history sidebar (hidden when no history) */}
       {history.length > 0 && (
