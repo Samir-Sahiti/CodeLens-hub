@@ -69,19 +69,34 @@ export function useGraphSimulation({
         target.call(zoomBehaviorRef.current.transform, d3.zoomIdentity);
       }
     });
-
     observer.observe(container);
 
     return () => observer.disconnect();
   }, [canvasRef, containerRef, renderMode, svgRef, hasNodes]);
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  const layoutCacheRef = useRef(null);
+  const [layoutVersion, setLayoutVersion] = useState(0);
+
+  // --- 1. Compute Graph Layout Only When Topology Changes ---
   useEffect(() => {
     let width = dimensions.width;
     let height = dimensions.height;
 
-    // Fallback: if the ResizeObserver hasn't fired yet (e.g. the container
-    // wasn't in the DOM when the observer was first set up), read directly
-    // from the container element now that React has committed it.
+    // Fallback if ResizeObserver hasn't fired yet
     if ((!width || !height) && containerRef.current) {
       width = Math.max(containerRef.current.clientWidth, 320);
       height = Math.max(containerRef.current.clientHeight, 320);
@@ -101,24 +116,40 @@ export function useGraphSimulation({
 
     const pretickCount = nodes.length < 100 ? PRETICK_CLUSTERED : PRETICK_FULL;
 
-    // Tightly pack clusters
     const simulation = d3.forceSimulation(localNodes)
       .force('link', d3.forceLink(localLinks).id((node) => node.graphId).distance((link) => {
         const targetRadius = typeof link.target === 'object' ? link.target.radius : 14;
         return Math.max(40, 50 + targetRadius);
       }))
-      // Super weak long-distance repel, preventing them from flying apart
       .force('charge', d3.forceManyBody().strength(-400).distanceMax(250))
-      // Strong centripetal gravity to pull disconnected components together beautifully
       .force('x', d3.forceX(width / 2).strength(0.18))
       .force('y', d3.forceY(height / 2).strength(0.18))
-      // Push nodes apart locally so they don't overlap labels
       .force('collide', d3.forceCollide().radius((node) => node.radius + 35).iterations(3))
       .stop();
 
     for (let tick = 0; tick < pretickCount; tick += 1) {
       simulation.tick();
     }
+
+    layoutCacheRef.current = {
+      localNodes,
+      localLinks,
+      maxIncoming,
+      width,
+      height,
+    };
+
+    setLayoutVersion((v) => v + 1);
+
+    return () => {
+      simulation.stop();
+    };
+  }, [containerRef, dimensions, nodes, edges]);
+
+  // --- 2. Draw Graph Based on Cached Layout ---
+  useEffect(() => {
+    if (!layoutCacheRef.current || nodes.length === 0) return undefined;
+    const { localNodes, localLinks, maxIncoming, width, height } = layoutCacheRef.current;
 
     const highlightedNodeIds = selection.highlightedNodeIds;
     const highlightedEdgeIds = selection.highlightedEdgeIds;
@@ -181,10 +212,7 @@ export function useGraphSimulation({
 
     if (renderMode === 'canvas') {
       const canvas = canvasRef.current;
-      if (!canvas) {
-        simulation.stop();
-        return undefined;
-      }
+      if (!canvas) return undefined;
 
       canvas.width = width;
       canvas.height = height;
@@ -310,8 +338,24 @@ export function useGraphSimulation({
           .translate((width / 2) - focusNode.x, (height / 2) - focusNode.y)
           .scale(1);
         canvasSelection.call(zoomBehavior.transform, nextTransform);
+      } else if (!canvasTransformRef.current || canvasTransformRef.current === d3.zoomIdentity) {
+        const xs = localNodes.map((n) => n.x);
+        const ys = localNodes.map((n) => n.y);
+        const minX = Math.min(...xs) - 100;
+        const maxX = Math.max(...xs) + 100;
+        const minY = Math.min(...ys) - 100;
+        const maxY = Math.max(...ys) + 120;
+        const graphWidth = Math.max(maxX - minX, 1);
+        const graphHeight = Math.max(maxY - minY, 1);
+        let scale = Math.min(width / graphWidth, height / graphHeight);
+        scale = Math.max(0.15, Math.min(scale * 0.9, 2.5));
+        const midX = (minX + maxX) / 2;
+        const midY = (minY + maxY) / 2;
+        const fitTransform = d3.zoomIdentity.translate(width / 2, height / 2).scale(scale).translate(-midX, -midY);
+        canvasTransformRef.current = fitTransform;
+        canvasSelection.call(zoomBehavior.transform, fitTransform);
       } else {
-        canvasSelection.call(zoomBehavior.transform, d3.zoomIdentity);
+        canvasSelection.call(zoomBehavior.transform, canvasTransformRef.current);
       }
 
       if (isSelectionActive || isImpactActive) {
@@ -319,7 +363,6 @@ export function useGraphSimulation({
       } else {
         draw();
       }
-
 
       const handlePointer = (event) => {
         const [x, y] = d3.pointer(event, canvas);
@@ -348,7 +391,6 @@ export function useGraphSimulation({
       canvasSelection.on('click', handlePointer);
       canvasSelection.on('contextmenu', (event) => {
         event.preventDefault();
-
         const [x, y] = d3.pointer(event, canvas);
         const graphPoint = canvasTransformRef.current.invert([x, y]);
         const hitNode = getNodeAtPoint(localNodes, graphPoint);
@@ -361,11 +403,6 @@ export function useGraphSimulation({
         if (animationFrame) {
           window.cancelAnimationFrame(animationFrame);
         }
-        simulation.stop();
-        localNodes.length = 0;
-        localLinks.length = 0;
-        const ctx = canvas.getContext('2d');
-        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
         canvasSelection.on('.zoom', null);
         canvasSelection.on('click', null);
         canvasSelection.on('contextmenu', null);
@@ -377,7 +414,6 @@ export function useGraphSimulation({
     svg.attr('width', width).attr('height', height);
 
     const defs = svg.append('defs');
-    // Glow filter — blurs the node's own color to create a bloom effect
     const glowFilter = defs.append('filter')
       .attr('id', 'node-glow')
       .attr('x', '-60%').attr('y', '-60%').attr('width', '220%').attr('height', '220%');
@@ -404,8 +440,7 @@ export function useGraphSimulation({
       .attr('d', (edge) => {
         const dx = edge.target.x - edge.source.x;
         const dy = edge.target.y - edge.source.y;
-        const dr = Math.sqrt(dx * dx + dy * dy) * 1.5; // Smooth arc
-        // If it's a self-link, draw a loop instead
+        const dr = Math.sqrt(dx * dx + dy * dy) * 1.5; 
         if (edge.source === edge.target) {
            return `M${edge.source.x},${edge.source.y - edge.source.radius} A15,15 0 1,1 ${edge.source.x + 1},${edge.source.y - edge.source.radius}`;
         }
@@ -430,7 +465,6 @@ export function useGraphSimulation({
       animateSvgFlow();
     }
 
-    // Create node groups (circle + label)
     const nodeGroups = nodeLayer
       .selectAll('g.graph-node-group')
       .data(localNodes, (node) => node.graphId)
@@ -440,14 +474,11 @@ export function useGraphSimulation({
       .attr('opacity', (node) => getNodeOpacity(node.graphId))
       .style('cursor', 'pointer');
 
-    // Circle — different rendering for clusters vs regular nodes
     nodeGroups.append('circle')
       .attr('r', (node) => node.radius)
       .attr('fill', (node) => {
         if (node.isCluster) {
-          const baseFill = getNodeFill(node);
-          // Semi-transparent fill for clusters
-          return baseFill;
+          return getNodeFill(node);
         }
         return getNodeFill(node);
       })
@@ -460,7 +491,6 @@ export function useGraphSimulation({
       .attr('stroke-dasharray', (node) => (node.isCluster ? '5,3' : 'none'))
       .attr('filter', (node) => (node.isCluster ? 'none' : 'url(#node-glow)'));
 
-    // Child count badge for cluster nodes
     nodeGroups.filter((node) => node.isCluster)
       .append('text')
       .text((node) => node.childCount)
@@ -474,7 +504,6 @@ export function useGraphSimulation({
       .attr('font-family', 'ui-sans-serif, system-ui, sans-serif')
       .attr('pointer-events', 'none');
 
-    // File name label
     nodeGroups.append('text')
       .text((node) => {
         if (node.isCluster) {
@@ -482,10 +511,10 @@ export function useGraphSimulation({
           return `${dirName}/`;
         }
         const parts = node.file_path.split('/');
-        return parts.pop(); // basename only
+        return parts.pop();
       })
       .attr('x', 0)
-      .attr('y', (node) => node.radius + 16) // Centered exactly below node
+      .attr('y', (node) => node.radius + 16)
       .attr('text-anchor', 'middle')
       .attr('fill', (node) => {
         if (impactAnalysis?.sourceId === node.graphId) return '#fef2f2';
@@ -498,7 +527,6 @@ export function useGraphSimulation({
       .attr('pointer-events', 'none')
       .attr('opacity', (node) => getNodeOpacity(node.graphId));
 
-    // Tooltip with full path
     nodeGroups.append('title').text((node) => node.file_path);
 
     const nodeSelection = nodeGroups;
@@ -541,17 +569,15 @@ export function useGraphSimulation({
         .scale(1);
       svg.call(zoomBehavior.transform, nextTransform);
     } else {
-      // Auto-fit: calculate bounding box and zoom to fit all nodes
       const xs = localNodes.map((n) => n.x);
       const ys = localNodes.map((n) => n.y);
       const minX = Math.min(...xs) - 100;
       const maxX = Math.max(...xs) + 100;
       const minY = Math.min(...ys) - 100;
-      const maxY = Math.max(...ys) + 120; // extra padding for bottom text labels
+      const maxY = Math.max(...ys) + 120;
       const graphWidth = Math.max(maxX - minX, 1);
       const graphHeight = Math.max(maxY - minY, 1);
       
-      // Calculate scale to fit. Limit max scale to 2.5 (super clear), min scale to 0.15
       let scale = Math.min(width / graphWidth, height / graphHeight);
       scale = Math.max(0.15, Math.min(scale * 0.9, 2.5));
       
@@ -569,27 +595,21 @@ export function useGraphSimulation({
       if (svgAnimationFrame) {
         window.cancelAnimationFrame(svgAnimationFrame);
       }
-      simulation.stop();
-      localNodes.length = 0;
-      localLinks.length = 0;
       svg.on('.zoom', null);
       svg.on('click', null);
     };
   }, [
+    layoutVersion,
     canvasRef,
-    containerRef,
-    dimensions,
-    edges,
-    focusNodeId,
-    nodes,
+    svgRef,
+    renderMode,
+    selection,
     impactAnalysis,
+    focusNodeId,
     onBackgroundClick,
     onNodeClick,
     onNodeContextMenu,
     onNodeDoubleClick,
-    renderMode,
-    selection,
-    svgRef,
   ]);
 
   return {

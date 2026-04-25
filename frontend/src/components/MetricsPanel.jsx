@@ -226,7 +226,7 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
     });
   };
 
-  const SortIcon = ({ columnKey }) => {
+  const renderSortIcon = (columnKey) => {
     if (sortConfig.key !== columnKey) return <span className="ml-2 inline-block h-3 w-3 rounded-full border border-gray-700/80 align-middle" />;
     const Icon = sortConfig.direction === 'asc' ? ArrowUp : ArrowDown;
     return <Icon className="ml-2 inline h-3.5 w-3.5 align-middle text-indigo-300" />;
@@ -338,22 +338,22 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
                 <thead className="bg-gray-800/95 backdrop-blur text-gray-300 z-10 shadow-sm border-b border-gray-700">
                   <tr>
                     <th onClick={() => handleSort('file_path')}>
-                      File Path <SortIcon columnKey="file_path" />
+                      File Path {renderSortIcon('file_path')}
                     </th>
                     <th onClick={() => handleSort('language')}>
-                      Language <SortIcon columnKey="language" />
+                      Language {renderSortIcon('language')}
                     </th>
                     <th onClick={() => handleSort('line_count')}>
-                      Lines <SortIcon columnKey="line_count" />
+                      Lines {renderSortIcon('line_count')}
                     </th>
                     <th onClick={() => handleSort('outgoing_count')}>
-                      Imports <SortIcon columnKey="outgoing_count" />
+                      Imports {renderSortIcon('outgoing_count')}
                     </th>
                     <th onClick={() => handleSort('incoming_count')}>
-                      Dependents <SortIcon columnKey="incoming_count" />
+                      Dependents {renderSortIcon('incoming_count')}
                     </th>
                     <th onClick={() => handleSort('complexity_score')}>
-                      Complexity <SortIcon columnKey="complexity_score" />
+                      Complexity {renderSortIcon('complexity_score')}
                     </th>
                   </tr>
                 </thead>
