@@ -25,9 +25,26 @@ if (!HTMLCanvasElement.prototype.getContext) {
     moveTo() {},
     lineTo() {},
     fillText() {},
+    setLineDash() {},
+    lineDashOffset: 0,
+    shadowBlur: 0,
+    globalAlpha: 1,
   });
 }
 
 if (!navigator.clipboard) {
   navigator.clipboard = { writeText: async () => {} };
+}
+
+if (!window.matchMedia) {
+  window.matchMedia = (query) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  });
 }

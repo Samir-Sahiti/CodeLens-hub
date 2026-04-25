@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
+import { LoadingMark } from '../components/ui/Primitives';
 
 /**
  * AuthCallback — Supabase redirects the browser here after GitHub OAuth.
@@ -35,10 +36,5 @@ export default function AuthCallback() {
     return () => subscription.unsubscribe();
   }, [navigate]);
 
-  return (
-    <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-gray-950 text-white">
-      <div className="h-8 w-8 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent" />
-      <p className="text-sm text-gray-400">Signing you in…</p>
-    </div>
-  );
+  return <LoadingMark label="Signing you in" detail="Completing GitHub authentication" />;
 }

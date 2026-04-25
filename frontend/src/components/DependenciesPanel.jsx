@@ -2,6 +2,8 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { apiUrl } from '../lib/api';
+import { ArrowDown, ArrowUp, AlertTriangle, CheckCircle2, ExternalLink, Package } from './ui/Icons';
+import { Button, SearchInput, Select } from './ui/Primitives';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -36,8 +38,9 @@ function SeverityBadge({ severity }) {
 }
 
 function SortIcon({ columnKey, sortConfig }) {
-  if (sortConfig.key !== columnKey) return <span className="ml-1 text-gray-600 font-mono text-xs">↕</span>;
-  return <span className="ml-1 text-indigo-400 font-mono text-xs">{sortConfig.direction === 'asc' ? '↑' : '↓'}</span>;
+  if (sortConfig.key !== columnKey) return <span className="ml-1 inline-block h-3 w-3 rounded-full border border-gray-700/80 align-middle" />;
+  const Icon = sortConfig.direction === 'asc' ? ArrowUp : ArrowDown;
+  return <Icon className="ml-1 inline h-3.5 w-3.5 align-middle text-indigo-300" />;
 }
 
 // ── Main Component ────────────────────────────────────────────────────────────
@@ -48,38 +51,86 @@ export default function DependenciesPanel({ repoId, refreshKey = 0 }) {
   const [deps, setDeps]         = useState([]);
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState(null);
+  const [statusInfo, setStatusInfo] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterEcosystem, setFilterEcosystem] = useState('all');
   const [showOnlyVulnerable, setShowOnlyVulnerable] = useState(false);
   const [sortConfig, setSortConfig] = useState({ key: 'vuln_count', direction: 'desc' });
   const [expandedId, setExpandedId] = useState(null);
 
+  const fetchDependencies = useCallback(async (cancelledRef) => {
+    const res = await fetch(apiUrl(`/api/repos/${repoId}/dependencies`), {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!cancelledRef.current) {
+      setDeps(data.dependencies || []);
+      setError(null);
+    }
+  }, [repoId, session?.access_token]);
+
+  const fetchStatus = useCallback(async (cancelledRef) => {
+    const res = await fetch(apiUrl(`/api/repos/${repoId}/status`), {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!cancelledRef.current) {
+      setStatusInfo(data);
+    }
+    return data;
+  }, [repoId, session?.access_token]);
+
   useEffect(() => {
     if (!session?.access_token) return;
-    let cancelled = false;
+    const cancelledRef = { current: false };
+    let pollId = null;
     setLoading(true);
 
-    const fetchDeps = async () => {
+    const load = async () => {
       try {
-        const res = await fetch(apiUrl(`/api/repos/${repoId}/dependencies`), {
-          headers: { Authorization: `Bearer ${session.access_token}` },
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (!cancelled) {
-          setDeps(data.dependencies || []);
-          setError(null);
+        const currentStatus = await fetchStatus(cancelledRef);
+        await fetchDependencies(cancelledRef);
+
+        const shouldPoll =
+          currentStatus?.latest_job?.enrichment_status === 'running' ||
+          currentStatus?.latest_job?.current_stage === 'sca' ||
+          currentStatus?.status === 'pending' ||
+          currentStatus?.status === 'indexing';
+
+        if (!cancelledRef.current && shouldPoll) {
+          pollId = setInterval(async () => {
+            try {
+              const polledStatus = await fetchStatus(cancelledRef);
+              await fetchDependencies(cancelledRef);
+              const stillPolling =
+                polledStatus?.latest_job?.enrichment_status === 'running' ||
+                polledStatus?.latest_job?.current_stage === 'sca' ||
+                polledStatus?.status === 'pending' ||
+                polledStatus?.status === 'indexing';
+              if (!stillPolling && pollId) {
+                clearInterval(pollId);
+                pollId = null;
+              }
+            } catch (pollErr) {
+              if (!cancelledRef.current) setError(pollErr.message);
+            }
+          }, 1000);
         }
       } catch (err) {
-        if (!cancelled) setError(err.message);
+        if (!cancelledRef.current) setError(err.message);
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelledRef.current) setLoading(false);
       }
     };
 
-    fetchDeps();
-    return () => { cancelled = true; };
-  }, [repoId, session?.access_token, refreshKey]);
+    load();
+    return () => {
+      cancelledRef.current = true;
+      if (pollId) clearInterval(pollId);
+    };
+  }, [fetchDependencies, fetchStatus, refreshKey, repoId, session?.access_token]);
 
   const ecosystems = useMemo(() => ['all', ...new Set(deps.map(d => d.ecosystem))], [deps]);
   const highlightedPackage = searchParams.get('dep') || '';
@@ -117,6 +168,7 @@ export default function DependenciesPanel({ repoId, refreshKey = 0 }) {
 
   const totalVulnerable = useMemo(() => deps.filter(d => d.vuln_count > 0).length, [deps]);
   const totalClean      = useMemo(() => deps.filter(d => d.vuln_count === 0).length, [deps]);
+  const inventoryStillBuilding = statusInfo?.latest_job?.enrichment_status === 'running' || statusInfo?.latest_job?.current_stage === 'sca';
 
   const SEVERITY_RANK = { high: 3, medium: 2, low: 1, none: 0 };
   const getMaxSeverity = (dep) => {
@@ -185,7 +237,7 @@ export default function DependenciesPanel({ repoId, refreshKey = 0 }) {
 
   if (loading) {
     return (
-      <div className="flex h-[calc(100vh-12rem)] min-h-[30rem] flex-col items-center justify-center">
+      <div className="flex h-auto min-h-[30rem] flex-col items-center justify-center xl:h-[calc(100vh-12rem)]">
         <div className="h-8 w-8 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent" />
         <p className="mt-3 text-sm text-gray-400">Loading dependencies…</p>
       </div>
@@ -205,9 +257,21 @@ export default function DependenciesPanel({ repoId, refreshKey = 0 }) {
   // ── Empty state ─────────────────────────────────────────────────────────────
 
   if (deps.length === 0) {
+    if (inventoryStillBuilding) {
+      return (
+        <div className="flex h-auto min-h-[30rem] flex-col items-center justify-center rounded-xl border border-dashed border-gray-700 bg-gray-900/30 px-6 text-center xl:h-[calc(100vh-12rem)]">
+          <div className="h-8 w-8 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent mb-4" />
+          <h3 className="text-lg font-medium text-gray-200 mb-1">Building dependency inventory</h3>
+          <p className="text-sm text-gray-500 text-center max-w-sm">
+            Core analysis is ready, but dependency inventory is still being enriched. This view refreshes automatically until all packages are available.
+          </p>
+        </div>
+      );
+    }
+
     if (fallbackIssue) {
       return (
-        <div className="flex flex-col gap-5 h-[calc(100vh-12rem)] min-h-[30rem]">
+        <div className="flex h-auto min-h-[30rem] flex-col gap-5 xl:h-[calc(100vh-12rem)]">
           <div className="shrink-0 rounded-xl border border-indigo-500/30 bg-indigo-500/10 px-4 py-3 text-sm text-indigo-200">
             Dependency inventory data is unavailable for this repository, but the issue you clicked is preserved below so you can still inspect it.
           </div>
@@ -217,15 +281,13 @@ export default function DependenciesPanel({ repoId, refreshKey = 0 }) {
     }
 
     return (
-      <div className="flex h-[calc(100vh-12rem)] min-h-[30rem] flex-col items-center justify-center rounded-xl border border-dashed border-gray-700 bg-gray-900/30">
+      <div className="flex h-auto min-h-[30rem] flex-col items-center justify-center rounded-xl border border-dashed border-gray-700 bg-gray-900/30 px-6 text-center xl:h-[calc(100vh-12rem)]">
         <div className="flex items-center justify-center w-16 h-16 rounded-full bg-indigo-500/10 mb-4">
-          <svg className="w-8 h-8 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
-          </svg>
+          <Package className="h-8 w-8 text-indigo-400" />
         </div>
-        <h3 className="text-lg font-medium text-gray-200 mb-1">No dependencies detected</h3>
+        <h3 className="text-lg font-medium text-gray-200 mb-1">No dependencies found</h3>
         <p className="text-sm text-gray-500 text-center max-w-sm">
-          No recognised dependency manifest files were found in this repository, or the repository has not been indexed yet.
+          No recognised dependency manifest files were found in this repository.
         </p>
       </div>
     );
@@ -234,10 +296,10 @@ export default function DependenciesPanel({ repoId, refreshKey = 0 }) {
   // ── Main render ─────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex flex-col gap-5 h-[calc(100vh-12rem)] min-h-[30rem]">
+    <div className="flex h-auto min-h-[30rem] flex-col gap-5 xl:h-[calc(100vh-12rem)]">
 
       {/* Summary Cards */}
-      <div className="grid grid-cols-3 gap-4 shrink-0">
+      <div className="grid shrink-0 grid-cols-1 gap-4 sm:grid-cols-3">
         <div className="rounded-xl border border-gray-700 bg-gray-900/50 p-4 border-l-4 border-l-indigo-500">
           <p className="text-xs uppercase tracking-widest text-gray-500 mb-1">Total Packages</p>
           <p className="text-2xl font-bold text-white">{deps.length}</p>
@@ -257,7 +319,7 @@ export default function DependenciesPanel({ repoId, refreshKey = 0 }) {
       </div>
 
       {(highlightedPackage || highlightedFromIssue) && (
-        <div className="shrink-0 flex items-center justify-between gap-3 rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-4 py-3">
+        <div className="flex shrink-0 flex-col gap-3 rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-sm text-indigo-200">
             Showing dependency details from an issue{highlightedPackage ? ` for ` : ''}{highlightedPackage && (
               <span className="font-mono text-indigo-100">{highlightedPackage}</span>
@@ -275,10 +337,8 @@ export default function DependenciesPanel({ repoId, refreshKey = 0 }) {
 
       {/* requirements.txt limitation banner */}
       {hasRequirementsTxt && (
-        <div className="shrink-0 flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3">
-          <svg className="h-4 w-4 text-amber-400 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-          </svg>
+        <div className="flex shrink-0 items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
           <p className="text-xs text-amber-300">
             <strong>requirements.txt detected</strong> — only <em>direct</em> dependencies are checked. Transitive vulnerabilities require a lockfile (e.g. generated by <code className="rounded bg-amber-900/40 px-1">pip freeze &gt; requirements.txt</code> or <code className="rounded bg-amber-900/40 px-1">Pipfile.lock</code>).
           </p>
@@ -286,41 +346,33 @@ export default function DependenciesPanel({ repoId, refreshKey = 0 }) {
       )}
 
       {/* Filter bar */}
-      <div className="shrink-0 flex items-center gap-3">
-        <div className="relative flex-1">
-          <svg className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 15.803a7.5 7.5 0 0010.607 10.607z" />
-          </svg>
-          <input
-            id="dep-search"
-            type="text"
-            placeholder="Search packages or manifests..."
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-            className="w-full bg-gray-950 border border-gray-700 text-sm text-white rounded-md pl-9 pr-3 py-2 focus:outline-none focus:border-indigo-500 transition-colors placeholder:text-gray-600"
-          />
-        </div>
-        <select
+      <div className="flex shrink-0 flex-col gap-3 md:flex-row md:items-center">
+        <SearchInput
+          id="dep-search"
+          type="text"
+          placeholder="Search packages or manifests..."
+          value={searchQuery}
+          onChange={e => setSearchQuery(e.target.value)}
+          className="flex-1"
+        />
+        <Select
           id="dep-ecosystem-filter"
           value={filterEcosystem}
           onChange={e => setFilterEcosystem(e.target.value)}
-          className="bg-gray-950 border border-gray-700 text-sm text-white rounded-md px-3 py-2 focus:outline-none focus:border-indigo-500 transition-colors"
+          className="w-full md:w-auto"
         >
           {ecosystems.map(eco => (
             <option key={eco} value={eco}>{eco === 'all' ? 'All ecosystems' : eco}</option>
           ))}
-        </select>
-        <button
+        </Select>
+        <Button
           type="button"
           onClick={() => setShowOnlyVulnerable(prev => !prev)}
-          className={`rounded-md border px-3 py-2 text-sm transition-colors ${
-            showOnlyVulnerable
-              ? 'border-red-500/40 bg-red-500/10 text-red-300'
-              : 'border-gray-700 bg-gray-950 text-gray-300 hover:border-gray-600'
-          }`}
+          variant={showOnlyVulnerable ? 'danger' : 'outline'}
+          className="md:whitespace-nowrap"
         >
           {showOnlyVulnerable ? 'Showing Vulnerable Only' : 'Vulnerable Only'}
-        </button>
+        </Button>
       </div>
 
       {/* Table */}
@@ -477,12 +529,7 @@ function Dependency({ id, dep, vulns, hasVulns, isExpanded, onToggle }) {
         <td className="px-5 py-3">
           <div className="flex items-center gap-2">
             {hasVulns && (
-              <svg
-                className={`h-3.5 w-3.5 text-gray-500 shrink-0 transition-transform ${isExpanded ? 'rotate-90' : ''}`}
-                fill="none" viewBox="0 0 24 24" stroke="currentColor"
-              >
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-              </svg>
+              <ArrowDown className={`h-3.5 w-3.5 shrink-0 text-gray-500 transition-transform ${isExpanded ? 'rotate-180' : '-rotate-90'}`} />
             )}
             <span className={`font-mono text-xs ${hasVulns ? 'text-white font-semibold' : 'text-gray-300'}`}>
               {dep.package_name}
@@ -564,7 +611,7 @@ function Dependency({ id, dep, vulns, hasVulns, isExpanded, onToggle }) {
                       onClick={e => e.stopPropagation()}
                       className="text-xs text-indigo-400 hover:text-indigo-300 hover:underline transition-colors shrink-0"
                     >
-                      View advisory ↗
+                      View advisory <ExternalLink className="ml-1 inline h-3 w-3" />
                     </a>
                   </div>
 
@@ -574,9 +621,7 @@ function Dependency({ id, dep, vulns, hasVulns, isExpanded, onToggle }) {
 
                   {vuln.fixedVersion && (
                     <div className="flex items-center gap-2 text-xs text-green-400">
-                      <svg className="h-3.5 w-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
+                      <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
                       Upgrade to <strong className="ml-1 font-mono">{vuln.fixedVersion}</strong>
                     </div>
                   )}

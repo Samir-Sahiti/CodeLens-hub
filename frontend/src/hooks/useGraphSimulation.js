@@ -19,23 +19,6 @@ function getNodeAtPoint(nodes, point) {
   return null;
 }
 
-function drawArrowhead(context, fromX, fromY, toX, toY, size, color) {
-  const angle = Math.atan2(toY - fromY, toX - fromX);
-  context.fillStyle = color;
-  context.beginPath();
-  context.moveTo(toX, toY);
-  context.lineTo(
-    toX - (size * Math.cos(angle - Math.PI / 6)),
-    toY - (size * Math.sin(angle - Math.PI / 6))
-  );
-  context.lineTo(
-    toX - (size * Math.cos(angle + Math.PI / 6)),
-    toY - (size * Math.sin(angle + Math.PI / 6))
-  );
-  context.closePath();
-  context.fill();
-}
-
 export function useGraphSimulation({
   containerRef,
   svgRef,
@@ -210,9 +193,9 @@ export function useGraphSimulation({
       const canvasSelection = d3.select(canvas);
       let lastClickAt = 0;
       let lastClickedNodeId = null;
+      let animationFrame = null;
 
       let dashOffset = 0;
-      let animFrame = null;
 
       const draw = () => {
         context.save();
@@ -230,8 +213,8 @@ export function useGraphSimulation({
           const angle = Math.atan2(dy, dx);
           const startX = source.x + (source.radius * Math.cos(angle));
           const startY = source.y + (source.radius * Math.sin(angle));
-          const endX = target.x - ((target.radius + 8) * Math.cos(angle));
-          const endY = target.y - ((target.radius + 8) * Math.sin(angle));
+          const endX = target.x - ((target.radius + 2) * Math.cos(angle));
+          const endY = target.y - ((target.radius + 2) * Math.sin(angle));
 
           const lineOpacity = getEdgeOpacity(link);
           const isHighlightedEdge = highlightedEdgeIds.has(link.id) || isImpactActive;
@@ -252,8 +235,6 @@ export function useGraphSimulation({
           context.lineTo(endX, endY);
           context.stroke();
           context.setLineDash([]);
-
-          drawArrowhead(context, startX, startY, endX, endY, 7, edgeColor);
         });
 
         localNodes.forEach((node) => {
@@ -285,7 +266,7 @@ export function useGraphSimulation({
             context.fillText(dirLabel, node.x, node.y + node.radius + 14);
           } else {
             const nodeFill = getNodeFill(node);
-            const glowIntensity = 8 + (12 * (node.incoming_count || 0) / maxIncoming);
+            const glowIntensity = 4 + (8 * (node.incoming_count || 0) / maxIncoming);
             context.shadowColor = nodeFill;
             context.shadowBlur = glowIntensity;
             context.fillStyle = nodeFill;
@@ -305,9 +286,9 @@ export function useGraphSimulation({
       };
 
       const animateDraw = () => {
-        dashOffset = (dashOffset + 0.4) % 20;
+        dashOffset = (dashOffset + 0.65) % 20;
         draw();
-        animFrame = requestAnimationFrame(animateDraw);
+        animationFrame = window.requestAnimationFrame(animateDraw);
       };
 
       const zoomBehavior = d3.zoom()
@@ -377,8 +358,10 @@ export function useGraphSimulation({
       });
 
       return () => {
+        if (animationFrame) {
+          window.cancelAnimationFrame(animationFrame);
+        }
         simulation.stop();
-        if (animFrame) cancelAnimationFrame(animFrame);
         localNodes.length = 0;
         localLinks.length = 0;
         const ctx = canvas.getContext('2d');
@@ -394,18 +377,6 @@ export function useGraphSimulation({
     svg.attr('width', width).attr('height', height);
 
     const defs = svg.append('defs');
-    defs.append('marker')
-      .attr('id', 'dependency-arrowhead')
-      .attr('viewBox', '0 -5 10 10')
-      .attr('refX', 12)
-      .attr('refY', 0)
-      .attr('markerWidth', 7)
-      .attr('markerHeight', 7)
-      .attr('orient', 'auto')
-      .append('path')
-      .attr('d', 'M0,-5L10,0L0,5')
-      .attr('fill', '#94a3b8');
-
     // Glow filter — blurs the node's own color to create a bloom effect
     const glowFilter = defs.append('filter')
       .attr('id', 'node-glow')
@@ -443,8 +414,21 @@ export function useGraphSimulation({
       .attr('fill', 'none')
       .attr('stroke', () => (isImpactActive ? '#f59e0b' : '#64748b'))
       .attr('stroke-opacity', (edge) => getEdgeOpacity(edge))
-      .attr('stroke-width', (edge) => (isImpactActive ? 1.8 : highlightedEdgeIds.has(edge.id) ? 2 : 1.2))
-      .attr('marker-end', 'url(#dependency-arrowhead)');
+      .attr('stroke-width', (edge) => (isImpactActive ? 1.8 : highlightedEdgeIds.has(edge.id) ? 2 : 1.2));
+
+    let svgAnimationFrame = null;
+    let svgDashOffset = 0;
+    const animateSvgFlow = () => {
+      svgDashOffset = (svgDashOffset + 0.9) % 24;
+      edgeLayer
+        .selectAll('path.graph-edge-flow')
+        .attr('stroke-dashoffset', -svgDashOffset);
+      svgAnimationFrame = window.requestAnimationFrame(animateSvgFlow);
+    };
+
+    if (isSelectionActive || isImpactActive) {
+      animateSvgFlow();
+    }
 
     // Create node groups (circle + label)
     const nodeGroups = nodeLayer
@@ -506,7 +490,7 @@ export function useGraphSimulation({
       .attr('fill', (node) => {
         if (impactAnalysis?.sourceId === node.graphId) return '#fef2f2';
         if (directImpactIds.has(node.graphId) || transitiveImpactIds.has(node.graphId)) return '#fffbeb';
-        return selection.primaryId === node.graphId ? '#f8fafc' : '#94a3b8';
+        return selection.primaryId === node.graphId ? '#f8fafc' : '#a8b3c5';
       })
       .attr('font-size', (node) => ((selection.primaryId === node.graphId || impactAnalysis?.sourceId === node.graphId) ? '13px' : '11px'))
       .attr('font-weight', (node) => ((selection.primaryId === node.graphId || impactAnalysis?.sourceId === node.graphId) ? '600' : '400'))
@@ -582,6 +566,9 @@ export function useGraphSimulation({
     }
 
     return () => {
+      if (svgAnimationFrame) {
+        window.cancelAnimationFrame(svgAnimationFrame);
+      }
       simulation.stop();
       localNodes.length = 0;
       localLinks.length = 0;

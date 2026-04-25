@@ -9,6 +9,8 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { apiUrl } from '../lib/api';
 import { AnswerBlock, SourceCard } from './SharedAnswerComponents';
+import { Badge, Button, EmptyState } from './ui/Primitives';
+import { AlertTriangle, Code2, FileCode, Sparkles, StopCircle } from './ui/Icons';
 
 // ---------------------------------------------------------------------------
 // Main CodeReviewPanel
@@ -150,10 +152,10 @@ export default function CodeReviewPanel({ repoId }) {
   // ---------------------------------------------------------------------------
 
   return (
-    <div className="flex h-[calc(100vh-12rem)] min-h-[30rem] flex-col gap-4">
+    <div className="flex h-auto min-h-[30rem] flex-col gap-4 xl:h-[calc(100vh-12rem)]">
 
       {/* Input area */}
-      <div className="flex flex-col gap-3">
+      <div className="shrink-0 rounded-xl border border-surface-800 bg-surface-900/70 p-3 shadow-panel">
 
         {/* Snippet textarea with line count badge */}
         <div className="relative">
@@ -162,9 +164,8 @@ export default function CodeReviewPanel({ repoId }) {
             onChange={e => setSnippet(e.target.value)}
             placeholder="Paste your code here (up to 200 lines)..."
             disabled={isStreaming}
-            rows={10}
-            className="w-full rounded-xl border border-gray-700 bg-gray-900 px-5 py-4 font-mono text-sm text-white placeholder-gray-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-colors disabled:opacity-60 resize-y"
-            style={{ minHeight: '200px' }}
+            rows={8}
+            className="max-h-[32vh] min-h-[10rem] w-full resize-y rounded-lg border border-surface-700 bg-surface-950 px-4 py-3 font-mono text-sm leading-6 text-white outline-none transition-colors placeholder:text-gray-600 focus:border-primary-500 focus:ring-2 focus:ring-primary-500/20 disabled:opacity-60"
           />
           {/* Line count badge */}
           <div className={`absolute bottom-3 right-3 rounded-full px-2.5 py-0.5 text-xs font-medium ${
@@ -178,14 +179,15 @@ export default function CodeReviewPanel({ repoId }) {
 
         {/* Over-limit warning */}
         {isOverLimit && (
-          <p className="text-xs text-red-400">
+          <p className="mt-2 flex items-center gap-1.5 text-xs text-red-300">
+            <AlertTriangle className="h-3.5 w-3.5" />
             Snippet exceeds 200 lines. Please trim it before submitting.
           </p>
         )}
 
         {/* Review focus presets */}
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-xs text-gray-500 shrink-0">Focus:</span>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <span className="shrink-0 text-xs uppercase tracking-[0.16em] text-gray-500">Focus</span>
           {PRESETS.map((preset) => (
             <button
               key={preset.id}
@@ -193,10 +195,10 @@ export default function CodeReviewPanel({ repoId }) {
               disabled={isStreaming}
               onClick={() => setActivePreset(p => p === preset.id ? null : preset.id)}
               title={preset.hint}
-              className={`rounded-full border px-3 py-1 text-xs font-medium transition disabled:opacity-50 ${
+              className={`rounded-full border px-3 py-1.5 text-xs font-medium transition disabled:opacity-50 ${
                 activePreset === preset.id
-                  ? 'border-indigo-500/50 bg-indigo-500/15 text-indigo-300'
-                  : 'border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200'
+                  ? 'border-primary-500/50 bg-primary-500/15 text-primary-200'
+                  : 'border-surface-700 text-gray-400 hover:border-surface-500 hover:text-gray-200'
               }`}
             >
               {preset.label}
@@ -211,64 +213,62 @@ export default function CodeReviewPanel({ repoId }) {
           onChange={e => setContextDescription(e.target.value)}
           placeholder="What is this code supposed to do? (optional)"
           disabled={isStreaming}
-          className="rounded-xl border border-gray-700 bg-gray-900 px-5 py-3 text-sm text-white placeholder-gray-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-colors disabled:opacity-60"
+          className="mt-3 w-full rounded-lg border border-surface-700 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition-colors placeholder:text-gray-600 focus:border-primary-500 focus:ring-2 focus:ring-primary-500/20 disabled:opacity-60"
         />
 
         {/* Action buttons row */}
-        <div className="flex items-center gap-3">
+        <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
           {isStreaming ? (
-            <button
+            <Button
               type="button"
               onClick={() => { abortRef.current?.abort(); setIsStreaming(false); }}
-              className="rounded-xl bg-gray-700 px-5 py-3 text-sm font-semibold text-white hover:bg-gray-600 transition-colors shadow-sm"
+              variant="secondary"
+              className="w-full sm:w-auto"
             >
+              <StopCircle className="h-4 w-4" />
               Cancel
-            </button>
+            </Button>
           ) : (
             <>
               {/* Review Code — primary */}
-              <button
+              <Button
                 onClick={() => runReview('review')}
                 disabled={!canSubmit}
-                className="rounded-xl bg-indigo-600 px-5 py-3 text-sm font-semibold text-white hover:bg-indigo-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                className="w-full sm:w-auto"
               >
+                <Sparkles className="h-4 w-4" />
                 Review Code
-              </button>
+              </Button>
 
               {/* Clean up this code — secondary/outlined */}
-              <button
+              <Button
                 onClick={() => runReview('cleanup')}
                 disabled={!canSubmit}
-                className="rounded-xl border border-gray-700 bg-transparent px-5 py-3 text-sm font-semibold text-gray-200 hover:bg-gray-800 hover:border-gray-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                variant="secondary"
+                className="w-full sm:w-auto"
               >
+                <Code2 className="h-4 w-4" />
                 Clean up this code
-              </button>
+              </Button>
             </>
           )}
+          <Badge className="sm:ml-auto">{lineCount} / {lineLimit} lines</Badge>
         </div>
       </div>
 
       {/* Response area — scrollable div identical to SearchPanel */}
       <div
         ref={answerRef}
-        className="flex-1 overflow-y-auto rounded-xl border border-gray-800 bg-gray-900/40 p-5 space-y-6"
+        className="min-h-[18rem] flex-1 space-y-6 overflow-y-auto rounded-xl border border-surface-800 bg-surface-900/50 p-4 sm:p-5"
       >
         {/* Pre-submit empty state */}
         {!hasSubmitted && !isStreaming && (
-          <div className="flex flex-col items-center justify-center h-full gap-4 py-4">
-            <div className="flex items-center justify-center w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/20">
-              <svg className="h-6 w-6 text-indigo-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" />
-              </svg>
-            </div>
-            <div className="text-center">
-              <h3 className="text-base font-semibold text-gray-200 mb-1">AI Code Review</h3>
-              <p className="text-sm text-gray-500 max-w-sm">
-                Paste a code snippet above and click <strong className="text-gray-300">Review Code</strong> to get quality feedback grounded in your codebase's patterns.
-                Use <strong className="text-gray-300">Clean up this code</strong> to get a rewritten version that matches your repo's conventions.
-              </p>
-            </div>
-          </div>
+          <EmptyState
+            icon={FileCode}
+            title="AI Code Review"
+            description="Paste a focused snippet, choose a review mode, and CodeLens will compare it against nearby codebase patterns."
+            className="min-h-[15rem] border-0 bg-transparent"
+          />
         )}
 
         {/* Error state */}
@@ -294,9 +294,7 @@ export default function CodeReviewPanel({ repoId }) {
           <div>
             <div className="flex items-center gap-2 mb-3">
               <div className="flex items-center justify-center w-6 h-6 rounded-full bg-indigo-500/15 border border-indigo-500/25">
-                <svg className="h-3.5 w-3.5 text-indigo-400" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
-                </svg>
+                <Sparkles className="h-3.5 w-3.5 text-indigo-400" />
               </div>
               <p className="text-xs font-semibold uppercase tracking-widest text-gray-500">Review</p>
             </div>
@@ -309,9 +307,7 @@ export default function CodeReviewPanel({ repoId }) {
           <div>
             <div className="flex items-center gap-2 mb-3">
               <div className="flex items-center justify-center w-6 h-6 rounded-full bg-gray-800 border border-gray-700">
-                <svg className="h-3.5 w-3.5 text-gray-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" />
-                </svg>
+                <Code2 className="h-3.5 w-3.5 text-gray-400" />
               </div>
               <p className="text-xs font-semibold uppercase tracking-widest text-gray-500">
                 Similar codebase files <span className="text-gray-700 font-normal normal-case tracking-normal">({sources.length})</span>
