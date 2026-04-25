@@ -2,46 +2,167 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ── Warm body override ───────────────────────────────────────────────────── */
-html, body, #root {
-  background-color: #0c0d14;
+:root {
+  --color-bg: #090a0f;
+  --color-surface: #101218;
+  --color-surface-elevated: #171b24;
+  --color-border: #252b37;
+  --color-accent: #4f8cff;
+  --radius: 0.5rem;
+  --motion-fast: 140ms ease;
+  --motion-base: 180ms ease;
+  color-scheme: dark;
 }
 
-/* ── Graph node/edge transitions ─────────────────────────────────────────── */
-.graph-node,
-.graph-edge {
-  transition: opacity 180ms ease;
+html {
+  scroll-behavior: smooth;
 }
 
-.graph-node.is-dimmed,
-.graph-edge.is-dimmed {
-  opacity: 0.15;
+html,
+body,
+#root {
+  min-height: 100%;
+  background: var(--color-bg);
 }
 
-/* ── Edge flow animation (1D) ─────────────────────────────────────────────── */
+body {
+  margin: 0;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  text-rendering: geometricPrecision;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #3b4352 #101218;
+}
+
+*::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+*::-webkit-scrollbar-track {
+  background: #101218;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: #3b4352;
+  border-radius: 999px;
+  border: 2px solid #101218;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: #535d70;
+}
+
+::selection {
+  background: rgba(79, 140, 255, 0.28);
+  color: #fff;
+}
+
+@layer base {
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 2px solid rgba(79, 140, 255, 0.75);
+    outline-offset: 2px;
+  }
+}
+
+@layer utilities {
+  .app-shell-bg {
+    background:
+      radial-gradient(circle at 20% -10%, rgba(79, 140, 255, 0.08), transparent 24rem),
+      linear-gradient(180deg, #090a0f 0%, #0d1017 100%);
+  }
+
+  .text-gradient {
+    background: linear-gradient(135deg, #f8fafc 0%, #93c5fd 52%, #c4b5fd 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .glass,
+  .glass-card {
+    background: rgba(16, 18, 24, 0.82);
+    border: 1px solid rgba(148, 163, 184, 0.12);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+
+  .focus-ring {
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40;
+  }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideRight {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.98); }
+  to { opacity: 1; transform: scale(1); }
+}
+
 @keyframes dashFlow {
+  from { stroke-dashoffset: 0; }
   to { stroke-dashoffset: -20; }
 }
 
-.graph-edge-flow {
-  stroke-dasharray: 6, 4;
-  animation: dashFlow 1.8s linear infinite;
+@keyframes shimmer {
+  from { background-position: -200% 0; }
+  to { background-position: 200% 0; }
 }
 
-/* ── Tab panel transitions (3C) ──────────────────────────────────────────── */
-@keyframes fadeInUp {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+@keyframes toastProgress {
+  from { width: 100%; }
+  to { width: 0%; }
 }
 
+@keyframes slideInFromRight {
+  from { transform: translateX(100%); opacity: 0.85; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes slideInFromLeft {
+  from { transform: translateX(-100%); opacity: 0.85; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes drawCheck {
+  from { stroke-dashoffset: 100; }
+  to { stroke-dashoffset: 0; }
+}
+
+.animate-fade-in {
+  animation: fadeIn 150ms ease forwards;
+}
+
+.page-enter,
 .tab-panel-active {
-  animation: fadeInUp 180ms ease forwards;
+  animation: slideUp 180ms ease forwards;
   position: relative;
 }
 
@@ -49,7 +170,47 @@ html, body, #root {
   opacity: 0;
   pointer-events: none;
   position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
+  inset: 0 0 auto 0;
+}
+
+.skeleton {
+  background: linear-gradient(90deg, #121620 25%, #1d2430 50%, #121620 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.35s ease infinite;
+  border-radius: 0.5rem;
+}
+
+.draw-check {
+  stroke-dasharray: 100;
+  stroke-dashoffset: 100;
+  animation: drawCheck 0.45s ease forwards;
+}
+
+.graph-node,
+.graph-edge {
+  transition: opacity 160ms ease;
+}
+
+.graph-node.is-dimmed,
+.graph-edge.is-dimmed {
+  opacity: 0.16;
+}
+
+.graph-edge-flow {
+  stroke-dasharray: 6, 4;
+  stroke-dashoffset: 0;
+  stroke-linecap: round;
+  animation: dashFlow 0.9s linear infinite;
+  will-change: stroke-dashoffset;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 1ms !important;
+  }
 }

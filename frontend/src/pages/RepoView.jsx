@@ -1,49 +1,42 @@
-import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef, Suspense, lazy } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
-import { useAuth } from '../context/AuthContext';
-import { useRepo } from '../context/RepoContext';
-import { apiUrl } from '../lib/api';
-import DependencyGraph from '../components/DependencyGraph';
-import SearchPanel from '../components/SearchPanel';
-import CodeReviewPanel from '../components/CodeReviewPanel';
-import VirtualTable from '../components/VirtualTable';
-import FileChatPanel from '../components/FileChatPanel';
-import FileBrowser from '../components/FileBrowser';
-import DependenciesPanel from '../components/DependenciesPanel';
-import MetricsPanel from '../components/MetricsPanel';
-import IssuesPanel from '../components/IssuesPanel';
-import { useToast } from '../components/Toast';
+import { useAuth }          from '../context/AuthContext';
+import { useRepo }          from '../context/RepoContext';
+import { apiUrl }           from '../lib/api';
+import { formatDate }       from '../lib/constants';
+import { useToast }         from '../components/Toast';
+import { Badge, Banner, Button, EmptyState, Panel, Skeleton } from '../components/ui/Primitives';
+import { RefreshCw, ArrowLeft, Home } from '../components/ui/Icons';
 
-function formatLanguage(str) {
-  if (!str) return 'Unknown';
-  if (str === 'javascript') return 'JavaScript';
-  if (str === 'typescript') return 'TypeScript';
-  if (str === 'python') return 'Python';
-  if (str === 'c_sharp') return 'C#';
-  if (str === 'go') return 'Go';
-  if (str === 'java') return 'Java';
-  if (str === 'rust') return 'Rust';
-  if (str === 'ruby') return 'Ruby';
-  return str.charAt(0).toUpperCase() + str.slice(1);
-}
+const DependencyGraph      = lazy(() => import('../components/DependencyGraph'));
+const SearchPanel          = lazy(() => import('../components/SearchPanel'));
+const CodeReviewPanel      = lazy(() => import('../components/CodeReviewPanel'));
+const FileChatPanel        = lazy(() => import('../components/FileChatPanel'));
+const FileBrowser          = lazy(() => import('../components/FileBrowser'));
+const DependenciesPanel    = lazy(() => import('../components/DependenciesPanel'));
+const MetricsPanel         = lazy(() => import('../components/MetricsPanel'));
+const IssuesPanel          = lazy(() => import('../components/IssuesPanel'));
+const SettingsPanel        = lazy(() => import('../components/SettingsPanel'));
+
+const STAGE_COPY = {
+  discovery: 'Scanning repository files...',
+  hash: 'Checking what changed...',
+  parse: 'Parsing code and dependencies...',
+  graph_persist: 'Building the graph...',
+  issue_detection: 'Finding architectural and security issues...',
+  file_content_persist: 'Saving indexed source...',
+  core_finalize: 'Finalizing core analysis...',
+  sca: 'Scanning dependencies...',
+  embeddings: 'Preparing semantic search...',
+  queued: 'Queueing indexing work...',
+  startup: 'Preparing indexing runtime...',
+};
 
 function getFileBasename(filePath) {
   if (!filePath) return 'Unknown file';
   const normalizedPath = filePath.replace(/\\/g, '/');
   const parts = normalizedPath.split('/');
   return parts[parts.length - 1] || filePath;
-}
-
-function formatDate(ts) {
-  if (!ts) return null;
-  const d = new Date(ts);
-  const diff = Date.now() - d.getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return d.toLocaleDateString();
 }
 
 function buildImpactAnalysis(sourcePath, nodes, edges) {
@@ -96,156 +89,6 @@ function buildImpactAnalysis(sourcePath, nodes, edges) {
   };
 }
 
-// --- Child Panels ---
-
-function SettingsPanel({ repo, session, onRepoUpdated }) {
-  const [autoSync, setAutoSync] = useState(repo?.auto_sync_enabled ?? false);
-  const [isSaving, setIsSaving] = useState(false);
-  const [webhookInfo, setWebhookInfo] = useState(null);
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [copied, setCopied] = useState('');
-
-  const isGitHub = repo?.source === 'github';
-
-  const handleAutoSyncToggle = async () => {
-    const next = !autoSync;
-    setIsSaving(true);
-    try {
-      const res = await fetch(apiUrl(`/api/repos/${repo.id}`), {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({ auto_sync_enabled: next }),
-      });
-      if (!res.ok) throw new Error('Failed to update setting');
-      setAutoSync(next);
-      onRepoUpdated();
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleGenerateWebhook = async () => {
-    setIsGenerating(true);
-    setWebhookInfo(null);
-    try {
-      const res = await fetch(apiUrl(`/api/repos/${repo.id}/webhook`), {
-        headers: { Authorization: `Bearer ${session.access_token}` },
-      });
-      if (!res.ok) throw new Error('Failed to generate webhook');
-      const data = await res.json();
-      setWebhookInfo(data);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setIsGenerating(false);
-    }
-  };
-
-  const handleCopy = async (text, key) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(key);
-      setTimeout(() => setCopied(''), 2000);
-    } catch {
-      /* ignore */
-    }
-  };
-
-  if (!isGitHub) {
-    return (
-      <div className="h-[calc(100vh-12rem)] min-h-[30rem] flex flex-col items-center justify-center rounded-xl border border-dashed border-gray-700 bg-gray-900/30">
-        <p className="text-sm text-gray-500">Webhook auto-sync is only available for GitHub repositories.</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="max-w-2xl space-y-8">
-      {/* Auto-sync toggle */}
-      <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h3 className="text-base font-semibold text-white">Auto-sync on push</h3>
-            <p className="mt-1 text-sm text-gray-400">
-              Automatically re-index this repository whenever a push is made to the default branch via GitHub webhook.
-            </p>
-          </div>
-          <button
-            onClick={handleAutoSyncToggle}
-            disabled={isSaving}
-            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none disabled:opacity-50 ${
-              autoSync ? 'bg-indigo-600' : 'bg-gray-700'
-            }`}
-          >
-            <span
-              className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                autoSync ? 'translate-x-5' : 'translate-x-0'
-              }`}
-            />
-          </button>
-        </div>
-        {autoSync && (
-          <p className="mt-3 text-xs text-indigo-400">
-            Auto-sync is enabled. Make sure a webhook is configured in your GitHub repository settings below.
-          </p>
-        )}
-      </div>
-
-      {/* Webhook URL generation */}
-      <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-6">
-        <h3 className="text-base font-semibold text-white">Webhook configuration</h3>
-        <p className="mt-1 text-sm text-gray-400">
-          Generate a webhook URL and secret to configure in your GitHub repository settings
-          (Settings → Webhooks → Add webhook). Set the content type to{' '}
-          <code className="rounded bg-gray-800 px-1 py-0.5 text-xs text-gray-200">application/json</code>{' '}
-          and select the <strong className="text-gray-300">Push</strong> event only.
-        </p>
-
-        <button
-          onClick={handleGenerateWebhook}
-          disabled={isGenerating}
-          className="mt-4 rounded-md bg-gray-800 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 transition disabled:opacity-50"
-        >
-          {isGenerating ? 'Generating...' : 'Generate webhook URL'}
-        </button>
-
-        {webhookInfo && (
-          <div className="mt-4 space-y-3">
-            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-300">
-              Save the secret now — it will not be shown again. Generating a new one will invalidate the previous secret.
-            </div>
-
-            {[
-              { label: 'Webhook URL', value: webhookInfo.webhookUrl, key: 'url' },
-              { label: 'Secret',      value: webhookInfo.secret,     key: 'secret' },
-            ].map(({ label, value, key }) => (
-              <div key={key}>
-                <p className="mb-1 text-xs uppercase tracking-widest text-gray-500">{label}</p>
-                <div className="flex items-center gap-2">
-                  <code className="flex-1 overflow-auto rounded-md border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-xs text-gray-200 break-all">
-                    {value}
-                  </code>
-                  <button
-                    onClick={() => handleCopy(value, key)}
-                    className="shrink-0 rounded-md border border-gray-700 bg-gray-900 px-3 py-2 text-xs font-medium text-gray-300 hover:bg-gray-800 transition"
-                  >
-                    {copied === key ? 'Copied!' : 'Copy'}
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 export default function RepoView() {
   const { repoId } = useParams();
   const { session } = useAuth();
@@ -255,6 +98,7 @@ export default function RepoView() {
   const activeTab = searchParams.get('tab') || 'graph';
 
   const [repo, setRepo]         = useState(null);
+  const [statusDetails, setStatusDetails] = useState(null);
 
   const [selectedNodeId, setSelectedNodeId] = useState(null);
   const [impactSourcePath, setImpactSourcePath] = useState(null);
@@ -338,27 +182,56 @@ export default function RepoView() {
       if (!currentRepo) throw new Error('Repository not found');
 
       setRepo(currentRepo);
-
-      if (currentRepo.status === 'ready') {
-        fetchAnalysisData(true);
-      }
     } catch (err) {
       setError(err.message);
     } finally {
       setIsLoading(false);
+    }
+  }, [session?.access_token, repoId]);
+
+  const fetchRepoStatus = useCallback(async () => {
+    if (!session?.access_token || !repoId) return;
+    try {
+      const res = await fetch(apiUrl(`/api/repos/${repoId}/status`), {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) throw new Error('Failed to fetch repository status');
+
+      const data = await res.json();
+      setStatusDetails(data);
+      setRepo((prev) => prev ? {
+        ...prev,
+        status: data.status ?? prev.status,
+        file_count: data.file_count ?? prev.file_count,
+        indexed_at: data.indexed_at ?? prev.indexed_at,
+        sast_disabled_rules: data.sast_disabled_rules ?? prev.sast_disabled_rules,
+      } : prev);
+      setError(null);
+    } catch (err) {
+      setError(err.message || 'Failed to fetch repository status');
+    } finally {
       setIsReindexing(false);
     }
-  }, [session?.access_token, repoId, fetchAnalysisData]);
+  }, [repoId, session?.access_token]);
 
   useEffect(() => {
     fetchRepo();
-  }, [fetchRepo]);
+    fetchRepoStatus();
+  }, [fetchRepo, fetchRepoStatus]);
 
   useEffect(() => {
-    if (repo?.status !== 'pending' && repo?.status !== 'indexing') return;
-    const id = setInterval(fetchRepo, 3000);
+    const shouldPoll = repo?.status === 'pending'
+      || repo?.status === 'indexing'
+      || statusDetails?.latest_job?.enrichment_status === 'running';
+    if (!shouldPoll) return;
+    const id = setInterval(fetchRepoStatus, 1000);
     return () => clearInterval(id);
-  }, [repo?.status, fetchRepo]);
+  }, [repo?.status, statusDetails?.latest_job?.enrichment_status, fetchRepoStatus]);
+
+  useEffect(() => {
+    if (!statusDetails?.latest_job?.core_ready && repo?.status !== 'ready') return;
+    fetchAnalysisData(true);
+  }, [statusDetails?.latest_job?.core_ready, repo?.status, fetchAnalysisData]);
 
   useEffect(() => {
     return () => {
@@ -405,6 +278,7 @@ export default function RepoView() {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (!res.ok) throw new Error('Failed to start re-indexing');
+      const data = await res.json();
 
       // Batch all resets + optimistic status change in one render so the UI
       // jumps straight to the "Indexing…" screen without flashing stale data
@@ -412,7 +286,15 @@ export default function RepoView() {
       setAnalysisData({ nodes: [], edges: [], issues: [] });
       setDepsRefreshKey(k => k + 1);
       setImpactSourcePath(null);
-      setRepo(prev => prev ? { ...prev, status: 'pending' } : prev);
+      setRepo(prev => prev ? { ...prev, status: 'pending', file_count: 0, indexed_at: null } : prev);
+      setStatusDetails((prev) => ({
+        ...(prev || {}),
+        status: 'pending',
+        file_count: 0,
+        indexed_at: null,
+        is_working: true,
+        latest_job: data.job || prev?.latest_job || null,
+      }));
     } catch (err) {
       toast.error(err.message);
     } finally {
@@ -449,19 +331,19 @@ export default function RepoView() {
 
   if (isLoading && !repo) {
     return (
-      <div className="flex min-h-screen bg-[#0c0d14] p-8">
+      <div className="flex min-h-screen p-4 sm:p-6 lg:p-8">
         <div className="flex-1 space-y-6">
           {/* Header skeleton */}
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="space-y-2">
-              <div className="h-7 w-48 rounded-lg bg-gray-800 animate-pulse" />
-              <div className="h-4 w-64 rounded bg-gray-800/60 animate-pulse" />
+              <Skeleton className="h-7 w-48" />
+              <Skeleton className="h-4 w-64" />
             </div>
-            <div className="h-9 w-24 rounded-md bg-gray-800 animate-pulse" />
+            <Skeleton className="h-9 w-24" />
           </div>
           {/* Table skeleton */}
           <div className="rounded-xl border border-gray-800 bg-gray-900/30 overflow-hidden">
-            <div className="border-b border-gray-800 bg-gray-800/95 px-6 py-4 flex gap-8">
+            <div className="flex gap-8 overflow-hidden border-b border-gray-800 bg-gray-800/95 px-6 py-4">
               {[120,80,60,100,120,110].map((w,i) => <div key={i} className={`h-3 rounded bg-gray-700 animate-pulse`} style={{width: w}} />)}
             </div>
             {[...Array(8)].map((_,i) => (
@@ -477,180 +359,201 @@ export default function RepoView() {
 
   if (error || !repo) {
     return (
-      <div className="min-h-screen bg-gray-950 p-8">
+      <div className="min-h-screen p-4 sm:p-6 lg:p-8">
         <Link to="/dashboard" className="mb-6 inline-flex items-center text-sm font-medium text-gray-400 hover:text-white transition-colors">
           &larr; Dashboard
         </Link>
-        <div className="rounded-md bg-red-900/50 p-4 border border-red-800 text-red-200 max-w-lg">
-          {error || 'Repository not found'}
-        </div>
+        <Banner tone="danger" className="max-w-lg">{error || 'Repository not found'}</Banner>
       </div>
     );
   }
 
   const isWorking = repo.status === 'pending' || repo.status === 'indexing';
+  const currentStage = statusDetails?.latest_job?.current_stage || null;
+  const stageCopy = STAGE_COPY[currentStage] || 'Indexing repository...';
+  const progressPct = statusDetails?.latest_job?.progress_pct ?? 0;
+  const isEnrichmentRunning = statusDetails?.latest_job?.enrichment_status === 'running';
+  const canShowAnalysis = Boolean(statusDetails?.latest_job?.core_ready) || repo.status === 'ready';
 
   return (
-    <div className="flex flex-col min-h-screen bg-[#0c0d14] text-white">
+    <div className="flex min-h-screen flex-col text-white">
 
       {/* Header Container */}
-      <div className="border-b border-gray-800 bg-gray-900/50 px-8 py-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="flex items-center gap-3">
-              <h1 className="text-2xl font-bold tracking-tight">{repo.name}</h1>
-              <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ${
-                repo.status === 'ready'   ? 'bg-green-500/10 text-green-400 ring-1 ring-inset ring-green-500/20' :
-                repo.status === 'failed'  ? 'bg-red-500/10 text-red-400 ring-1 ring-inset ring-red-500/20' :
-                isWorking                 ? 'bg-blue-500/10 text-blue-400 ring-1 ring-inset ring-blue-500/20 animate-pulse' :
-                'bg-gray-500/10 text-gray-400 ring-1 ring-inset ring-gray-500/20'
-              }`}>
+      <div className="border-b border-surface-800 bg-surface-900/92 px-4 py-4 sm:px-6 lg:px-8 lg:py-5">
+        {/* Breadcrumb */}
+        <div className="flex items-center gap-1.5 text-xs text-gray-600 mb-3">
+          <Link to="/dashboard" className="flex items-center gap-1 hover:text-gray-400 transition-colors">
+            <Home className="h-3 w-3" />
+            Dashboard
+          </Link>
+          <span>/</span>
+          <span className="text-gray-400 font-medium">{repo.name}</span>
+        </div>
+
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div className="min-w-0">
+            <div className="flex min-w-0 flex-wrap items-center gap-3">
+              <h1 className="min-w-0 truncate text-xl font-bold tracking-tight text-white">{repo.name}</h1>
+              <Badge tone={repo.status === 'ready' ? 'success' : repo.status === 'failed' ? 'danger' : isWorking ? 'accent' : 'subtle'}>
                 {repo.status === 'pending' ? 'Indexing' : repo.status.charAt(0).toUpperCase() + repo.status.slice(1)}
-              </span>
+              </Badge>
             </div>
-            <p className="text-sm text-gray-400 mt-1">
+            <p className="text-xs text-gray-500 mt-1">
               {repo.source === 'github' ? 'GitHub' : 'Uploaded ZIP'} · {repo.file_count || 0} files
-              {repo.indexed_at && ` · last indexed ${formatDate(repo.indexed_at)}`}
+              {repo.indexed_at && ` · indexed ${formatDate(repo.indexed_at)}`}
             </p>
           </div>
 
-          <button
+          <Button
             onClick={handleReindex}
             disabled={isWorking || isReindexing}
-            className="rounded-md bg-gray-800 px-4 py-2 text-sm font-medium hover:bg-gray-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            icon={RefreshCw}
+            loading={isReindexing}
           >
             {isReindexing ? 'Starting...' : 'Re-index'}
-          </button>
+          </Button>
         </div>
       </div>
 
       {/* Main Content Area */}
-      <div className="flex-1 p-8 pb-12">
+      <div className="flex-1 p-4 pb-8 sm:p-6 sm:pb-10 lg:p-8 lg:pb-12">
+        {canShowAnalysis && isEnrichmentRunning && (
+          <Banner tone="accent" className="mb-6 flex-col sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-xs uppercase tracking-[0.2em] text-indigo-200/80">Repository Ready</p>
+              <p className="mt-1 text-sm">
+                Repository ready. Final enrichment still running{currentStage === 'sca' || currentStage === 'embeddings' ? `: ${STAGE_COPY[currentStage]}` : '.'}
+              </p>
+            </div>
+            <div className="rounded-full border border-indigo-300/20 px-3 py-1 text-xs font-semibold text-indigo-100">
+              {Math.max(progressPct, 85)}%
+            </div>
+          </Banner>
+        )}
+
         {impactAnalysis && (
-          <div className="mb-6 flex items-center justify-between gap-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-5 py-4 text-amber-100">
+          <Banner tone="warning" className="mb-6 flex-col sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p className="text-xs uppercase tracking-[0.2em] text-amber-300/80">Impact Analysis Active</p>
               <p className="mt-1 text-sm">
                 <span className="font-semibold">{impactAnalysis.sourceName}</span> has {impactAnalysis.direct.length} direct and {impactAnalysis.transitive.length} transitive dependents highlighted.
               </p>
             </div>
-            <button
+            <Button
               onClick={handleClearImpactAnalysis}
-              className="rounded-full border border-amber-300/30 px-4 py-2 text-sm font-medium text-amber-50 transition hover:border-amber-200 hover:bg-amber-400/10"
+              variant="outline"
             >
               Clear analysis
-            </button>
-          </div>
+            </Button>
+          </Banner>
         )}
 
-        {isWorking ? (
-          <div className="flex flex-col items-center justify-center py-32 rounded-xl border border-dashed border-gray-800 bg-gray-900/30">
-            <div className="h-10 w-10 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent mb-4" />
-            <h3 className="text-lg font-medium text-white mb-2">Indexing Repository...</h3>
-            <p className="text-gray-400 text-sm max-w-md text-center">
-              We are currently parsing files, building the dependency graph, and extracting insights. This automatically refreshes every 5 seconds.
-            </p>
-          </div>
+        {isWorking && !canShowAnalysis ? (
+          <EmptyState
+            title={stageCopy}
+            description={`${stageCopy} This refreshes automatically while indexing continues.`}
+            className="py-32"
+            actions={(
+              <div className="h-2 w-full max-w-md overflow-hidden rounded-full bg-surface-800">
+                <div className="h-full rounded-full bg-accent transition-all duration-300" style={{ width: `${Math.max(4, Math.min(progressPct, 100))}%` }} />
+              </div>
+            )}
+          />
         ) : repo.status === 'failed' ? (
-          <div className="flex flex-col items-center justify-center py-32 rounded-xl border border-dashed border-red-900/50 bg-red-950/10">
-            <svg className="h-12 w-12 text-red-500 mb-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-               <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-            </svg>
-            <h3 className="text-lg font-medium text-red-400 mb-2">Indexing Failed</h3>
-            <p className="text-red-300 text-sm max-w-md text-center mb-6">
-              Something went wrong while processing your repository. If you uploaded a zip, ensure it contains valid supported code files.
-            </p>
-            <button
-              onClick={handleReindex}
-              className="rounded-md bg-red-900/80 px-4 py-2 text-sm font-semibold text-white hover:bg-red-800 transition"
-            >
-              Retry Indexing
-            </button>
-          </div>
+          <EmptyState
+            title="Indexing failed"
+            description="Something went wrong while processing this repository. Uploaded archives should contain supported code files."
+            className="py-32 border-red-900/50 bg-red-950/10"
+            actions={<Button variant="danger" onClick={handleReindex}>Retry Indexing</Button>}
+          />
         ) : analysisError ? (
-          <div className="rounded-md bg-red-900/50 p-4 border border-red-800 text-red-200">
-            {analysisError}
-          </div>
-        ) : !hasFetchedData ? (
-          <div className="flex flex-col items-center justify-center py-32 rounded-xl border border-dashed border-gray-800 bg-gray-900/30">
-            <div className="h-8 w-8 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent mb-3" />
-            <p className="text-sm text-gray-400">Loading analysis…</p>
-          </div>
+          <Banner tone="danger">{analysisError}</Banner>
+        ) : !hasFetchedData && canShowAnalysis ? (
+          <EmptyState title="Loading analysis" description="Preparing graph, metrics, issues, and repository context." className="py-32" />
         ) : (
-          <div className="h-full relative">
-            <div className={activeTab === 'graph' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
-              <DependencyGraph
-                nodes={analysisData.nodes}
-                edges={analysisData.edges}
-                issues={analysisData.issues}
-                selectedNodeId={selectedNodeId}
-                impactAnalysis={impactAnalysis}
-                onNodeSelect={handleNodeSelect}
-                onAnalyseImpact={handleStartImpactAnalysis}
-                onClearImpactAnalysis={handleClearImpactAnalysis}
-                onChatWithFile={(filePath) => setChatFilePath(filePath)}
-                repoName={repo?.name}
-              />
+          <Suspense fallback={
+            <div className="flex flex-col items-center justify-center py-32 rounded-xl border border-dashed border-gray-800 bg-gray-900/30">
+              <div className="h-8 w-8 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent mb-3" />
+              <p className="text-sm text-gray-400">Loading module…</p>
             </div>
+          }>
+            <div className="h-full relative">
+              <div className={activeTab === 'graph' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
+                <DependencyGraph
+                  nodes={analysisData.nodes}
+                  edges={analysisData.edges}
+                  issues={analysisData.issues}
+                  selectedNodeId={selectedNodeId}
+                  impactAnalysis={impactAnalysis}
+                  onNodeSelect={handleNodeSelect}
+                  onAnalyseImpact={handleStartImpactAnalysis}
+                  onClearImpactAnalysis={handleClearImpactAnalysis}
+                  onChatWithFile={(filePath) => setChatFilePath(filePath)}
+                  repoName={repo?.name}
+                />
+              </div>
 
-            <div className={activeTab === 'metrics' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
-              <MetricsPanel
-                nodes={analysisData.nodes}
-                selectedNode={selectedNode}
-                onNodeSelect={handleNodeSelect}
-                onAnalyseImpact={handleStartImpactAnalysis}
-              />
-            </div>
+              <div className={activeTab === 'metrics' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
+                <MetricsPanel
+                  nodes={analysisData.nodes}
+                  selectedNode={selectedNode}
+                  onNodeSelect={handleNodeSelect}
+                  onAnalyseImpact={handleStartImpactAnalysis}
+                />
+              </div>
 
-            <div className={activeTab === 'issues' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
-              <IssuesPanel
-                nodes={analysisData.nodes}
-                issues={analysisData.issues}
-                onNodeSelect={(nodeIds) => handleNodeSelect(nodeIds, { openGraph: true })}
-                onOpenDependencies={handleOpenDependencies}
-                onOpenFile={handleOpenFile}
-                repoId={repoId}
-              />
-            </div>
+              <div className={activeTab === 'issues' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
+                <IssuesPanel
+                  nodes={analysisData.nodes}
+                  issues={analysisData.issues}
+                  onNodeSelect={(nodeIds) => handleNodeSelect(nodeIds, { openGraph: true })}
+                  onOpenDependencies={handleOpenDependencies}
+                  onOpenFile={handleOpenFile}
+                  repoId={repoId}
+                />
+              </div>
 
-            <div className={activeTab === 'search' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
-              <SearchPanel repoId={repoId} />
-            </div>
+              <div className={activeTab === 'search' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
+                <SearchPanel repoId={repoId} />
+              </div>
 
-            {/* Review tab — CodeReviewPanel */}
-            <div className={activeTab === 'review' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
-              <CodeReviewPanel repoId={repoId} />
-            </div>
+              {/* Review tab — CodeReviewPanel */}
+              <div className={activeTab === 'review' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
+                <CodeReviewPanel repoId={repoId} />
+              </div>
 
-            {/* Settings tab — webhook / auto-sync */}
-            <div className={activeTab === 'settings' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
-              <SettingsPanel
-                repo={repo}
-                session={session}
-                onRepoUpdated={fetchRepo}
-              />
-            </div>
+              {/* Settings tab — webhook / auto-sync */}
+              <div className={activeTab === 'settings' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
+                <SettingsPanel
+                  repo={repo}
+                  session={session}
+                  onRepoUpdated={fetchRepo}
+                />
+              </div>
 
-            {/* Files tab — repository file browser */}
-            <div className={activeTab === 'files' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
-              <FileBrowser repoId={repoId} nodes={analysisData.nodes} />
-            </div>
+              {/* Files tab — repository file browser */}
+              <div className={activeTab === 'files' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
+                <FileBrowser repoId={repoId} nodes={analysisData.nodes} />
+              </div>
 
-            {/* Dependencies tab — package vulnerability scanning (US-045) */}
-            <div className={activeTab === 'dependencies' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
-              <DependenciesPanel repoId={repoId} refreshKey={depsRefreshKey} />
+              {/* Dependencies tab — package vulnerability scanning (US-045) */}
+              <div className={activeTab === 'dependencies' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
+                <DependenciesPanel repoId={repoId} refreshKey={depsRefreshKey} />
+              </div>
             </div>
-          </div>
+          </Suspense>
         )}
       </div>
 
       {/* File chat panel — slides in from right, scoped to selected file */}
-      <FileChatPanel
-        repoId={repoId}
-        filePath={chatFilePath}
-        open={!!chatFilePath}
-        onClose={() => setChatFilePath(null)}
-      />
+      <Suspense fallback={null}>
+        <FileChatPanel
+          repoId={repoId}
+          filePath={chatFilePath}
+          open={!!chatFilePath}
+          onClose={() => setChatFilePath(null)}
+        />
+      </Suspense>
     </div>
   );
 }

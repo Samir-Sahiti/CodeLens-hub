@@ -1,30 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useGraphSimulation } from '../hooks/useGraphSimulation';
-
-const LANGUAGE_COLORS = {
-  javascript: '#60a5fa',
-  typescript: '#60a5fa',
-  python: '#facc15',
-  c_sharp: '#a78bfa',
-  go: '#06b6d4',
-  java: '#f97316',
-  rust: '#ea580c',
-  ruby: '#ef4444',
-  unknown: '#94a3b8',
-};
-
-function formatLanguage(language) {
-  if (!language) return 'Unknown';
-  if (language === 'javascript') return 'JavaScript';
-  if (language === 'typescript') return 'TypeScript';
-  if (language === 'python') return 'Python';
-  if (language === 'c_sharp') return 'C#';
-  if (language === 'go') return 'Go';
-  if (language === 'java') return 'Java';
-  if (language === 'rust') return 'Rust';
-  if (language === 'ruby') return 'Ruby';
-  return language.charAt(0).toUpperCase() + language.slice(1);
-}
+import { LANGUAGE_COLORS, formatLanguage } from '../lib/constants';
+import { ChevronDown, ChevronUp, Download, Search, X } from './ui/Icons';
 
 function GraphLegend() {
   const items = [
@@ -65,8 +42,8 @@ function GraphToast({ message, visible }) {
 function GraphDetailsPanel({ node, onChatWithFile }) {
   return (
     <aside
-      className={`w-72 shrink-0 rounded-2xl border border-gray-800 bg-gray-900/80 p-5 shadow-2xl shadow-black/20 transition-all duration-300 ${
-        node ? 'translate-x-0 opacity-100' : 'pointer-events-none translate-x-8 opacity-0 -mr-72'
+      className={`w-full shrink-0 rounded-xl border border-surface-800 bg-surface-900/80 p-5 shadow-panel transition-all duration-200 xl:w-72 ${
+        node ? 'block translate-x-0 opacity-100' : 'hidden pointer-events-none translate-x-8 opacity-0 xl:block xl:-mr-72'
       }`}
     >
       {node && (
@@ -165,7 +142,7 @@ function ImpactAnalysisPanel({ impactAnalysis, onClearImpactAnalysis }) {
   };
 
   return (
-    <aside className="w-80 shrink-0 rounded-2xl border border-gray-800 bg-gray-900/80 p-5 shadow-2xl shadow-black/20 transition-all duration-300">
+    <aside className="w-full shrink-0 rounded-xl border border-surface-800 bg-surface-900/80 p-5 shadow-panel transition-all duration-200 xl:w-80">
       <div className="flex h-full flex-col">
         <div className="mb-5">
           <p className="text-xs uppercase tracking-[0.2em] text-amber-400/80">Impact Analysis</p>
@@ -188,7 +165,7 @@ function ImpactAnalysisPanel({ impactAnalysis, onClearImpactAnalysis }) {
             No files depend on this file - changes here are isolated.
           </div>
         ) : (
-          <div className="mt-5 space-y-4 overflow-y-auto pr-1">
+          <div className="mt-5 max-h-[26rem] space-y-4 overflow-y-auto pr-1 xl:max-h-none">
             <section>
               <div className="mb-2 flex items-center justify-between">
                 <h4 className="text-xs uppercase tracking-[0.16em] text-gray-500">Directly Affected Files</h4>
@@ -655,7 +632,7 @@ export default function DependencyGraph({
 
   if (graphNodes.length === 0) {
     return (
-      <div className="flex h-[calc(100vh-12rem)] min-h-[30rem] items-center justify-center rounded-2xl border border-dashed border-gray-800 bg-gray-900/40 text-center">
+      <div className="flex h-auto min-h-[30rem] items-center justify-center rounded-2xl border border-dashed border-gray-800 bg-gray-900/40 px-6 text-center xl:h-[calc(100vh-12rem)]">
         <div>
           <p className="text-base text-gray-300">No graph data yet for this repository.</p>
           <p className="mt-2 text-sm text-gray-500">Re-index the repo once parsing finishes and the dependency map will appear here.</p>
@@ -665,14 +642,12 @@ export default function DependencyGraph({
   }
 
   return (
-    <div className="flex h-[calc(100vh-12rem)] min-h-[30rem] gap-4">
-      <div className="relative flex-1 overflow-hidden rounded-2xl border border-gray-800 bg-[radial-gradient(circle_at_top,_rgba(59,130,246,0.12),_transparent_30%),linear-gradient(180deg,_rgba(2,6,23,0.95),_rgba(15,23,42,0.92))]">
+    <div className="flex h-auto min-h-[30rem] flex-col gap-4 xl:h-[calc(100vh-12rem)] xl:flex-row">
+      <div className="relative min-h-[28rem] flex-1 overflow-hidden rounded-xl border border-surface-800 bg-[radial-gradient(circle_at_top,_rgba(79,140,255,0.10),_transparent_30%),linear-gradient(180deg,_rgba(9,10,15,0.98),_rgba(16,18,24,0.94))]">
         {/* Search bar */}
         {searchBarOpen && (
-          <div className="absolute left-4 top-16 z-20 flex items-center gap-2 rounded-xl border border-gray-600 bg-gray-900/96 px-3 py-2 shadow-2xl shadow-black/60 backdrop-blur-sm">
-            <svg className="h-3.5 w-3.5 shrink-0 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 15.803a7.5 7.5 0 0010.607 10.607z" />
-            </svg>
+          <div className="absolute left-3 right-3 top-24 z-20 flex items-center gap-2 rounded-xl border border-gray-600 bg-gray-900/96 px-3 py-2 shadow-2xl shadow-black/60 backdrop-blur-sm sm:left-4 sm:right-auto sm:top-16">
+            <Search className="h-3.5 w-3.5 shrink-0 text-gray-400" />
             <input
               ref={searchInputRef}
               type="text"
@@ -683,7 +658,7 @@ export default function DependencyGraph({
                 if (e.key === 'Escape') { setSearchQuery(''); setSearchBarOpen(false); setSearchCurrent(0); }
                 if (e.key === 'Enter') setSearchCurrent((c) => (c + 1) % Math.max(1, searchMatchNodes.length));
               }}
-              className="w-52 bg-transparent text-sm text-white outline-none placeholder:text-gray-500"
+              className="min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-gray-500 sm:w-52"
             />
             {searchQuery && (
               <span className={`shrink-0 text-xs font-medium ${searchMatchNodes.length === 0 ? 'text-red-400' : 'text-gray-400'}`}>
@@ -692,17 +667,17 @@ export default function DependencyGraph({
             )}
             {searchMatchNodes.length > 1 && (
               <div className="flex gap-0.5">
-                <button onClick={() => setSearchCurrent((c) => (c - 1 + searchMatchNodes.length) % searchMatchNodes.length)} className="rounded px-1.5 py-0.5 text-gray-400 hover:bg-gray-700 hover:text-white transition text-xs">↑</button>
-                <button onClick={() => setSearchCurrent((c) => (c + 1) % searchMatchNodes.length)} className="rounded px-1.5 py-0.5 text-gray-400 hover:bg-gray-700 hover:text-white transition text-xs">↓</button>
+                <button aria-label="Previous search match" onClick={() => setSearchCurrent((c) => (c - 1 + searchMatchNodes.length) % searchMatchNodes.length)} className="rounded px-1.5 py-0.5 text-gray-400 hover:bg-gray-700 hover:text-white transition text-xs"><ChevronUp className="h-3 w-3" /></button>
+                <button aria-label="Next search match" onClick={() => setSearchCurrent((c) => (c + 1) % searchMatchNodes.length)} className="rounded px-1.5 py-0.5 text-gray-400 hover:bg-gray-700 hover:text-white transition text-xs"><ChevronDown className="h-3 w-3" /></button>
               </div>
             )}
-            <button onClick={() => { setSearchQuery(''); setSearchBarOpen(false); setSearchCurrent(0); }} className="shrink-0 text-gray-500 hover:text-gray-200 transition ml-1 text-sm">✕</button>
+            <button aria-label="Close graph search" onClick={() => { setSearchQuery(''); setSearchBarOpen(false); setSearchCurrent(0); }} className="ml-1 shrink-0 text-gray-500 transition hover:text-gray-200"><X className="h-3.5 w-3.5" /></button>
           </div>
         )}
 
-        <div className="absolute left-4 right-4 top-4 z-10 flex flex-wrap items-center justify-between gap-3">
+        <div className="absolute left-3 right-3 top-3 z-10 flex flex-wrap items-start justify-between gap-2 sm:left-4 sm:right-4 sm:top-4 sm:gap-3">
           <GraphLegend />
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <span className="rounded-full border border-gray-700 bg-gray-950/80 px-3 py-1 text-xs uppercase tracking-[0.18em] text-gray-400">
               {renderMode === 'canvas' ? 'Canvas mode' : 'SVG mode'}
             </span>
@@ -718,7 +693,7 @@ export default function DependencyGraph({
                     : 'border-gray-700 bg-gray-950/80 text-gray-400 hover:border-gray-500'
                 }`}
               >
-                {clusteringEnabled ? '▣ Clustered' : '◻ Flat'}
+                {clusteringEnabled ? 'Clustered' : 'Flat'}
               </button>
             )}
             {shouldCluster && expandedClusters.size > 0 && (
@@ -734,7 +709,7 @@ export default function DependencyGraph({
                 onClick={() => setExportMenuOpen((v) => !v)}
                 className="rounded-full border border-gray-700 bg-gray-950/80 px-3 py-1 text-xs font-medium text-gray-400 transition hover:border-gray-500 hover:text-gray-200"
               >
-                Export image
+                <Download className="mr-1.5 inline h-3.5 w-3.5" /> Export
               </button>
               {exportMenuOpen && (
                 <div
@@ -762,7 +737,7 @@ export default function DependencyGraph({
               title="Search files (Ctrl+F)"
               className={`rounded-full border px-3 py-1 text-xs font-medium transition ${searchBarOpen ? 'border-indigo-500/50 bg-indigo-500/15 text-indigo-300' : 'border-gray-700 bg-gray-950/80 text-gray-400 hover:border-gray-500 hover:text-gray-200'}`}
             >
-              Search
+              <Search className="mr-1.5 inline h-3.5 w-3.5" /> Search
             </button>
             <button
               onClick={resetView}

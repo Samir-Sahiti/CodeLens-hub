@@ -1,10 +1,19 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Link, Outlet, useLocation, useParams, useSearchParams } from 'react-router-dom';
-import { useAuth } from '../context/AuthContext';
-import { useRepo } from '../context/RepoContext';
-import { apiUrl } from '../lib/api';
+import { useAuth }  from '../context/AuthContext';
+import { useRepo }  from '../context/RepoContext';
+import { apiUrl }   from '../lib/api';
 import OnboardingModal from './OnboardingModal';
+import Tooltip from './ui/Tooltip';
+import { Badge, IconButton } from './ui/Primitives';
 
+import {
+  LayoutDashboard, GitGraph, BarChart3, FolderTree,
+  Package, ShieldAlert, Search, Code2, Settings,
+  LogOut, Info, ChevronLeft, ChevronRight, ArrowLeft,
+} from './ui/Icons';
+
+// ── Token usage hook ─────────────────────────────────────────────────────────
 function useTokenUsage(session) {
   const [usage, setUsage] = useState(null);
 
@@ -12,7 +21,9 @@ function useTokenUsage(session) {
     if (!session?.access_token) return;
     let cancelled = false;
     const fetch_ = () =>
-      fetch(apiUrl('/api/usage/today'), { headers: { Authorization: `Bearer ${session.access_token}` } })
+      fetch(apiUrl('/api/usage/today'), {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      })
         .then(r => r.ok ? r.json() : null)
         .then(d => { if (!cancelled && d) setUsage(d); })
         .catch(() => {});
@@ -24,14 +35,46 @@ function useTokenUsage(session) {
   return usage;
 }
 
+// ── Keyboard shortcut hook ───────────────────────────────────────────────────
+function useKeyboardShortcut(key, callback, options = {}) {
+  const { ctrl = true } = options;
+  useEffect(() => {
+    const handler = (e) => {
+      if ((ctrl ? e.ctrlKey || e.metaKey : true) && e.key === key) {
+        e.preventDefault();
+        callback();
+      }
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [key, callback, ctrl]);
+}
+
 export default function Layout() {
   const { user, session, signOut } = useAuth();
-  const { repo, issueCount } = useRepo();
-  const tokenUsage = useTokenUsage(session);
-  const location = useLocation();
-  const { repoId } = useParams();
-  const [searchParams] = useSearchParams();
+  const { repo, issueCount }       = useRepo();
+  const tokenUsage                 = useTokenUsage(session);
+  const location                   = useLocation();
+  const { repoId }                 = useParams();
+  const [searchParams]             = useSearchParams();
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
+
+  // Sidebar collapse — persisted in localStorage
+  const [collapsed, setCollapsed] = useState(() => {
+    try { return localStorage.getItem('cl_sidebar_collapsed') === 'true'; }
+    catch { return false; }
+  });
+
+  const toggleSidebar = useCallback(() => {
+    setCollapsed(v => {
+      const next = !v;
+      try { localStorage.setItem('cl_sidebar_collapsed', String(next)); } catch {}
+      return next;
+    });
+  }, []);
+
+  // Cmd/Ctrl+B toggles sidebar
+  useKeyboardShortcut('b', toggleSidebar);
 
   const activeTab = searchParams.get('tab') || 'graph';
 
@@ -45,142 +88,154 @@ export default function Layout() {
     }
   }, [location.pathname]);
 
-  const handleSignOut = async () => {
-    await signOut();
-  };
-
   const repoNavItems = [
-    { label: 'Graph',        tab: 'graph',        icon: GraphIcon    },
-    { label: 'Metrics',      tab: 'metrics',      icon: MetricsIcon  },
-    { label: 'Files',        tab: 'files',        icon: FilesIcon    },
-    { label: 'Dependencies', tab: 'dependencies', icon: DepsIcon     },
-    { label: 'Issues',       tab: 'issues',       icon: IssuesIcon   },
-    { label: 'Search',       tab: 'search',       icon: SearchIcon   },
-    { label: 'Code Review',  tab: 'review',       icon: ReviewIcon   },
-    { label: 'Settings',     tab: 'settings',     icon: SettingsIcon },
+    { label: 'Graph',        tab: 'graph',        Icon: GitGraph     },
+    { label: 'Metrics',      tab: 'metrics',      Icon: BarChart3    },
+    { label: 'Files',        tab: 'files',        Icon: FolderTree   },
+    { label: 'Dependencies', tab: 'dependencies', Icon: Package      },
+    { label: 'Issues',       tab: 'issues',       Icon: ShieldAlert  },
+    { label: 'Search',       tab: 'search',       Icon: Search       },
+    { label: 'Code Review',  tab: 'review',       Icon: Code2        },
+    { label: 'Settings',     tab: 'settings',     Icon: Settings     },
   ];
 
-  return (
-    <div className="flex min-h-screen bg-[#0c0d14]">
-      {/* ── Sidebar ───────────────────────────────────────────────────── */}
-      {/*
-        Responsive behaviour:
-        - < lg  (< 1024px): icon-only, w-14
-        - >= lg (≥ 1024px): full width, w-64
-      */}
-      <div className="flex w-14 lg:w-64 shrink-0 flex-col border-r border-gray-800/60 bg-[#111218]">
+  const sidebarW = collapsed ? 'w-14' : 'w-14 lg:w-64';
 
-        {/* Brand */}
-        <div className="flex h-16 items-center justify-center lg:justify-start px-0 lg:px-6 border-b border-gray-800">
-          <Link
-            to="/dashboard"
-            className="font-bold tracking-tight text-white hover:text-gray-200 transition-colors"
-          >
-            <span className="hidden lg:inline text-xl">CodeLens</span>
-            <span className="lg:hidden text-sm">CL</span>
-          </Link>
+  return (
+    <div className="flex min-h-screen app-shell-bg text-surface-100">
+
+      {/* ── Sidebar ─────────────────────────────────────────────────────── */}
+      <div
+        className={`flex ${sidebarW} shrink-0 flex-col border-r border-surface-800 bg-surface-900/95 transition-[width] duration-200 ease-in-out overflow-hidden`}
+        style={{ willChange: 'width' }}
+      >
+
+        {/* Brand + collapse toggle */}
+        <div className="flex h-16 items-center justify-between px-3 border-b border-surface-800 shrink-0">
+          {!collapsed && (
+            <Link
+              to="/dashboard"
+              className="hidden items-center gap-2 font-mono text-base font-bold tracking-tight text-white transition-colors hover:text-accent-soft lg:flex"
+            >
+              <span className="flex h-7 w-7 items-center justify-center rounded-lg border border-accent/25 bg-accent/10 text-accent-soft">CL</span>
+              <span>CodeLens</span>
+            </Link>
+          )}
+          {collapsed && (
+            <Link to="/dashboard" className="flex w-full items-center justify-center font-mono text-sm font-bold text-accent-soft">
+              CL
+            </Link>
+          )}
+          <IconButton
+            onClick={toggleSidebar}
+            label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            icon={collapsed ? ChevronRight : ChevronLeft}
+            className={collapsed ? 'mx-auto' : ''}
+          />
         </div>
 
-        <nav className="flex-1 space-y-1 px-1.5 lg:px-3 py-4 overflow-y-auto">
+        {/* Nav */}
+        <nav className="flex-1 space-y-1 overflow-y-auto overflow-x-hidden px-1.5 py-4">
           {repoId ? (
-            /* ── Repo context nav ── */
             <>
-              {/* Back link */}
-              <Link
+              {/* Back to dashboard */}
+              <NavItem
+                collapsed={collapsed}
                 to="/dashboard"
-                title="Repositories"
-                className="flex items-center justify-center lg:justify-start gap-2 rounded-md px-2 lg:px-3 py-2 text-sm font-medium text-gray-400 hover:bg-gray-800 hover:text-white transition-colors mb-2"
-              >
-                <ArrowLeftIcon className="h-4 w-4 shrink-0" />
-                <span className="hidden lg:inline">Repositories</span>
-              </Link>
+                icon={ArrowLeft}
+                label="Repositories"
+                isActive={false}
+                className="mb-2"
+              />
 
-              {/* Repo identity */}
-              <div className="hidden lg:block px-3 py-2 mb-1">
-                <p
-                  className="text-sm font-semibold text-white truncate"
-                  title={repo?.full_name || repo?.name || ''}
-                >
-                  {repo?.name || '…'}
-                </p>
-                {repo?.status && <StatusBadge status={repo.status} />}
-              </div>
+              {/* Repo name */}
+              {!collapsed && (
+                <div className="mb-1 hidden px-3 py-2 lg:block">
+                  <p
+                    className="truncate text-sm font-semibold text-white"
+                    title={repo?.full_name || repo?.name || ''}
+                  >
+                    {repo?.name || '…'}
+                  </p>
+                  {repo?.status && <StatusBadge status={repo.status} />}
+                </div>
+              )}
 
-              <div className="hidden lg:block border-t border-gray-800 my-2" />
+              {!collapsed && <div className="my-2 hidden border-t border-surface-800 lg:block" />}
 
               {/* Tab nav items */}
-              {repoNavItems.map(({ label, tab, icon: Icon }) => {
+              {repoNavItems.map(({ label, tab, Icon }) => {
                 const isActive = activeTab === tab;
                 return (
-                  <Link
+                  <NavItem
                     key={tab}
+                    collapsed={collapsed}
                     to={`/repo/${repoId}?tab=${tab}`}
-                    title={label}
-                    className={`flex items-center justify-center lg:justify-start gap-3 rounded-md px-2 lg:px-3 py-2 text-sm font-medium transition-colors border-l-2 ${
-                      isActive
-                        ? 'bg-indigo-500/10 border-indigo-500 text-white'
-                        : 'text-gray-400 border-transparent hover:bg-gray-800/60 hover:text-white'
-                    }`}
-                  >
-                    <Icon className="h-5 w-5 shrink-0" />
-                    <span className="hidden lg:inline">{label}</span>
-                    {tab === 'issues' && issueCount > 0 && (
-                      <span className="hidden lg:inline ml-auto rounded-full bg-red-500/80 px-1.5 py-0.5 text-xs font-semibold text-white">
-                        {issueCount}
-                      </span>
-                    )}
-                  </Link>
+                    icon={Icon}
+                    label={label}
+                    isActive={isActive}
+                    badge={tab === 'issues' && issueCount > 0 ? issueCount : null}
+                  />
                 );
               })}
             </>
           ) : (
-            /* ── Dashboard nav ── */
-            <Link
+            <NavItem
+              collapsed={collapsed}
               to="/dashboard"
-              title="Dashboard"
-              className={`flex items-center justify-center lg:justify-start gap-3 rounded-md px-2 lg:px-3 py-2 text-sm font-medium transition-colors border-l-2 ${
-                location.pathname.startsWith('/dashboard') || location.pathname === '/'
-                  ? 'bg-indigo-500/10 border-indigo-500 text-white'
-                  : 'text-gray-400 border-transparent hover:bg-gray-800/60 hover:text-white'
-              }`}
-            >
-              <HomeIcon className="h-5 w-5 shrink-0" />
-              <span className="hidden lg:inline">Dashboard</span>
-            </Link>
+              icon={LayoutDashboard}
+              label="Dashboard"
+              isActive={
+                location.pathname.startsWith('/dashboard') ||
+                location.pathname === '/'
+              }
+            />
           )}
         </nav>
 
         {/* ── User / Sign-out footer ── */}
-        <div className="border-t border-gray-800 p-2 lg:p-4">
-          <div className="flex items-center justify-center lg:justify-start gap-3 mb-3">
-            <div className="h-8 w-8 overflow-hidden rounded-full bg-gray-800 shrink-0">
+        <div className="shrink-0 border-t border-surface-800 p-2">
+
+          {/* User avatar + name */}
+          <div className={`flex items-center ${collapsed ? 'justify-center' : 'justify-center lg:justify-start lg:gap-3'} mb-2`}>
+            <div className="h-8 w-8 shrink-0 overflow-hidden rounded-full bg-surface-800 ring-1 ring-surface-700">
               {user?.user_metadata?.avatar_url ? (
-                <img src={user.user_metadata.avatar_url} alt="Avatar" className="h-full w-full object-cover" />
+                <img
+                  src={user.user_metadata.avatar_url}
+                  alt="Avatar"
+                  className="h-full w-full object-cover"
+                />
               ) : (
-                <div className="flex h-full w-full items-center justify-center text-xs font-bold text-gray-400 uppercase">
+                <div className="flex h-full w-full items-center justify-center text-xs font-bold uppercase text-surface-400">
                   {user?.email?.charAt(0) || user?.user_metadata?.user_name?.charAt(0) || '?'}
                 </div>
               )}
             </div>
-            <div className="hidden lg:flex flex-col text-sm">
-              <span className="font-medium text-white truncate max-w-[140px]">
-                {user?.user_metadata?.user_name || user?.email || 'User'}
-              </span>
-            </div>
+            {!collapsed && (
+              <div className="hidden min-w-0 flex-col text-sm lg:flex">
+                <span className="max-w-[140px] truncate font-medium text-white">
+                  {user?.user_metadata?.user_name || user?.email || 'User'}
+                </span>
+              </div>
+            )}
           </div>
 
-          {/* Token usage indicator (US-042) */}
-          {tokenUsage && (
-            <div className="hidden lg:block mb-2 px-2">
-              <div className="flex justify-between text-xs text-gray-500 mb-1">
-                <span>Today</span>
-                <span>{(tokenUsage.used / 1000).toFixed(1)}K / {(tokenUsage.limit / 1000).toFixed(0)}K tokens</span>
+          {/* Token usage bar */}
+          {tokenUsage && !collapsed && (
+            <div className="mb-2 hidden px-1 lg:block">
+              <div className="mb-1 flex justify-between text-xs text-surface-500">
+                <span>Tokens today</span>
+                <span>
+                  {(tokenUsage.used / 1000).toFixed(1)}K /{' '}
+                  {(tokenUsage.limit / 1000).toFixed(0)}K
+                </span>
               </div>
-              <div className="h-1 w-full rounded-full bg-gray-800 overflow-hidden">
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-800">
                 <div
-                  className={`h-full rounded-full transition-all ${
+                  className={`h-full rounded-full transition-all duration-500 ${
                     tokenUsage.used / tokenUsage.limit > 0.9 ? 'bg-red-500' :
-                    tokenUsage.used / tokenUsage.limit > 0.7 ? 'bg-yellow-500' : 'bg-indigo-500'
+                    tokenUsage.used / tokenUsage.limit > 0.7 ? 'bg-yellow-500' :
+                    'bg-accent'
                   }`}
                   style={{ width: `${Math.min(100, (tokenUsage.used / tokenUsage.limit) * 100).toFixed(1)}%` }}
                 />
@@ -188,33 +243,34 @@ export default function Layout() {
             </div>
           )}
 
-          {/* Show introduction again */}
-          <button
+          {/* Show introduction */}
+          <NavItem
+            collapsed={collapsed}
             onClick={() => setIsOnboardingOpen(true)}
-            title="Show introduction again"
-            className="flex w-full items-center justify-center lg:justify-start gap-2 rounded-md px-2 lg:px-3 py-2 text-sm font-medium text-gray-500 hover:bg-gray-800 hover:text-gray-300 transition-colors mb-1"
-          >
-            <InfoIcon className="h-4 w-4 shrink-0" />
-            <span className="hidden lg:inline">Show introduction again</span>
-          </button>
+            icon={Info}
+            label="Introduction"
+            isActive={false}
+            as="button"
+          />
 
-          <button
-            onClick={handleSignOut}
-            title="Sign out"
-            className="flex w-full items-center justify-center lg:justify-start gap-2 rounded-md px-2 lg:px-3 py-2 text-sm font-medium text-gray-400 hover:bg-gray-800 hover:text-white transition-colors"
-          >
-            <SignOutIcon className="h-4 w-4 shrink-0" />
-            <span className="hidden lg:inline">Sign out</span>
-          </button>
+          {/* Sign out */}
+          <NavItem
+            collapsed={collapsed}
+            onClick={signOut}
+            icon={LogOut}
+            label="Sign out"
+            isActive={false}
+            as="button"
+            className="text-gray-500 hover:text-red-400"
+          />
         </div>
       </div>
 
-      {/* ── Main Content Area ── */}
-      <main className="flex-1 overflow-y-auto min-w-0">
+      {/* ── Main Content ──────────────────────────────────────────────────── */}
+      <main className="min-w-0 flex-1 overflow-y-auto">
         <Outlet />
       </main>
 
-      {/* Onboarding Modal */}
       <OnboardingModal
         isOpen={isOnboardingOpen}
         onClose={() => setIsOnboardingOpen(false)}
@@ -223,121 +279,69 @@ export default function Layout() {
   );
 }
 
-// ── Sub-components ────────────────────────────────────────────────────────────
+// ── NavItem ─────────────────────────────────────────────────────────────────
+function NavItem({
+  collapsed,
+  to,
+  onClick,
+  icon: Icon,
+  label,
+  isActive,
+  badge,
+  as = 'link',
+  className = '',
+}) {
+  const baseClass = [
+    'flex items-center gap-3 rounded-lg px-2 py-2 text-sm font-medium',
+    'transition-colors duration-150 w-full border-l-2',
+    isActive
+      ? 'border-accent bg-accent/10 text-white'
+      : 'border-transparent text-surface-400 hover:bg-surface-800/70 hover:text-white',
+    collapsed ? 'justify-center' : 'justify-center lg:justify-start',
+    className,
+  ].join(' ');
 
+  const content = (
+    <>
+      <Icon className="h-4 w-4 shrink-0" />
+      {!collapsed && <span className="hidden truncate lg:inline">{label}</span>}
+      {!collapsed && badge != null && (
+        <span className="hidden rounded-full bg-red-500 px-1.5 py-0.5 text-xs font-bold leading-none text-white lg:ml-auto lg:inline">
+          {badge}
+        </span>
+      )}
+    </>
+  );
+
+  const el = as === 'button'
+    ? <button onClick={onClick} title={collapsed ? label : undefined} className={baseClass}>{content}</button>
+    : <Link to={to} title={collapsed ? label : undefined} className={baseClass}>{content}</Link>;
+
+  if (collapsed) {
+    return (
+      <Tooltip content={label} position="right">
+        {el}
+      </Tooltip>
+    );
+  }
+  return el;
+}
+
+// ── StatusBadge ──────────────────────────────────────────────────────────────
 function StatusBadge({ status }) {
   const styles = {
-    ready:    'bg-green-500/10 text-green-400 ring-1 ring-inset ring-green-500/20',
-    failed:   'bg-red-500/10 text-red-400 ring-1 ring-inset ring-red-500/20',
-    indexing: 'bg-blue-500/10 text-blue-400 ring-1 ring-inset ring-blue-500/20 animate-pulse',
-    pending:  'bg-gray-500/10 text-gray-400 ring-1 ring-inset ring-gray-500/20 animate-pulse',
+    ready:    'success',
+    failed:   'danger',
+    indexing: 'accent',
+    pending:  'subtle',
   };
   const label =
     status === 'pending'
       ? 'Indexing'
       : status.charAt(0).toUpperCase() + status.slice(1);
   return (
-    <span className={`mt-1 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ${styles[status] || styles.pending}`}>
+    <Badge tone={styles[status] || styles.pending} className="mt-1">
       {label}
-    </span>
-  );
-}
-
-// ── Icons ─────────────────────────────────────────────────────────────────────
-
-function HomeIcon(props) {
-  return (
-    <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12l8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25" />
-    </svg>
-  );
-}
-
-function ArrowLeftIcon(props) {
-  return (
-    <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
-    </svg>
-  );
-}
-
-function GraphIcon(props) {
-  return (
-    <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 14.25v2.25m3-4.5v4.5m3-6.75v6.75m3-9v9M6 20.25h12A2.25 2.25 0 0020.25 18V6A2.25 2.25 0 0018 3.75H6A2.25 2.25 0 003.75 6v12A2.25 2.25 0 006 20.25z" />
-    </svg>
-  );
-}
-
-function MetricsIcon(props) {
-  return (
-    <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
-    </svg>
-  );
-}
-
-function IssuesIcon(props) {
-  return (
-    <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
-    </svg>
-  );
-}
-
-function SearchIcon(props) {
-  return (
-    <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 15.803a7.5 7.5 0 0010.607 10.607z" />
-    </svg>
-  );
-}
-
-function ReviewIcon(props) {
-  return (
-    <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" />
-    </svg>
-  );
-}
-
-function SignOutIcon(props) {
-  return (
-    <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75" />
-    </svg>
-  );
-}
-
-function InfoIcon(props) {
-  return (
-    <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" />
-    </svg>
-  );
-}
-
-function FilesIcon(props) {
-  return (
-    <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
-    </svg>
-  );
-}
-
-function SettingsIcon(props) {
-  return (
-    <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 010 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 010-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28z" />
-      <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-    </svg>
-  );
-}
-
-function DepsIcon(props) {
-  return (
-    <svg fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
-    </svg>
+    </Badge>
   );
 }

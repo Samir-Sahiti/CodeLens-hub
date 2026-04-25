@@ -1,17 +1,24 @@
 import { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { apiUrl } from '../lib/api';
+import Modal from './ui/Modal';
+import { AlertCircle, GitBranch, Users } from './ui/Icons';
+import { Banner, Button, Input } from './ui/Primitives';
 
 export default function CreateTeamModal({ isOpen, onClose, onCreated }) {
   const { session } = useAuth();
-  const [teamName, setTeamName]   = useState('');
+  const [teamName,     setTeamName]     = useState('');
   const [repoFullName, setRepoFullName] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [error, setError] = useState(null);
+  const [error,        setError]        = useState(null);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!teamName.trim() || !repoFullName.trim()) return;
+    if (!/^[^/\s]+\/[^/\s]+$/.test(repoFullName.trim())) {
+      setError('Use the GitHub full name format: owner/repository.');
+      return;
+    }
 
     setIsSubmitting(true);
     setError(null);
@@ -24,7 +31,7 @@ export default function CreateTeamModal({ isOpen, onClose, onCreated }) {
           Authorization: `Bearer ${session.access_token}`,
         },
         body: JSON.stringify({
-          name:        teamName.trim(),
+          name:         teamName.trim(),
           repoFullName: repoFullName.trim(),
         }),
       });
@@ -54,78 +61,73 @@ export default function CreateTeamModal({ isOpen, onClose, onCreated }) {
     onClose();
   };
 
-  if (!isOpen) return null;
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
-      <div
-        className="w-full max-w-md rounded-2xl border border-gray-800 bg-gray-950 p-8 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="mb-6">
-          <h2 className="text-xl font-bold text-white">Create a Team</h2>
-          <p className="mt-1 text-sm text-gray-400">
-            Sync your GitHub repository collaborators into a team. They will automatically see the shared repository when they sign in to CodeLens.
-          </p>
+    <Modal isOpen={isOpen} onClose={handleClose} title="Create Team" maxWidth="max-w-md">
+      <div className="space-y-5 p-5 sm:p-6">
+        <div className="rounded-xl border border-surface-800 bg-surface-900/55 p-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-accent/20 bg-accent/10">
+              <Users className="h-4 w-4 text-accent-soft" />
+            </div>
+            <p className="text-sm leading-relaxed text-surface-400">
+              Sync GitHub collaborators into a shared CodeLens team for one connected repository.
+            </p>
+          </div>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="mb-1.5 block text-sm font-medium text-gray-300">
-              Team name
-            </label>
-            <input
-              type="text"
-              value={teamName}
-              onChange={(e) => setTeamName(e.target.value)}
-              placeholder="e.g. Backend squad"
-              required
-              className="w-full rounded-lg border border-gray-700 bg-gray-900 px-4 py-2.5 text-sm text-white placeholder:text-gray-600 focus:border-indigo-500 focus:outline-none transition"
-            />
-          </div>
+          <Input
+            icon={Users}
+            label="Team name"
+            value={teamName}
+            onChange={e => setTeamName(e.target.value)}
+            placeholder="Backend squad"
+            required
+            disabled={isSubmitting}
+          />
 
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-gray-300">
-              GitHub repository
-            </label>
-            <input
-              type="text"
+            <Input
+              icon={GitBranch}
+              label="GitHub repository"
               value={repoFullName}
-              onChange={(e) => setRepoFullName(e.target.value)}
+              onChange={e => setRepoFullName(e.target.value)}
               placeholder="owner/repository"
               required
-              className="w-full rounded-lg border border-gray-700 bg-gray-900 px-4 py-2.5 text-sm text-white placeholder:text-gray-600 focus:border-indigo-500 focus:outline-none transition"
+              disabled={isSubmitting}
             />
             <p className="mt-1 text-xs text-gray-500">
-              Must be a repository you have already connected to CodeLens. Collaborators will be fetched from GitHub.
+              Must be a repository you have already connected to CodeLens.
             </p>
           </div>
 
           {error && (
-            <div className="rounded-lg border border-red-800 bg-red-900/40 px-4 py-3 text-sm text-red-300">
+            <Banner tone="danger" icon={AlertCircle}>
               {error}
-            </div>
+            </Banner>
           )}
 
-          <div className="flex gap-3 pt-2">
-            <button
+          <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-end">
+            <Button
               type="button"
               onClick={handleClose}
               disabled={isSubmitting}
-              className="flex-1 rounded-lg border border-gray-700 bg-gray-900 px-4 py-2.5 text-sm font-medium text-gray-300 hover:bg-gray-800 transition disabled:opacity-50"
+              variant="secondary"
+              className="w-full sm:w-auto"
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
               type="submit"
               disabled={isSubmitting || !teamName.trim() || !repoFullName.trim()}
-              className="flex-1 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-500 transition disabled:opacity-50 disabled:cursor-not-allowed"
+              loading={isSubmitting}
+              className="w-full sm:w-auto"
             >
               {isSubmitting ? 'Creating...' : 'Create team'}
-            </button>
+            </Button>
           </div>
         </form>
       </div>
-    </div>
+    </Modal>
   );
 }

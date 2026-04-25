@@ -1,31 +1,45 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import * as d3 from 'd3';
 import VirtualTable from './VirtualTable';
+import { LANGUAGE_COLORS, formatLanguage } from '../lib/constants';
+import { ArrowDown, ArrowUp, Search, X } from './ui/Icons';
 
-const LANGUAGE_COLORS = {
-  javascript: '#60a5fa',
-  typescript: '#60a5fa',
-  python: '#facc15',
-  c_sharp: '#a78bfa',
-  go: '#06b6d4',
-  java: '#f97316',
-  rust: '#ea580c',
-  ruby: '#ef4444',
-  unknown: '#94a3b8',
-};
+// ── Sub-component: language distribution with optional "show all" ─────────────
+function LangDistributionCard({ langCounts }) {
+  const [showAll, setShowAll] = useState(false);
+  const visible = showAll ? langCounts : langCounts.slice(0, 5);
+  const hasMore = langCounts.length > 5;
 
-function formatLanguage(str) {
-  if (!str) return 'Unknown';
-  if (str === 'javascript') return 'JavaScript';
-  if (str === 'typescript') return 'TypeScript';
-  if (str === 'python') return 'Python';
-  if (str === 'c_sharp') return 'C#';
-  if (str === 'go') return 'Go';
-  if (str === 'java') return 'Java';
-  if (str === 'rust') return 'Rust';
-  if (str === 'ruby') return 'Ruby';
-  return str.charAt(0).toUpperCase() + str.slice(1);
+  return (
+    <div className="flex min-w-0 flex-col justify-center rounded-xl border border-gray-800 bg-gray-900/60 px-5 py-3" style={{ borderTopColor: '#6366f1', borderTopWidth: 2 }}>
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-[10px] uppercase tracking-[0.2em] text-gray-500">Languages</p>
+        {hasMore && (
+          <button onClick={() => setShowAll(v => !v)} className="text-[10px] text-indigo-400 hover:text-indigo-300 transition">
+            {showAll ? 'Show less' : `+${langCounts.length - 5} more`}
+          </button>
+        )}
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {visible.map(([lang, count]) => (
+          <span
+            key={lang}
+            className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium text-gray-300"
+            style={{
+              backgroundColor: (LANGUAGE_COLORS[lang] || LANGUAGE_COLORS.unknown) + '25',
+              border: `1px solid ${(LANGUAGE_COLORS[lang] || LANGUAGE_COLORS.unknown)}50`,
+            }}
+          >
+            <span className="h-1.5 w-1.5 rounded-full shrink-0" style={{ backgroundColor: LANGUAGE_COLORS[lang] || LANGUAGE_COLORS.unknown }} />
+            {formatLanguage(lang)}
+            <span className="text-gray-500">{count}</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
 }
+
 
 export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact }) {
   const [searchQuery, setSearchQuery] = useState('');
@@ -212,20 +226,21 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
     });
   };
 
-  const SortIcon = ({ columnKey }) => {
-    if (sortConfig.key !== columnKey) return <span className="ml-2 text-gray-600 font-mono">↕</span>;
-    return <span className="ml-2 text-indigo-400 font-mono">{sortConfig.direction === 'asc' ? '↑' : '↓'}</span>;
+  const renderSortIcon = (columnKey) => {
+    if (sortConfig.key !== columnKey) return <span className="ml-2 inline-block h-3 w-3 rounded-full border border-gray-700/80 align-middle" />;
+    const Icon = sortConfig.direction === 'asc' ? ArrowUp : ArrowDown;
+    return <Icon className="ml-2 inline h-3.5 w-3.5 align-middle text-indigo-300" />;
   };
 
   return (
     <div
-      className="flex flex-col h-[calc(100vh-12rem)] min-h-[30rem] gap-3"
+      className="flex h-auto min-h-[30rem] flex-col gap-3 xl:h-[calc(100vh-12rem)]"
       style={{ background: 'radial-gradient(ellipse at top, rgba(99,102,241,0.06), transparent 60%)' }}
     >
       {/* ── Summary cards row ── */}
-      <div className="flex gap-3 shrink-0">
+      <div className="grid shrink-0 grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
         {/* Health score ring */}
-        <div className="flex items-center gap-4 rounded-xl border border-gray-800 bg-gray-900/60 px-5 py-3">
+        <div className="flex min-w-0 items-center gap-4 rounded-xl border border-gray-800 bg-gray-900/60 px-5 py-3">
           <svg ref={ringRef} width="72" height="72" />
           <div>
             <p className="text-[10px] uppercase tracking-[0.2em] text-gray-500 mb-0.5">Health Score</p>
@@ -239,44 +254,29 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
         </div>
 
         {/* Total LOC */}
-        <div className="flex flex-col justify-center rounded-xl border border-gray-800 bg-gray-900/60 px-5 py-3 flex-1" style={{ borderTopColor: '#6366f1', borderTopWidth: 2 }}>
+        <div className="flex min-w-0 flex-col justify-center rounded-xl border border-gray-800 bg-gray-900/60 px-5 py-3" style={{ borderTopColor: '#6366f1', borderTopWidth: 2 }}>
           <p className="text-[10px] uppercase tracking-[0.2em] text-gray-500 mb-1">Total Lines</p>
           <p className="text-xl font-bold text-white">{totalLines.toLocaleString()}</p>
           <p className="text-xs text-gray-500 mt-0.5">{nodes.length} files</p>
         </div>
 
         {/* Avg complexity */}
-        <div className="flex flex-col justify-center rounded-xl border border-gray-800 bg-gray-900/60 px-5 py-3 flex-1" style={{ borderTopColor: avgComplexity > p90Complexity ? '#ef4444' : avgComplexity > p90Complexity * 0.6 ? '#f59e0b' : '#22c55e', borderTopWidth: 2 }}>
+        <div className="flex min-w-0 flex-col justify-center rounded-xl border border-gray-800 bg-gray-900/60 px-5 py-3" style={{ borderTopColor: avgComplexity > p90Complexity ? '#ef4444' : avgComplexity > p90Complexity * 0.6 ? '#f59e0b' : '#22c55e', borderTopWidth: 2 }}>
           <p className="text-[10px] uppercase tracking-[0.2em] text-gray-500 mb-1">Avg Complexity</p>
           <p className="text-xl font-bold text-white">{avgComplexity.toFixed(1)}</p>
           <p className="text-xs text-gray-500 mt-0.5">p90 threshold: {p90Complexity.toFixed(0)}</p>
         </div>
 
-        {/* Language distribution */}
-        <div className="flex flex-col justify-center rounded-xl border border-gray-800 bg-gray-900/60 px-5 py-3 flex-1" style={{ borderTopColor: '#6366f1', borderTopWidth: 2 }}>
-          <p className="text-[10px] uppercase tracking-[0.2em] text-gray-500 mb-2">Languages</p>
-          <div className="flex flex-wrap gap-1.5">
-            {langCounts.slice(0, 5).map(([lang, count]) => (
-              <span
-                key={lang}
-                className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium text-gray-300"
-                style={{ backgroundColor: (LANGUAGE_COLORS[lang] || LANGUAGE_COLORS.unknown) + '25', border: `1px solid ${(LANGUAGE_COLORS[lang] || LANGUAGE_COLORS.unknown)}50` }}
-              >
-                <span className="h-1.5 w-1.5 rounded-full shrink-0" style={{ backgroundColor: LANGUAGE_COLORS[lang] || LANGUAGE_COLORS.unknown }} />
-                {formatLanguage(lang)}
-                <span className="text-gray-500">{count}</span>
-              </span>
-            ))}
-          </div>
-        </div>
+        {/* Language distribution — with showAll toggle */}
+        <LangDistributionCard langCounts={langCounts} />
       </div>
 
       {/* ── Table + sidebar ── */}
-      <div className="flex flex-1 gap-4 min-h-0">
+      <div className="flex min-h-0 flex-1 flex-col gap-4 xl:flex-row">
         <div className="flex flex-1 flex-col overflow-hidden rounded-xl border border-gray-800 bg-gray-900/30 min-h-0">
           {/* Table toolbar */}
-          <div className="flex items-center justify-between border-b border-gray-800 bg-gray-900/80 px-4 py-3 shrink-0 gap-3">
-            <div className="flex items-center gap-2">
+          <div className="flex shrink-0 flex-col gap-3 border-b border-gray-800 bg-gray-900/80 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 onClick={() => { setShowHistogram((v) => !v); if (showHistogram) setComplexityFilter(null); }}
                 className={`rounded-md border px-3 py-1.5 text-xs font-medium transition ${showHistogram ? 'border-indigo-500/40 bg-indigo-500/15 text-indigo-300' : 'border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200'}`}
@@ -288,17 +288,21 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
                   onClick={() => setComplexityFilter(null)}
                   className="flex items-center gap-1 rounded-md border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-1.5 text-xs text-indigo-300 hover:bg-indigo-500/20 transition"
                 >
-                  Complexity {complexityFilter.x0.toFixed(0)}–{complexityFilter.x1.toFixed(0)} ✕
+                  Complexity {complexityFilter.x0.toFixed(0)}–{complexityFilter.x1.toFixed(0)}
+                  <X className="h-3 w-3" />
                 </button>
               )}
             </div>
-            <input
-              type="text"
-              placeholder="Search by file path…"
-              className="bg-gray-950 border border-gray-700 text-sm text-white rounded-md px-3 py-1.5 focus:outline-none focus:border-indigo-500 w-64 transition-colors placeholder:text-gray-600"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-            />
+            <label className="flex w-full items-center gap-2 rounded-md border border-gray-700 bg-gray-950 px-3 py-1.5 text-sm text-white transition-colors focus-within:border-indigo-500 sm:w-72">
+              <Search className="h-4 w-4 shrink-0 text-gray-500" />
+              <input
+                type="text"
+                placeholder="Search by file path…"
+                className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-gray-600"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+            </label>
           </div>
 
           {/* Histogram */}
@@ -333,28 +337,28 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
               renderHeader={() => (
                 <thead className="bg-gray-800/95 backdrop-blur text-gray-300 z-10 shadow-sm border-b border-gray-700">
                   <tr>
-                    <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none" onClick={() => handleSort('file_path')}>
-                      File Path <SortIcon columnKey="file_path" />
+                    <th onClick={() => handleSort('file_path')}>
+                      File Path {renderSortIcon('file_path')}
                     </th>
-                    <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none" onClick={() => handleSort('language')}>
-                      Language <SortIcon columnKey="language" />
+                    <th onClick={() => handleSort('language')}>
+                      Language {renderSortIcon('language')}
                     </th>
-                    <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none text-center" onClick={() => handleSort('line_count')}>
-                      Lines <SortIcon columnKey="line_count" />
+                    <th onClick={() => handleSort('line_count')}>
+                      Lines {renderSortIcon('line_count')}
                     </th>
-                    <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none text-center" onClick={() => handleSort('outgoing_count')}>
-                      Imports <SortIcon columnKey="outgoing_count" />
+                    <th onClick={() => handleSort('outgoing_count')}>
+                      Imports {renderSortIcon('outgoing_count')}
                     </th>
-                    <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none text-center" onClick={() => handleSort('incoming_count')}>
-                      Dependents <SortIcon columnKey="incoming_count" />
+                    <th onClick={() => handleSort('incoming_count')}>
+                      Dependents {renderSortIcon('incoming_count')}
                     </th>
-                    <th className="px-6 py-4 font-semibold cursor-pointer hover:text-white transition-colors select-none text-center" onClick={() => handleSort('complexity_score')}>
-                      Complexity <SortIcon columnKey="complexity_score" />
+                    <th onClick={() => handleSort('complexity_score')}>
+                      Complexity {renderSortIcon('complexity_score')}
                     </th>
                   </tr>
                 </thead>
               )}
-              renderRow={(node) => {
+              renderRow={(node, index, isFocused) => {
                 const isHighComplex = node.complexity_score > p90Complexity;
                 const isHighIncoming = node.incoming_count > p90Incoming;
                 const isSelected = selectedNode && (selectedNode.id || selectedNode.file_path) === (node.id || node.file_path);
@@ -374,15 +378,22 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
                 }
 
                 if (isSelected) rowClass = `${rowClass} ring-1 ring-inset ring-sky-400/70 bg-sky-500/10`;
+                if (isFocused) rowClass = `${rowClass} outline outline-1 outline-offset-[-1px] outline-accent/70`;
 
                 const complexityRatio = (node.complexity_score || 0) / maxComplexity;
                 const complexityBarColor = complexityRatio > 0.7 ? '#ef4444' : complexityRatio > 0.4 ? '#f59e0b' : '#22c55e';
 
                 return (
-                  <tr key={node.id || node.file_path} onClick={() => onNodeSelect(node.id || node.file_path, { openGraph: true })} className={rowClass} style={{ height: 44 }}>
+                  <tr
+                    key={node.id || node.file_path}
+                    aria-rowindex={index + 1}
+                    onClick={() => onNodeSelect(node.id || node.file_path)}
+                    className={rowClass}
+                    style={{ height: 44 }}
+                  >
                     <td className={`px-6 py-3 font-mono text-xs ${textFade} max-w-0`}>
-                    <span className="block truncate" title={node.file_path}>{node.file_path}</span>
-                  </td>
+                      <span className="block truncate" title={node.file_path}>{node.file_path}</span>
+                    </td>
                     <td className={`px-6 py-3 ${metaFade}`}>{formatLanguage(node.language)}</td>
                     <td className="px-6 py-3 relative text-center">
                       <span className={metaFade}>{node.line_count}</span>
@@ -414,8 +425,8 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
 
         {/* Details sidebar */}
         <aside
-          className={`w-72 shrink-0 rounded-2xl border border-gray-800 bg-gray-900/80 p-5 shadow-2xl shadow-black/20 transition-all duration-300 ${
-            selectedNode ? 'translate-x-0 opacity-100' : 'pointer-events-none translate-x-8 opacity-0 -mr-72'
+          className={`w-full shrink-0 rounded-2xl border border-gray-800 bg-gray-900/80 p-5 shadow-2xl shadow-black/20 transition-all duration-300 xl:w-72 ${
+            selectedNode ? 'block translate-x-0 opacity-100' : 'hidden pointer-events-none translate-x-8 opacity-0 xl:block xl:-mr-72'
           }`}
         >
           {selectedNode && (

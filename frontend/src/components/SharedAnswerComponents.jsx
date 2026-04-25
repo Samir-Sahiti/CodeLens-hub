@@ -1,47 +1,37 @@
 /**
  * SharedAnswerComponents.jsx
  *
- * Shared UI components extracted from SearchPanel.jsx for reuse
- * in CodeReviewPanel.jsx and any future panels that render streamed
- * Claude responses and source references.
+ * Shared UI components for rendering AI-streamed responses and source references.
+ * Used by SearchPanel, CodeReviewPanel, FileChatPanel.
  *
  * Exports:
- *   - CopyIcon
- *   - ChevronDownIcon
- *   - ChevronUpIcon
+ *   - CopyIcon, ChevronDownIcon, ChevronUpIcon  (legacy — still used in other panels)
  *   - getLanguageClass
- *   - AnswerBlock
+ *   - AnswerBlock  (uses react-markdown + remark-gfm + syntax highlighting)
  *   - SourceCard
  */
 
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm     from 'remark-gfm';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { vscDarkPlus }                from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { Copy, Check, ChevronDown, ChevronUp } from './ui/Icons';
 
 // ---------------------------------------------------------------------------
-// Icon helpers
+// Legacy icon helpers (kept for backward-compatibility)
 // ---------------------------------------------------------------------------
 
 export function CopyIcon({ className = 'h-4 w-4' }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" />
-    </svg>
-  );
+  return <Copy className={className} />;
 }
 
 export function ChevronDownIcon({ className = 'h-4 w-4' }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
-    </svg>
-  );
+  return <ChevronDown className={className} />;
 }
 
 export function ChevronUpIcon({ className = 'h-4 w-4' }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 15.75l7.5-7.5 7.5 7.5" />
-    </svg>
-  );
+  return <ChevronUp className={className} />;
 }
 
 // ---------------------------------------------------------------------------
@@ -49,88 +39,169 @@ export function ChevronUpIcon({ className = 'h-4 w-4' }) {
 // ---------------------------------------------------------------------------
 
 export function getLanguageClass(filePath) {
-  if (!filePath) return 'language-text';
+  if (!filePath) return 'text';
   const ext = filePath.split('.').pop()?.toLowerCase();
   const map = {
-    js:   'language-javascript', jsx: 'language-javascript',
-    ts:   'language-typescript', tsx: 'language-typescript',
-    py:   'language-python',
-    cs:   'language-csharp',
-    json: 'language-json',
-    md:   'language-markdown',
-    css:  'language-css',
-    html: 'language-html',
+    js:   'javascript', jsx: 'javascript',
+    ts:   'typescript', tsx: 'typescript',
+    py:   'python',
+    cs:   'csharp',
+    go:   'go',
+    java: 'java',
+    rs:   'rust',
+    rb:   'ruby',
+    json: 'json',
+    md:   'markdown',
+    css:  'css',
+    html: 'html',
+    sh:   'bash',
+    yaml: 'yaml',
+    yml:  'yaml',
   };
-  return map[ext] || 'language-text';
+  return map[ext] || 'text';
 }
 
 // ---------------------------------------------------------------------------
-// AnswerBlock — renders markdown-ish answer with fenced code block support
+// CodeBlock — syntax-highlighted code block with copy button
 // ---------------------------------------------------------------------------
 
-export function AnswerBlock({ text, isStreaming }) {
-  const segments = [];
-  const fenceRe  = /```(\w*)\n?([\s\S]*?)```/g;
-  let lastIndex  = 0;
-  let match;
+function CodeBlock({ children, className, ...props }) {
+  const [copied, setCopied] = useState(false);
+  const lang    = /language-(\w+)/.exec(className || '')?.[1] ?? 'text';
+  const code    = String(children).replace(/\n$/, '');
 
-  while ((match = fenceRe.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      segments.push({ type: 'prose', content: text.slice(lastIndex, match.index) });
-    }
-    segments.push({ type: 'code', lang: match[1] || 'text', content: match[2] });
-    lastIndex = match.index + match[0].length;
-  }
-
-  if (lastIndex < text.length) {
-    segments.push({ type: 'prose', content: text.slice(lastIndex) });
-  }
-
-  if (segments.length === 0) return null;
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {}
+  }, [code]);
 
   return (
-    <div className="prose prose-invert prose-sm max-w-none">
-      {segments.map((seg, i) => {
-        if (seg.type === 'code') {
-          return (
-            <div key={i} className="relative my-4 rounded-lg overflow-hidden border border-gray-700">
-              {seg.lang && (
-                <div className="flex items-center justify-between bg-gray-800 px-4 py-1.5 text-xs font-medium text-gray-400 border-b border-gray-700">
-                  <span>{seg.lang}</span>
-                </div>
-              )}
-              <pre className="overflow-x-auto bg-gray-950 p-4 text-sm leading-relaxed">
-                <code className={`${getLanguageClass('.' + seg.lang)} text-gray-200 font-mono`}>
-                  {seg.content}
-                </code>
-              </pre>
-            </div>
-          );
-        }
-        return (
-          <div key={i} className="text-gray-300 leading-relaxed space-y-2">
-            {seg.content.split('\n').map((line, j) => {
-              if (!line.trim()) return <br key={j} />;
-              const parts = line.split(/(\*\*[^*]+\*\*|`[^`]+`)/);
-              return (
-                <p key={j} className="m-0">
-                  {parts.map((part, k) => {
-                    if (part.startsWith('**') && part.endsWith('**')) {
-                      return <strong key={k} className="font-semibold text-gray-100">{part.slice(2, -2)}</strong>;
-                    }
-                    if (part.startsWith('`') && part.endsWith('`')) {
-                      return <code key={k} className="bg-gray-800 text-indigo-300 rounded px-1.5 py-0.5 font-mono text-xs">{part.slice(1, -1)}</code>;
-                    }
-                    return part;
-                  })}
-                </p>
-              );
-            })}
-          </div>
-        );
-      })}
+    <div className="group relative my-4 overflow-hidden rounded-lg border border-surface-700 bg-surface-950">
+      {/* Header bar */}
+      <div className="flex items-center justify-between border-b border-surface-800 bg-surface-900 px-4 py-1.5">
+        <span className="font-mono text-xs text-surface-400">{lang}</span>
+        <button
+          onClick={handleCopy}
+          className="flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs text-surface-400 transition hover:bg-surface-800 hover:text-white"
+          title="Copy code"
+        >
+          {copied
+            ? <><Check className="h-3 w-3 text-emerald-400" /> Copied!</>
+            : <><Copy className="h-3 w-3" /> Copy</>
+          }
+        </button>
+      </div>
+      <SyntaxHighlighter
+        language={lang}
+        style={vscDarkPlus}
+        customStyle={{
+          margin: 0,
+          padding: '1rem',
+          background: 'rgba(9,10,15,0.96)',
+          fontSize: '0.75rem',
+          lineHeight: '1.6',
+        }}
+        PreTag="div"
+        {...props}
+      >
+        {code}
+      </SyntaxHighlighter>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// AnswerBlock — renders full markdown with GFM, code highlighting, streaming cursor
+// ---------------------------------------------------------------------------
+
+const mdComponents = {
+  code({ node, inline, className, children, ...props }) {
+    if (inline) {
+      return (
+        <code
+          className="rounded bg-surface-800 px-1.5 py-0.5 font-mono text-[0.8em] text-accent-soft"
+          {...props}
+        >
+          {children}
+        </code>
+      );
+    }
+    return (
+      <CodeBlock className={className} {...props}>
+        {children}
+      </CodeBlock>
+    );
+  },
+  a({ href, children }) {
+    return (
+      <a
+        href={href}
+        target="_blank"
+        rel="noreferrer"
+        className="text-accent-soft underline underline-offset-2 transition-colors hover:text-blue-200"
+      >
+        {children}
+      </a>
+    );
+  },
+  blockquote({ children }) {
+    return (
+      <blockquote className="my-3 border-l-2 border-accent/50 pl-4 italic text-surface-400">
+        {children}
+      </blockquote>
+    );
+  },
+  ul({ children }) {
+    return <ul className="list-disc list-inside space-y-1 my-2 text-gray-300">{children}</ul>;
+  },
+  ol({ children }) {
+    return <ol className="list-decimal list-inside space-y-1 my-2 text-gray-300">{children}</ol>;
+  },
+  h1({ children }) {
+    return <h1 className="text-lg font-bold text-white mt-4 mb-2">{children}</h1>;
+  },
+  h2({ children }) {
+    return <h2 className="text-base font-semibold text-gray-100 mt-4 mb-2">{children}</h2>;
+  },
+  h3({ children }) {
+    return <h3 className="text-sm font-semibold text-gray-200 mt-3 mb-1">{children}</h3>;
+  },
+  p({ children }) {
+    return <p className="text-gray-300 leading-relaxed mb-2">{children}</p>;
+  },
+  strong({ children }) {
+    return <strong className="font-semibold text-gray-100">{children}</strong>;
+  },
+  table({ children }) {
+    return (
+      <div className="overflow-x-auto my-4">
+        <table className="w-full text-sm border-collapse border border-gray-700">{children}</table>
+      </div>
+    );
+  },
+  th({ children }) {
+    return <th className="border border-gray-700 bg-gray-800 px-3 py-2 text-left text-xs font-semibold text-gray-300">{children}</th>;
+  },
+  td({ children }) {
+    return <td className="border border-gray-700 px-3 py-2 text-gray-400">{children}</td>;
+  },
+};
+
+export function AnswerBlock({ text, isStreaming }) {
+  if (!text) return null;
+  return (
+    <div className="prose-invert max-w-none text-sm">
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+        {text}
+      </ReactMarkdown>
       {isStreaming && (
-        <span className="inline-block h-4 w-0.5 bg-indigo-400 animate-pulse ml-0.5 align-middle" />
+        <span
+          className="ml-0.5 inline-block h-4 w-0.5 bg-accent align-middle"
+          style={{ animation: 'pulse 1s ease infinite' }}
+        />
       )}
     </div>
   );
@@ -142,7 +213,8 @@ export function AnswerBlock({ text, isStreaming }) {
 
 export function SourceCard({ source, index }) {
   const [expanded, setExpanded] = useState(false);
-  const [copied, setCopied]     = useState(false);
+  const [copied,   setCopied]   = useState(false);
+  const lang = getLanguageClass(source.file_path);
 
   const handleCopy = async () => {
     try {
@@ -152,12 +224,13 @@ export function SourceCard({ source, index }) {
     } catch {}
   };
 
-  const langClass = getLanguageClass(source.file_path);
-
   return (
-    <div className="rounded-lg border border-gray-800 bg-gray-900/60 overflow-hidden text-sm">
-      {/* Header row */}
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-800 bg-gray-800/50 gap-3">
+    <div
+      className="overflow-hidden rounded-lg border border-surface-800 bg-surface-900/70 text-sm"
+      style={{ animation: `slideUp 250ms ease ${index * 60}ms both` }}
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between gap-3 border-b border-surface-800 bg-surface-850 px-4 py-2.5">
         <div className="flex items-center gap-2 min-w-0">
           <span className="text-xs font-medium text-gray-500 shrink-0">#{index + 1}</span>
           <button
@@ -165,23 +238,21 @@ export function SourceCard({ source, index }) {
             title="Copy file path"
             className="flex items-center gap-1.5 min-w-0 group"
           >
-            <span className="font-mono text-xs text-indigo-400 group-hover:text-indigo-300 truncate transition-colors">
+            <span className="truncate font-mono text-xs text-accent-soft transition-colors group-hover:text-blue-200">
               {source.file_path}
             </span>
-            <CopyIcon className="h-3.5 w-3.5 text-gray-600 group-hover:text-indigo-400 shrink-0 transition-colors" />
+            <Copy className="h-3 w-3 shrink-0 text-surface-600 transition-colors group-hover:text-accent-soft" />
           </button>
-          {copied && (
-            <span className="text-xs text-emerald-400 shrink-0">Copied!</span>
-          )}
+          {copied && <span className="text-xs text-emerald-400 shrink-0">Copied!</span>}
         </div>
         <span className="text-xs text-gray-600 shrink-0 whitespace-nowrap">
           L{source.start_line}–{source.end_line}
         </span>
       </div>
 
-      {/* Excerpt (always visible — first 2 lines) */}
-      <pre className="overflow-x-auto px-4 py-3 bg-gray-950/70 text-xs leading-relaxed">
-        <code className={`${langClass} text-gray-400 font-mono`}>
+      {/* Excerpt */}
+      <pre className="overflow-x-auto bg-surface-950/80 px-4 py-3 text-xs leading-relaxed">
+        <code className={`language-${lang} text-gray-400 font-mono`}>
           {source.excerpt}
         </code>
       </pre>
@@ -191,14 +262,16 @@ export function SourceCard({ source, index }) {
         <>
           <button
             onClick={() => setExpanded(v => !v)}
-            className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs text-gray-600 hover:text-gray-400 hover:bg-gray-800/40 transition-colors border-t border-gray-800"
+            className="flex w-full items-center justify-center gap-1.5 border-t border-surface-800 py-1.5 text-xs text-surface-500 transition-colors hover:bg-surface-800/50 hover:text-surface-300"
           >
-            {expanded ? <ChevronUpIcon className="h-3 w-3" /> : <ChevronDownIcon className="h-3 w-3" />}
-            {expanded ? 'Collapse' : 'Expand full chunk'}
+            {expanded
+              ? <><ChevronUp className="h-3 w-3" /> Collapse</>
+              : <><ChevronDown className="h-3 w-3" /> Expand full chunk</>
+            }
           </button>
           {expanded && (
-            <pre className="overflow-x-auto px-4 py-3 bg-gray-950 text-xs leading-relaxed border-t border-gray-800">
-              <code className={`${langClass} text-gray-400 font-mono`}>
+            <pre className="overflow-x-auto border-t border-surface-800 bg-surface-950 px-4 py-3 text-xs leading-relaxed">
+              <code className={`language-${lang} text-gray-400 font-mono`}>
                 {source.full_content}
               </code>
             </pre>
