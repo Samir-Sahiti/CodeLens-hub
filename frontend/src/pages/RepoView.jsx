@@ -210,7 +210,6 @@ export default function RepoView() {
     } catch (err) {
       setError(err.message || 'Failed to fetch repository status');
     } finally {
-      setIsLoading(false);
       setIsReindexing(false);
     }
   }, [repoId, session?.access_token]);
