@@ -344,7 +344,7 @@ async function fetchFileSource(repoId, filePath) {
     .eq('file_path', filePath)
     .order('start_line', { ascending: true });
   if (error || !chunks || chunks.length === 0) return null;
-  return chunks.map((chunk) => chunk.content).join('');
+  return chunks.map((chunk) => chunk.content).join('\n');
 }
 
 async function fetchDeterministicIssues(repoId, filePaths) {
@@ -453,7 +453,9 @@ const review = async (req, res) => {
 
     send({ type: 'sources', sources: chunks.map(formatSource) });
     const { system, user } = buildReviewPrompt(snippet.trim(), contextDescription, chunks, mode, filePath);
-    const { text } = await streamClaude({ system, user, send, userId: req.user.id, endpoint: 'review' });
+    // In security_audit mode, suppress raw chunk events — findings arrive as structured `finding` SSE events instead.
+    const chunkSend = mode === 'security_audit' ? null : send;
+    const { text } = await streamClaude({ system, user, send: chunkSend, userId: req.user.id, endpoint: 'review' });
 
     if (mode === 'security_audit') {
       const issues = await fetchDeterministicIssues(repoId, filePath ? [filePath] : []);

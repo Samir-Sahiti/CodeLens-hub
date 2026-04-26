@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useGraphSimulation } from '../hooks/useGraphSimulation';
 import { LANGUAGE_COLORS, formatLanguage } from '../lib/constants';
-import { ChevronDown, ChevronUp, Download, Search, X } from './ui/Icons';
+import { ChevronDown, ChevronUp, Download, Search, Shield, X } from './ui/Icons';
 
 function GraphLegend() {
   const items = [
@@ -238,6 +238,208 @@ function ImpactAnalysisPanel({ impactAnalysis, onClearImpactAnalysis }) {
   );
 }
 
+// ── US-047: Attack surface path finding ──────────────────────────────────────
+
+function findAllPaths(sourceId, adjacency, sinkIds, maxPaths = 50, maxDepth = 20) {
+  const paths = [];
+  function dfs(current, currentPath, visited) {
+    if (paths.length >= maxPaths) return;
+    // Record path when a sink is reached (but keep exploring — the current node
+    // may be a 'both' node that also has outgoing edges leading to further sinks).
+    if (sinkIds.has(current) && current !== sourceId) {
+      paths.push([...currentPath]);
+      if (paths.length >= maxPaths) return;
+    }
+    // Prune depth AFTER recording so a node exactly at maxDepth can still be a sink.
+    if (currentPath.length >= maxDepth) return;
+    for (const neighbor of (adjacency.get(current) || [])) {
+      if (!visited.has(neighbor)) {
+        visited.add(neighbor);
+        currentPath.push(neighbor);
+        dfs(neighbor, currentPath, visited);
+        currentPath.pop();
+        visited.delete(neighbor);
+      }
+    }
+  }
+  const visited = new Set([sourceId]);
+  dfs(sourceId, [sourceId], visited);
+  return paths.sort((a, b) => a.length - b.length);
+}
+
+function PathCard({ path, index, nodeMap }) {
+  return (
+    <div className="rounded-xl border border-gray-800 bg-gray-950/70 px-3 py-2.5">
+      <p className="text-xs text-gray-600 mb-1.5">Path {index + 1} · {path.length} {path.length === 1 ? 'hop' : 'hops'}</p>
+      <div className="flex flex-col gap-0.5">
+        {path.map((nodeId, i) => {
+          const node = nodeMap.get(nodeId);
+          const name = (node?.file_path || nodeId).split('/').pop();
+          const isFirst = i === 0;
+          const isLast  = i === path.length - 1;
+          return (
+            <div key={nodeId} className="flex items-center gap-1.5">
+              {i > 0 && <span className="text-gray-700 text-xs shrink-0">→</span>}
+              <span
+                className={`font-mono text-xs truncate ${isFirst ? 'text-red-300' : isLast ? 'text-orange-300' : 'text-yellow-200'}`}
+                title={node?.file_path || nodeId}
+              >
+                {name}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function AttackSurfacePanel({ graphNodes, sourceIds, sinkIds, bothIds, selectedSourceId, sourcePaths, perSourcePathCounts, onSelectSource, onClear }) {
+  const [showAll, setShowAll] = useState(false);
+
+  const nodeMap = useMemo(() => new Map(graphNodes.map(n => [n.graphId, n])), [graphNodes]);
+
+  const allSourceCount = sourceIds.size + bothIds.size;
+  const allSinkCount   = sinkIds.size  + bothIds.size;
+
+  const sourceNodeList = useMemo(() =>
+    graphNodes
+      .filter(n => sourceIds.has(n.graphId) || bothIds.has(n.graphId))
+      .sort((a, b) => (perSourcePathCounts.get(b.graphId) || 0) - (perSourcePathCounts.get(a.graphId) || 0)),
+    [graphNodes, sourceIds, bothIds, perSourcePathCounts]
+  );
+
+  // Empty state — no sources or no sinks in this repo
+  if (allSourceCount === 0 || allSinkCount === 0) {
+    return (
+      <aside className="w-full shrink-0 rounded-xl border border-surface-800 bg-surface-900/80 p-5 shadow-panel xl:w-80">
+        <div className="flex h-full flex-col">
+          <div className="mb-5">
+            <p className="text-xs uppercase tracking-[0.2em] text-red-400/80">Attack Surface</p>
+          </div>
+          <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-4 text-sm text-emerald-100">
+            No externally reachable endpoints detected — or this repo is a library.
+          </div>
+          <button
+            onClick={onClear}
+            className="mt-auto rounded-xl border border-gray-700 bg-gray-950/80 px-4 py-3 text-sm font-medium text-gray-100 transition hover:border-gray-500 hover:bg-gray-900"
+          >
+            Close
+          </button>
+        </div>
+      </aside>
+    );
+  }
+
+  // Paths view — a specific source is selected
+  if (selectedSourceId) {
+    const selectedNode = nodeMap.get(selectedSourceId);
+    const visiblePaths = showAll ? sourcePaths : sourcePaths.slice(0, 10);
+    const hiddenCount  = sourcePaths.length - visiblePaths.length;
+    return (
+      <aside className="w-full shrink-0 rounded-xl border border-surface-800 bg-surface-900/80 p-5 shadow-panel transition-all duration-200 xl:w-80">
+        <div className="flex h-full flex-col">
+          <div className="mb-4">
+            <p className="text-xs uppercase tracking-[0.2em] text-red-400/80">Attack Surface — Paths</p>
+            <button
+              onClick={() => { onSelectSource(null); setShowAll(false); }}
+              className="mt-1 text-xs text-indigo-400 transition hover:text-indigo-200"
+            >
+              ← All sources
+            </button>
+            <h3 className="mt-2 break-all font-mono text-xs text-gray-300">{selectedNode?.file_path}</h3>
+          </div>
+
+          {sourcePaths.length === 0 ? (
+            <div className="rounded-xl border border-gray-700 bg-gray-900/50 p-4 text-sm text-gray-400">
+              No paths from this source reach a detected sink.
+            </div>
+          ) : (
+            <>
+              <p className="mb-3 text-sm text-gray-300">
+                <span className="font-semibold text-red-300">{sourcePaths.length === 50 ? '50+' : sourcePaths.length}</span> path{sourcePaths.length !== 1 ? 's' : ''} reach a sink
+              </p>
+              <div className="flex-1 overflow-y-auto space-y-2 pr-0.5">
+                {visiblePaths.map((path, i) => (
+                  <PathCard key={i} path={path} index={i} nodeMap={nodeMap} />
+                ))}
+                {hiddenCount > 0 && !showAll && (
+                  <button
+                    onClick={() => setShowAll(true)}
+                    className="w-full rounded-xl border border-dashed border-gray-700 px-3 py-2 text-xs text-gray-400 transition hover:text-gray-200"
+                  >
+                    ... {hiddenCount} more
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+
+          <button
+            onClick={onClear}
+            className="mt-5 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm font-semibold text-red-100 transition hover:bg-red-500/20"
+          >
+            Close attack surface
+          </button>
+        </div>
+      </aside>
+    );
+  }
+
+  // Sources list view
+  return (
+    <aside className="w-full shrink-0 rounded-xl border border-surface-800 bg-surface-900/80 p-5 shadow-panel transition-all duration-200 xl:w-80">
+      <div className="flex h-full flex-col">
+        <div className="mb-4">
+          <p className="text-xs uppercase tracking-[0.2em] text-red-400/80">Attack Surface</p>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3">
+            <p className="text-xs uppercase tracking-[0.16em] text-red-200/70">Sources</p>
+            <p className="mt-1 text-2xl font-semibold text-red-100">{allSourceCount}</p>
+          </div>
+          <div className="rounded-xl border border-orange-500/30 bg-orange-500/10 p-3">
+            <p className="text-xs uppercase tracking-[0.16em] text-orange-200/70">Sinks</p>
+            <p className="mt-1 text-2xl font-semibold text-orange-100">{allSinkCount}</p>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto space-y-2 pr-0.5">
+          {sourceNodeList.map(node => {
+            const pathCount = perSourcePathCounts.get(node.graphId) || 0;
+            const isBoth = bothIds.has(node.graphId);
+            return (
+              <button
+                key={node.graphId}
+                onClick={() => onSelectSource(node.graphId)}
+                className="w-full text-left rounded-xl border border-gray-800 bg-gray-950/70 px-3 py-3 transition hover:border-red-500/40 hover:bg-red-500/10"
+              >
+                <p className="font-mono text-xs text-red-100 break-all">{node.file_path}</p>
+                <div className="mt-1 flex items-center gap-2">
+                  {isBoth && <span className="rounded-full bg-yellow-500/20 px-1.5 py-0.5 text-xs text-yellow-300">source + sink</span>}
+                  <span className="text-xs text-gray-500">
+                    {pathCount > 0
+                      ? <span className="text-orange-300">{pathCount === 50 ? '50+' : pathCount} path{pathCount !== 1 ? 's' : ''} to sink</span>
+                      : 'No sink reachable'}
+                  </span>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        <button
+          onClick={onClear}
+          className="mt-5 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm font-semibold text-red-100 transition hover:bg-red-500/20"
+        >
+          Close attack surface
+        </button>
+      </div>
+    </aside>
+  );
+}
+
 /**
  * Compute directory clusters from flat file nodes.
  * Groups files sharing the same parent directory into a single cluster node.
@@ -356,6 +558,10 @@ export default function DependencyGraph({
   const [clusteringEnabled, setClusteringEnabled] = useState(true);
   const [expandedClusters, setExpandedClusters] = useState(new Set());
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
+
+  // US-047: attack surface state
+  const [attackSurfaceMode, setAttackSurfaceMode]   = useState(false);
+  const [attackSurfaceSource, setAttackSurfaceSource] = useState(null); // graphId of selected source
 
   // Search state
   const [searchBarOpen, setSearchBarOpen] = useState(false);
@@ -548,6 +754,63 @@ export default function DependencyGraph({
     return simNodes.find((node) => node.graphId === primaryId) || null;
   }, [simNodes, selection.primaryId]);
 
+  // US-047: attack surface — classify nodes and compute paths
+  const { asSourceIds, asSinkIds, asBothIds } = useMemo(() => {
+    const src = new Set(), snk = new Set(), both = new Set();
+    graphNodes.forEach(n => {
+      if (n.node_classification === 'source') src.add(n.graphId);
+      else if (n.node_classification === 'sink') snk.add(n.graphId);
+      else if (n.node_classification === 'both') both.add(n.graphId);
+    });
+    return { asSourceIds: src, asSinkIds: snk, asBothIds: both };
+  }, [graphNodes]);
+
+  // Adjacency for path finding (use raw graphEdges, not clustered)
+  const asAdjacency = useMemo(() => {
+    const adj = new Map();
+    graphEdges.forEach(edge => {
+      const src = typeof edge.source === 'object' ? edge.source.graphId : edge.source;
+      const tgt = typeof edge.target === 'object' ? edge.target.graphId : edge.target;
+      if (!adj.has(src)) adj.set(src, []);
+      adj.get(src).push(tgt);
+    });
+    return adj;
+  }, [graphEdges]);
+
+  const allSinkIdsForPaths = useMemo(() => new Set([...asSinkIds, ...asBothIds]), [asSinkIds, asBothIds]);
+  const allSourceIdsForPaths = useMemo(() => new Set([...asSourceIds, ...asBothIds]), [asSourceIds, asBothIds]);
+
+  // Per-source path counts (computed once, used in panel list)
+  const perSourcePathCounts = useMemo(() => {
+    if (!attackSurfaceMode) return new Map();
+    const counts = new Map();
+    for (const sourceId of allSourceIdsForPaths) {
+      counts.set(sourceId, findAllPaths(sourceId, asAdjacency, allSinkIdsForPaths, 50).length);
+    }
+    return counts;
+  }, [attackSurfaceMode, allSourceIdsForPaths, asAdjacency, allSinkIdsForPaths]);
+
+  // Paths from the currently-selected source (used for both panel display and highlighting)
+  const currentSourcePaths = useMemo(() => {
+    if (!attackSurfaceMode || !attackSurfaceSource) return [];
+    return findAllPaths(attackSurfaceSource, asAdjacency, allSinkIdsForPaths, 50);
+  }, [attackSurfaceMode, attackSurfaceSource, asAdjacency, allSinkIdsForPaths]);
+
+  const attackSurfaceData = useMemo(() => {
+    if (!attackSurfaceMode) return null;
+    const pathNodeIds = new Set();
+    const pathEdgeIds = new Set();
+    if (attackSurfaceSource && currentSourcePaths.length > 0) {
+      currentSourcePaths.forEach(path => {
+        path.forEach(id => pathNodeIds.add(id));
+        for (let i = 0; i < path.length - 1; i++) {
+          pathEdgeIds.add(`${path[i]}->${path[i + 1]}`);
+        }
+      });
+    }
+    return { isActive: true, sourceIds: asSourceIds, sinkIds: asSinkIds, bothIds: asBothIds, pathNodeIds, pathEdgeIds };
+  }, [attackSurfaceMode, asSourceIds, asSinkIds, asBothIds, attackSurfaceSource, currentSourcePaths]);
+
   // Search: filter simNodes by file path query
   const searchMatchNodes = useMemo(() => {
     if (!searchQuery.trim()) return [];
@@ -630,6 +893,7 @@ export default function DependencyGraph({
     renderMode,
     selection: effectiveSelection,
     impactAnalysis,
+    attackSurface: attackSurfaceData,
     focusNodeId: searchCurrentNode?.graphId || selection.primaryId,
     onNodeClick: handleNodeClick,
     onNodeContextMenu: handleNodeContextMenu,
@@ -748,6 +1012,27 @@ export default function DependencyGraph({
               <Search className="mr-1.5 inline h-3.5 w-3.5" /> Search
             </button>
             <button
+              onClick={() => {
+                const next = !attackSurfaceMode;
+                setAttackSurfaceMode(next);
+                setAttackSurfaceSource(null);
+                // Clustering uses cluster-level edge IDs that are incompatible with
+                // individual-node path IDs — force flat mode while attack surface is on.
+                if (next) {
+                  setClusteringEnabled(false);
+                  setExpandedClusters(new Set());
+                }
+              }}
+              className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                attackSurfaceMode
+                  ? 'border-red-500/50 bg-red-500/15 text-red-300 hover:bg-red-500/25'
+                  : 'border-gray-700 bg-gray-950/80 text-gray-400 hover:border-gray-500 hover:text-gray-200'
+              }`}
+              title="Toggle attack surface mapping (US-047)"
+            >
+              <Shield className="mr-1.5 inline h-3.5 w-3.5" /> Attack Surface
+            </button>
+            <button
               onClick={resetView}
               className="rounded-full border border-gray-700 bg-gray-950/80 px-4 py-2 text-sm font-medium text-gray-100 transition hover:border-gray-500 hover:bg-gray-900"
             >
@@ -792,6 +1077,17 @@ export default function DependencyGraph({
             >
               Analyse impact
             </button>
+            {attackSurfaceMode && (asSourceIds.has(contextMenu.node.graphId) || asBothIds.has(contextMenu.node.graphId)) && (
+              <button
+                onClick={() => {
+                  setAttackSurfaceSource(contextMenu.node.graphId);
+                  setContextMenu(null);
+                }}
+                className="block w-full rounded-lg px-3 py-2 text-left text-sm text-red-300 transition hover:bg-gray-800"
+              >
+                Show reachable paths
+              </button>
+            )}
             <button
               onClick={() => {
                 onChatWithFile?.(contextMenu.node.file_path);
@@ -831,6 +1127,18 @@ export default function DependencyGraph({
 
       {impactAnalysis ? (
         <ImpactAnalysisPanel impactAnalysis={impactAnalysis} onClearImpactAnalysis={onClearImpactAnalysis} />
+      ) : attackSurfaceMode ? (
+        <AttackSurfacePanel
+          graphNodes={graphNodes}
+          sourceIds={asSourceIds}
+          sinkIds={asSinkIds}
+          bothIds={asBothIds}
+          selectedSourceId={attackSurfaceSource}
+          sourcePaths={currentSourcePaths}
+          perSourcePathCounts={perSourcePathCounts}
+          onSelectSource={setAttackSurfaceSource}
+          onClear={() => { setAttackSurfaceMode(false); setAttackSurfaceSource(null); }}
+        />
       ) : (
         <GraphDetailsPanel node={selectedNode} onChatWithFile={onChatWithFile} onAuditFile={onAuditFile} />
       )}

@@ -28,6 +28,7 @@ export function useGraphSimulation({
   renderMode,
   selection,
   impactAnalysis,
+  attackSurface,
   focusNodeId,
   onNodeClick,
   onNodeContextMenu,
@@ -163,7 +164,20 @@ export function useGraphSimulation({
       ...transitiveImpactIds,
     ].filter(Boolean));
 
+    const isAttackSurfaceActive = Boolean(attackSurface?.isActive);
+    const asSourceIds   = attackSurface?.sourceIds   || new Set();
+    const asSinkIds     = attackSurface?.sinkIds     || new Set();
+    const asBothIds     = attackSurface?.bothIds     || new Set();
+    const asPathNodeIds = attackSurface?.pathNodeIds || new Set();
+    const asPathEdgeIds = attackSurface?.pathEdgeIds || new Set();
+    const hasPathHighlight = asPathNodeIds.size > 0;
+
     const getNodeOpacity = (nodeId) => {
+      if (isAttackSurfaceActive) {
+        if (asSourceIds.has(nodeId) || asSinkIds.has(nodeId) || asBothIds.has(nodeId)) return 1;
+        if (asPathNodeIds.has(nodeId)) return 1;
+        return hasPathHighlight ? 0.08 : 0.12;
+      }
       if (isImpactActive) {
         return impactedNodeIds.has(nodeId) ? 1 : 0.12;
       }
@@ -171,6 +185,12 @@ export function useGraphSimulation({
     };
 
     const getEdgeOpacity = (edge) => {
+      if (isAttackSurfaceActive) {
+        if (hasPathHighlight) {
+          return asPathEdgeIds.has(edge.id) ? 0.9 : 0.06;
+        }
+        return 0.12;
+      }
       if (isImpactActive) {
         const sourceId = typeof edge.source === 'object' ? edge.source.graphId : edge.source;
         const targetId = typeof edge.target === 'object' ? edge.target.graphId : edge.target;
@@ -180,6 +200,14 @@ export function useGraphSimulation({
     };
 
     const getNodeFill = (node) => {
+      if (isAttackSurfaceActive) {
+        const id = node.graphId;
+        if (asBothIds.has(id))     return '#eab308'; // yellow  — source + sink
+        if (asSourceIds.has(id))   return '#dc2626'; // red     — source
+        if (asSinkIds.has(id))     return '#f97316'; // orange  — sink
+        if (asPathNodeIds.has(id)) return '#facc15'; // amber   — intermediate path node
+        return node.fill;
+      }
       if (!isImpactActive) return node.fill;
       if (impactAnalysis?.sourceId === node.graphId) return '#ef4444';
       if (directImpactIds.has(node.graphId) || transitiveImpactIds.has(node.graphId)) return '#f59e0b';
@@ -187,6 +215,14 @@ export function useGraphSimulation({
     };
 
     const getNodeStroke = (node) => {
+      if (isAttackSurfaceActive) {
+        const id = node.graphId;
+        if (asBothIds.has(id))     return '#fde047'; // yellow-300
+        if (asSourceIds.has(id))   return '#fca5a5'; // red-300
+        if (asSinkIds.has(id))     return '#fdba74'; // orange-300
+        if (asPathNodeIds.has(id)) return '#fef08a'; // yellow-200
+        return 'rgba(255, 255, 255, 0.06)';
+      }
       if (isImpactActive) {
         if (impactAnalysis?.sourceId === node.graphId) return '#fecaca';
         if (directImpactIds.has(node.graphId) || transitiveImpactIds.has(node.graphId)) return '#fde68a';
@@ -197,6 +233,12 @@ export function useGraphSimulation({
     };
 
     const getNodeStrokeWidth = (node) => {
+      if (isAttackSurfaceActive) {
+        const id = node.graphId;
+        if (asSourceIds.has(id) || asSinkIds.has(id) || asBothIds.has(id)) return 3.5;
+        if (asPathNodeIds.has(id)) return 2.5;
+        return 1;
+      }
       if (isImpactActive) {
         if (impactAnalysis?.sourceId === node.graphId) return 3.5;
         if (directImpactIds.has(node.graphId) || transitiveImpactIds.has(node.graphId)) return 2.5;
@@ -245,11 +287,14 @@ export function useGraphSimulation({
           const endY = target.y - ((target.radius + 2) * Math.sin(angle));
 
           const lineOpacity = getEdgeOpacity(link);
-          const isHighlightedEdge = highlightedEdgeIds.has(link.id) || isImpactActive;
-          const edgeColor = isImpactActive ? `rgba(245, 158, 11, ${lineOpacity})` : `rgba(148, 163, 184, ${lineOpacity})`;
+          const isPathEdge = isAttackSurfaceActive && asPathEdgeIds.has(link.id);
+          const isHighlightedEdge = highlightedEdgeIds.has(link.id) || isImpactActive || isPathEdge;
+          const edgeColor = isAttackSurfaceActive
+            ? (isPathEdge ? `rgba(250, 204, 21, ${lineOpacity})` : `rgba(148, 163, 184, ${lineOpacity})`)
+            : isImpactActive ? `rgba(245, 158, 11, ${lineOpacity})` : `rgba(148, 163, 184, ${lineOpacity})`;
 
           context.strokeStyle = edgeColor;
-          context.lineWidth = isImpactActive ? 1.8 : isHighlightedEdge ? 1.8 : 1.2;
+          context.lineWidth = (isImpactActive || isPathEdge) ? 1.8 : isHighlightedEdge ? 1.8 : 1.2;
 
           if (isHighlightedEdge) {
             context.setLineDash([6, 4]);
@@ -358,7 +403,7 @@ export function useGraphSimulation({
         canvasSelection.call(zoomBehavior.transform, canvasTransformRef.current);
       }
 
-      if (isSelectionActive || isImpactActive) {
+      if (isSelectionActive || isImpactActive || (isAttackSurfaceActive && hasPathHighlight)) {
         animateDraw();
       } else {
         draw();
@@ -433,8 +478,9 @@ export function useGraphSimulation({
       .data(localLinks, (edge) => edge.id)
       .join('path')
       .attr('class', (edge) => {
-        const isDimmed = !isImpactActive && isSelectionActive && !highlightedEdgeIds.has(edge.id);
-        const isFlow = (isImpactActive || highlightedEdgeIds.has(edge.id)) && !isDimmed;
+        const isDimmed = !isImpactActive && !isAttackSurfaceActive && isSelectionActive && !highlightedEdgeIds.has(edge.id);
+        const isPathFlow = isAttackSurfaceActive && asPathEdgeIds.has(edge.id);
+        const isFlow = (isImpactActive || highlightedEdgeIds.has(edge.id) || isPathFlow) && !isDimmed;
         return `graph-edge${isDimmed ? ' is-dimmed' : ''}${isFlow ? ' graph-edge-flow' : ''}`;
       })
       .attr('d', (edge) => {
@@ -447,7 +493,10 @@ export function useGraphSimulation({
         return `M${edge.source.x},${edge.source.y}A${dr},${dr} 0 0,1 ${edge.target.x},${edge.target.y}`;
       })
       .attr('fill', 'none')
-      .attr('stroke', () => (isImpactActive ? '#f59e0b' : '#64748b'))
+      .attr('stroke', (edge) => {
+        if (isAttackSurfaceActive && asPathEdgeIds.has(edge.id)) return '#facc15';
+        return isImpactActive ? '#f59e0b' : '#64748b';
+      })
       .attr('stroke-opacity', (edge) => getEdgeOpacity(edge))
       .attr('stroke-width', (edge) => (isImpactActive ? 1.8 : highlightedEdgeIds.has(edge.id) ? 2 : 1.2));
 
@@ -461,7 +510,7 @@ export function useGraphSimulation({
       svgAnimationFrame = window.requestAnimationFrame(animateSvgFlow);
     };
 
-    if (isSelectionActive || isImpactActive) {
+    if (isSelectionActive || isImpactActive || (isAttackSurfaceActive && hasPathHighlight)) {
       animateSvgFlow();
     }
 
@@ -605,6 +654,7 @@ export function useGraphSimulation({
     renderMode,
     selection,
     impactAnalysis,
+    attackSurface,
     focusNodeId,
     onBackgroundClick,
     onNodeClick,

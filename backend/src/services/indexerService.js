@@ -2,6 +2,8 @@ const { parseFile } = require('../parsers/repositoryParser');
 const { extractChunksFromFile } = require('../parsers/chunkParser');
 const { scanFileForSecrets } = require('./secretScanner');
 const { scanFileForInsecurePatterns } = require('./sastEngine'); // US-046
+const { scanFileForMissingAuth } = require('./authCoverageScanner'); // US-049
+const { classifyFile } = require('./attackSurfaceClassifier'); // US-047
 const { recordUsage } = require('./usageTracker'); // US-042
 const { isManifestFile, parseManifest } = require('./manifestParser'); // US-045
 const { scanDependencies } = require('./osvScanner'); // US-045
@@ -92,7 +94,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     // and fall back to a full index on this run.
     const { data: existingNodeRows } = await supabaseAdmin
       .from('graph_nodes')
-      .select('file_path, content_hash, language, line_count, complexity_score')
+      .select('file_path, content_hash, language, line_count, complexity_score, node_classification')
       .eq('repo_id', repoId);
     const existingNodeMap = new Map((existingNodeRows || []).map(n => [n.file_path, n]));
 
@@ -339,6 +341,22 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
               console.warn(`[indexer] SAST scan failed for ${file.path}: ${sastErr.message}`);
             }
 
+            // Auth coverage check (US-049)
+            try {
+              const authIssues = scanFileForMissingAuth(file.path, file.content, parsed.imports || []);
+              const validAuthIssues = authIssues.filter(is => {
+                const key = `${file.path}:${is._meta.rule_id}:${is._meta.line_number}`;
+                return !suppSet.has(key);
+              });
+              validAuthIssues.forEach(is => {
+                delete is._meta;
+                is.repo_id = repoId;
+                issues.push(is);
+              });
+            } catch (authErr) {
+              console.warn(`[indexer] Auth coverage scan failed for ${file.path}: ${authErr.message}`);
+            }
+
             parsedCount += 1;
             if (parsedCount % 100 === 0) {
               console.log(`[indexer] Parsed ${parsedCount}/${pendingFiles.length} files...`);
@@ -368,6 +386,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
           line_count: existing.line_count || 0,
           complexity_score: existing.complexity_score || 1,
           content_hash: existing.content_hash,
+          node_classification: existing.node_classification || null,
           outgoing_count: 0,
           incoming_count: 0,
         });
@@ -408,6 +427,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
         incoming_count: 0,
         complexity_score: file.complexity || 1,
         content_hash: originalFile?.contentHash || null,
+        node_classification: originalFile?.content ? classifyFile(file.filePath, originalFile.content) : null,
       });
 
       for (const imp of file.imports) {

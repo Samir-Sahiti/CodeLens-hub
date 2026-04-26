@@ -4,18 +4,19 @@ import { apiUrl } from '../lib/api';
 import {
   Package, Lock, ShieldAlert, GitMerge,
   FileWarning, Link2, FileX, Search,
-  ChevronDown, ChevronUp, CheckCircle2,
+  ChevronDown, ChevronUp, CheckCircle2, AlertTriangle,
 } from './ui/Icons';
 
 // ── Group config ─────────────────────────────────────────────────────────────
 const GROUP_ORDER = [
-  { type: 'vulnerable_dependency', label: 'Vulnerable Dependencies',  Icon: Package      },
-  { type: 'hardcoded_secret',      label: 'Hardcoded Secrets',        Icon: Lock         },
-  { type: 'insecure_pattern',      label: 'Insecure Code Patterns',   Icon: ShieldAlert  },
-  { type: 'circular_dependency',   label: 'Circular Dependencies',    Icon: GitMerge     },
-  { type: 'god_file',              label: 'God Files',                Icon: FileWarning  },
-  { type: 'high_coupling',         label: 'High Coupling',            Icon: Link2        },
-  { type: 'dead_code',             label: 'Dead Code',                Icon: FileX        },
+  { type: 'vulnerable_dependency', label: 'Vulnerable Dependencies',           Icon: Package       },
+  { type: 'hardcoded_secret',      label: 'Hardcoded Secrets',                 Icon: Lock          },
+  { type: 'missing_auth',          label: 'Potentially Unauthenticated Routes', Icon: AlertTriangle },
+  { type: 'insecure_pattern',      label: 'Insecure Code Patterns',            Icon: ShieldAlert   },
+  { type: 'circular_dependency',   label: 'Circular Dependencies',             Icon: GitMerge      },
+  { type: 'god_file',              label: 'God Files',                         Icon: FileWarning   },
+  { type: 'high_coupling',         label: 'High Coupling',                     Icon: Link2         },
+  { type: 'dead_code',             label: 'Dead Code',                         Icon: FileX         },
 ];
 
 function getBadgeStyles(severity) {
@@ -98,6 +99,17 @@ const IssueCard = memo(function IssueCard({ issue, type, onIssueClick, onSuppres
             className="text-xs text-gray-500 hover:text-gray-200 underline transition-colors disabled:cursor-not-allowed disabled:opacity-50"
           >
             Mark as false positive
+          </button>
+        )}
+
+        {/* Suppress button for unauthenticated routes */}
+        {type === 'missing_auth' && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onSuppress(e, issue); }}
+            disabled={actionsDisabled}
+            className="text-xs text-gray-500 hover:text-gray-200 underline transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Mark as intentionally public
           </button>
         )}
 
@@ -228,13 +240,13 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
     e.stopPropagation();
     if (!canMutateIssues) return;
     const ruleMatch = issue.description.match(/Rule ID: (.*?)\)/);
+    if (!ruleMatch) return;
     const lineMatch = issue.description.match(/line (\d+)/);
-    if (!ruleMatch || !lineMatch) return;
 
     const payload = {
       file_path:   issue.file_paths[0],
       rule_id:     ruleMatch[1],
-      line_number: parseInt(lineMatch[1], 10),
+      line_number: lineMatch ? parseInt(lineMatch[1], 10) : 0,
     };
     try {
       const res = await fetch(apiUrl(`/api/analysis/${repoId}/issues/suppress`), {
