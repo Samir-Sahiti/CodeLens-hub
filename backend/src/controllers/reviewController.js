@@ -194,7 +194,9 @@ function parseFindingsFromText(text, fallback = {}) {
         if (finding) findings.push(finding);
       });
       if (findings.length > 0) return findings;
-    } catch {}
+    } catch {
+      // Try the next parser strategy.
+    }
   }
 
   const jsonObjectMatches = trimmed.match(/\{[^{}]*(?:"severity"|"category"|"confidence")[^{}]*\}/g) || [];
@@ -202,7 +204,9 @@ function parseFindingsFromText(text, fallback = {}) {
     try {
       const finding = normalizeFinding(JSON.parse(candidate), fallback);
       if (finding) findings.push(finding);
-    } catch {}
+    } catch {
+      // Ignore malformed candidate objects while scanning streamed text.
+    }
   }
   if (findings.length > 0) return findings;
 
@@ -214,7 +218,9 @@ function parseFindingsFromText(text, fallback = {}) {
       if (finding) findings.push(finding);
     });
     if (findings.length > 0) return findings;
-  } catch {}
+  } catch {
+    // Fall through to line-by-line JSONL parsing.
+  }
 
   for (const line of trimmed.split(/\r?\n/)) {
     const candidate = line.trim().replace(/^```json|^```|```$/g, '').trim();
@@ -222,7 +228,9 @@ function parseFindingsFromText(text, fallback = {}) {
     try {
       const finding = normalizeFinding(JSON.parse(candidate), fallback);
       if (finding) findings.push(finding);
-    } catch {}
+    } catch {
+      // Skip malformed JSONL rows; partial streams can split objects.
+    }
   }
 
   return findings;
