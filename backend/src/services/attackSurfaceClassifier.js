@@ -31,7 +31,7 @@ const SOURCE_PATTERNS = {
     /os\.Args/,
   ],
   rb: [
-    /^\s*(get|post|put|delete|patch)\s+['"\/]/m,
+    /^\s*(get|post|put|delete|patch)\s+['"/]/m,
     /Rails\.application\.routes/,
     /\bgets\b/,                                 // stdin
     /ARGV/,
