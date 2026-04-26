@@ -37,11 +37,14 @@ const suppressIssue = async (req, res) => {
 
   if (suppError) return res.status(500).json({ error: suppError.message });
 
+  // Derive issue type from rule_id so the delete targets the correct row
+  const issueType = rule_id === 'missing_auth' ? 'missing_auth' : 'hardcoded_secret';
+
   // 2. Delete the active issue from analysis_issues so it disappears immediately
   await supabaseAdmin
     .from('analysis_issues')
     .delete()
-    .match({ repo_id: repoId, type: 'hardcoded_secret' })
+    .match({ repo_id: repoId, type: issueType })
     .contains('file_paths', [file_path])
     .ilike('description', `%Rule ID: ${rule_id}%`);
 

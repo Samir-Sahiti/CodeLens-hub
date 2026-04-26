@@ -31,6 +31,8 @@ COMMIT;
 ALTER TYPE issue_type ADD VALUE IF NOT EXISTS 'insecure_pattern';
 COMMIT;
 ALTER TYPE issue_type ADD VALUE IF NOT EXISTS 'hardcoded_secret';
+COMMIT;
+ALTER TYPE issue_type ADD VALUE IF NOT EXISTS 'missing_auth';
 
 -- =============================================================================
 -- FUNCTIONS — Vault wrappers (US-039)
@@ -174,6 +176,8 @@ CREATE TABLE IF NOT EXISTS graph_nodes (
 
 -- Migration for existing deployments: add content_hash if it doesn't exist
 ALTER TABLE graph_nodes ADD COLUMN IF NOT EXISTS content_hash TEXT;
+-- US-047: attack surface classification ('source', 'sink', 'both', or null)
+ALTER TABLE graph_nodes ADD COLUMN IF NOT EXISTS node_classification TEXT;
 
 CREATE INDEX IF NOT EXISTS graph_nodes_repo_id_idx ON graph_nodes (repo_id);
 

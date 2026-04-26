@@ -17,7 +17,6 @@ import { AlertTriangle, Clock, Code2, FileCode, ShieldAlert, Sparkles, StopCircl
 // ---------------------------------------------------------------------------
 
 const PRESETS = [
-  { id: 'security',     label: 'Security',     hint: 'Focus on injection vulnerabilities, XSS, CSRF, secrets exposure, authentication flaws, and dangerous API usage.' },
   { id: 'performance',  label: 'Performance',  hint: 'Focus on algorithmic complexity, unnecessary re-renders, memory leaks, N+1 queries, and inefficient operations.' },
   { id: 'bugs',         label: 'Bug Hunt',     hint: 'Focus on off-by-one errors, null dereferences, unhandled edge cases, race conditions, and error-handling gaps.' },
   { id: 'architecture', label: 'Architecture', hint: 'Focus on separation of concerns, coupling, abstraction leaks, SOLID principles, and long-term maintainability.' },
@@ -344,7 +343,7 @@ export default function CodeReviewPanel({ repoId, prefill }) {
         {isOverLimit && (
           <p className="mt-2 flex items-center gap-1.5 text-xs text-red-300">
             <AlertTriangle className="h-3.5 w-3.5" />
-            Snippet exceeds 200 lines. Please trim it before submitting.
+            Snippet exceeds {lineLimit} lines. Please trim it before submitting.
           </p>
         )}
 
