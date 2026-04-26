@@ -519,7 +519,7 @@ const getDependencies = async (req, res) => {
   }
 };
 
-async function getGithubTokenForUser(userId) {
+async function _getGithubTokenForUser(userId) {
   const { data: profile } = await supabaseAdmin
     .from('profiles')
     .select('github_token_secret_id')
@@ -535,7 +535,7 @@ async function getGithubTokenForUser(userId) {
   return tokenData;
 }
 
-async function fetchLiveGitHubDependencies({ repoId, repoFullName, githubToken }) {
+async function _fetchLiveGitHubDependencies({ repoId, repoFullName, githubToken }) {
   const [owner, repo] = String(repoFullName || '').split('/');
   if (!owner || !repo) {
     throw new Error('Repository full name is missing or invalid');

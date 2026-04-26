@@ -6,8 +6,8 @@ import { useAuth } from '../context/AuthContext';
 import { apiUrl } from '../lib/api';
 import { useToast } from './Toast';
 import { LANGUAGE_COLORS, getSyntaxLanguage } from '../lib/constants';
-import { ChevronRight, FileCode, FileX, Folder } from './ui/Icons';
-import { EmptyState, Panel, SearchInput } from './ui/Primitives';
+import { ChevronRight, FileCode, FileX, Folder, ShieldAlert } from './ui/Icons';
+import { Button, EmptyState, Panel, SearchInput } from './ui/Primitives';
 
 function getBasename(filePath) {
   const parts = filePath.replace(/\\/g, '/').split('/');
@@ -124,7 +124,7 @@ function RootFiles({ files, selectedPath, onSelect, filterText }) {
   );
 }
 
-export default function FileBrowser({ repoId, nodes }) {
+export default function FileBrowser({ repoId, nodes, onAuditFile }) {
   const { session } = useAuth();
   const toast = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -292,12 +292,22 @@ export default function FileBrowser({ repoId, nodes }) {
         {selectedPath && !isFetching && !fetchError && content !== null && (
           <div style={{ animation: 'slideUp 200ms ease both' }} className="flex flex-col flex-1 overflow-hidden">
             {/* File header */}
-            <div className="flex min-w-0 items-center border-b border-gray-800 bg-gray-900/60 px-4 py-2.5">
+            <div className="flex min-w-0 items-center gap-3 border-b border-gray-800 bg-gray-900/60 px-4 py-2.5">
               <span
                 className="mr-2 h-2.5 w-2.5 shrink-0 rounded-full"
                 style={{ backgroundColor: LANGUAGE_COLORS[language] ?? LANGUAGE_COLORS.unknown }}
               />
-              <span className="font-mono text-xs text-gray-300 truncate">{selectedPath}</span>
+              <span className="min-w-0 flex-1 truncate font-mono text-xs text-gray-300">{selectedPath}</span>
+              <Button
+                onClick={() => onAuditFile?.(selectedPath)}
+                variant="danger"
+                size="sm"
+                disabled={!onAuditFile}
+                className="ml-auto"
+              >
+                <ShieldAlert className="h-3.5 w-3.5" />
+                Audit this file
+              </Button>
             </div>
 
             {/* Syntax-highlighted source */}

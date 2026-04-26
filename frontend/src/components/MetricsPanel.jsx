@@ -41,7 +41,7 @@ function LangDistributionCard({ langCounts }) {
 }
 
 
-export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact }) {
+export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact, onAuditFile }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [sortConfig, setSortConfig] = useState({ key: 'complexity_score', direction: 'desc' });
   const [showHistogram, setShowHistogram] = useState(false);
@@ -466,6 +466,13 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
                 className="mt-5 rounded-xl bg-amber-500 px-4 py-3 text-sm font-semibold text-gray-950 transition hover:bg-amber-400"
               >
                 Analyse impact
+              </button>
+
+              <button
+                onClick={() => onAuditFile?.(selectedNode.file_path)}
+                className="mt-2 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm font-semibold text-red-100 transition hover:bg-red-500/20"
+              >
+                Audit this file
               </button>
 
               <p className="mt-auto pt-5 text-xs text-gray-500">

@@ -34,6 +34,7 @@ describe('DependencyGraph', () => {
   it('shows "Chat with this file" in the details panel and calls handler', async () => {
     const user = userEvent.setup();
     const onChatWithFile = vi.fn();
+    const onAuditFile = vi.fn();
 
     render(
       <DependencyGraph
@@ -49,6 +50,7 @@ describe('DependencyGraph', () => {
         onClearImpactAnalysis={() => {}}
         repoName="repo"
         onChatWithFile={onChatWithFile}
+        onAuditFile={onAuditFile}
       />
     );
 
@@ -56,6 +58,9 @@ describe('DependencyGraph', () => {
     await user.click(btn);
 
     expect(onChatWithFile).toHaveBeenCalledWith('src/a.js');
+
+    await user.click(screen.getByRole('button', { name: /audit this file/i }));
+    expect(onAuditFile).toHaveBeenCalledWith('src/a.js');
   });
 
   it('shows impact analysis details and clear action', async () => {
