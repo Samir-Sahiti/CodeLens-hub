@@ -9,8 +9,8 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { apiUrl } from '../lib/api';
 import { AnswerBlock, SourceCard } from './SharedAnswerComponents';
-import { Badge, Button, EmptyState } from './ui/Primitives';
-import { AlertTriangle, Code2, FileCode, Sparkles, StopCircle } from './ui/Icons';
+import { Badge, Button, EmptyState, SegmentedControl } from './ui/Primitives';
+import { AlertTriangle, Clock, Code2, FileCode, ShieldAlert, Sparkles, StopCircle } from './ui/Icons';
 
 // ---------------------------------------------------------------------------
 // Main CodeReviewPanel
@@ -23,7 +23,42 @@ const PRESETS = [
   { id: 'architecture', label: 'Architecture', hint: 'Focus on separation of concerns, coupling, abstraction leaks, SOLID principles, and long-term maintainability.' },
 ];
 
-export default function CodeReviewPanel({ repoId }) {
+function toneForSeverity(severity) {
+  if (severity === 'high') return 'danger';
+  if (severity === 'medium') return 'warning';
+  return 'success';
+}
+
+function FindingCard({ finding, index }) {
+  return (
+    <div className="rounded-lg border border-surface-800 bg-surface-950/70 p-4" style={{ animation: `slideUp 220ms ease ${index * 40}ms both` }}>
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge tone={toneForSeverity(finding.severity)}>{finding.severity || 'medium'}</Badge>
+        <Badge tone="accent">{finding.category || 'security'}</Badge>
+        <Badge tone="subtle">Confidence: {finding.confidence || 'medium'}</Badge>
+      </div>
+      <p className="mt-3 font-mono text-xs text-accent-soft">{finding.line_reference || finding.file_path || 'snippet'}</p>
+      <p className="mt-2 text-sm leading-relaxed text-gray-200">{finding.explanation}</p>
+      <div className="mt-3 rounded-md border border-surface-800 bg-surface-900/70 p-3">
+        <p className="text-xs uppercase tracking-[0.14em] text-gray-500">Suggested fix</p>
+        <p className="mt-1 text-sm text-gray-300">{finding.suggested_fix}</p>
+      </div>
+      {finding.matching_analysis_issues?.length > 0 && (
+        <div className="mt-3 space-y-2">
+          <p className="text-xs uppercase tracking-[0.14em] text-emerald-300">Deterministic agreement</p>
+          {finding.matching_analysis_issues.map((issue) => (
+            <div key={issue.id} className="rounded-md border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-100">
+              <span className="font-semibold">{issue.type}</span>
+              {issue.description ? <span className="text-emerald-200/80"> — {issue.description}</span> : null}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function CodeReviewPanel({ repoId, prefill }) {
   const { session } = useAuth();
 
   // State — same pattern as SearchPanel
@@ -35,6 +70,12 @@ export default function CodeReviewPanel({ repoId }) {
   const [sources,            setSources]            = useState([]);
   const [error,              setError]              = useState(null);
   const [hasSubmitted,       setHasSubmitted]       = useState(false);
+  const [reviewMode,         setReviewMode]         = useState('general');
+  const [findings,           setFindings]           = useState([]);
+  const [auditProgress,      setAuditProgress]      = useState(null);
+  const [auditSummary,       setAuditSummary]       = useState(null);
+  const [auditHistory,       setAuditHistory]       = useState([]);
+  const [prefillLabel,       setPrefillLabel]       = useState(null);
 
   const answerRef = useRef(null);
   const abortRef  = useRef(null);
@@ -56,6 +97,61 @@ export default function CodeReviewPanel({ repoId }) {
     }
   }, [answer, isStreaming]);
 
+  useEffect(() => {
+    if (!prefill?.content) return;
+    setSnippet(prefill.content);
+    setReviewMode(prefill.mode === 'security_audit' ? 'security' : 'general');
+    setActivePreset(null);
+    setContextDescription(prefill.filePath ? `Audit file: ${prefill.filePath}` : '');
+    setPrefillLabel(prefill.filePath || null);
+    setAnswer('');
+    setFindings([]);
+    setSources([]);
+    setError(null);
+    setHasSubmitted(false);
+  }, [prefill]);
+
+  const fetchAuditHistory = useCallback(async () => {
+    if (!session?.access_token) return;
+    try {
+      const res = await fetch(apiUrl(`/api/review/${repoId}/security-audits`), {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      setAuditHistory(data.audits || []);
+    } catch {
+      // History is secondary; keep the review UI usable if it fails.
+    }
+  }, [repoId, session?.access_token]);
+
+  useEffect(() => {
+    fetchAuditHistory();
+  }, [fetchAuditHistory]);
+
+  const handleSseEvent = useCallback((event) => {
+    if (!event || typeof event !== 'object') return;
+    if (event.type === 'sources') {
+      setSources(prev => event.file_path ? [...prev, ...(event.sources || [])] : (event.sources || []));
+    } else if (event.type === 'chunk') {
+      setAnswer(prev => prev + (event.text || ''));
+    } else if (event.type === 'finding' && event.finding) {
+      setFindings(prev => [...prev, { ...event.finding, file_path: event.file_path || event.finding.file_path }]);
+    } else if (event.type === 'progress') {
+      setAuditProgress(event);
+    } else if (event.type === 'summary') {
+      setAuditSummary({ ...(event.summary || {}), status: event.status });
+      if (event.audit) fetchAuditHistory();
+    } else if (event.type === 'done') {
+      setIsStreaming(false);
+      if (event.audit) fetchAuditHistory();
+    } else if (event.type === 'error') {
+      setError(event.message);
+      setIsStreaming(false);
+      if (event.audit) fetchAuditHistory();
+    }
+  }, [fetchAuditHistory]);
+
   // ---------------------------------------------------------------------------
   // Core SSE streaming — same fetch + reader + decoder loop as SearchPanel
   // pointing to /api/review/:repoId with { snippet, context, mode }
@@ -74,6 +170,9 @@ export default function CodeReviewPanel({ repoId }) {
     setIsStreaming(true);
     setAnswer('');
     setSources([]);
+    setFindings([]);
+    setAuditProgress(null);
+    setAuditSummary(null);
     setError(null);
     setHasSubmitted(true);
 
@@ -90,7 +189,8 @@ export default function CodeReviewPanel({ repoId }) {
             activePreset ? PRESETS.find(p => p.id === activePreset)?.hint : '',
             contextDescription.trim(),
           ].filter(Boolean).join('\n\n') || undefined,
-          mode,
+          mode: reviewMode === 'security' ? 'security_audit' : mode,
+          filePath: prefillLabel || undefined,
         }),
         signal: controller.signal,
       });
@@ -118,16 +218,7 @@ export default function CodeReviewPanel({ repoId }) {
           try {
             const event = JSON.parse(line.slice(6));
 
-            if (event.type === 'sources') {
-              setSources(event.sources || []);
-            } else if (event.type === 'chunk') {
-              setAnswer(prev => prev + event.text);
-            } else if (event.type === 'done') {
-              setIsStreaming(false);
-            } else if (event.type === 'error') {
-              setError(event.message);
-              setIsStreaming(false);
-            }
+            handleSseEvent(event);
           } catch {
             // Malformed event — skip
           }
@@ -139,13 +230,66 @@ export default function CodeReviewPanel({ repoId }) {
     } finally {
       setIsStreaming(false);
     }
-  }, [repoId, session, isStreaming, snippet, contextDescription]);
+  }, [repoId, session, isStreaming, snippet, contextDescription, activePreset, reviewMode, prefillLabel, handleSseEvent]);
+
+  const runWholeRepoAudit = useCallback(async () => {
+    if (isStreaming) return;
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setReviewMode('security');
+    setIsStreaming(true);
+    setAnswer('');
+    setSources([]);
+    setFindings([]);
+    setAuditProgress(null);
+    setAuditSummary(null);
+    setError(null);
+    setHasSubmitted(true);
+
+    try {
+      const res = await fetch(apiUrl(`/api/review/${repoId}/security-audit`), {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${session.access_token}` },
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json.error || `Server error ${res.status}`);
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            handleSseEvent(JSON.parse(line.slice(6)));
+          } catch {
+            // Ignore partial/malformed SSE payloads.
+          }
+        }
+      }
+    } catch (err) {
+      if (err.name !== 'AbortError') setError(err.message || 'An unexpected error occurred.');
+    } finally {
+      setIsStreaming(false);
+    }
+  }, [handleSseEvent, isStreaming, repoId, session?.access_token]);
 
   // Derived: line count for badge
   const lineCount      = snippet ? snippet.split('\n').length : 0;
-  const lineLimit      = 200;
+  const lineLimit      = reviewMode === 'security' ? 1000 : 200;
   const isOverLimit    = lineCount > lineLimit;
   const canSubmit      = snippet.trim().length > 0 && !isStreaming && !isOverLimit;
+  const isSecurityMode = reviewMode === 'security';
 
   // ---------------------------------------------------------------------------
   // Render
@@ -156,13 +300,32 @@ export default function CodeReviewPanel({ repoId }) {
 
       {/* Input area */}
       <div className="shrink-0 rounded-xl border border-surface-800 bg-surface-900/70 p-3 shadow-panel">
+        <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <SegmentedControl
+            label="Mode"
+            value={reviewMode}
+            onChange={(value) => {
+              setReviewMode(value);
+              if (value === 'security') setActivePreset(null);
+            }}
+            options={[
+              { value: 'general', label: 'General' },
+              { value: 'security', label: 'Security Audit' },
+            ]}
+          />
+          {prefillLabel && (
+            <Badge tone="accent" className="max-w-full truncate">
+              {prefillLabel}
+            </Badge>
+          )}
+        </div>
 
         {/* Snippet textarea with line count badge */}
         <div className="relative">
           <textarea
             value={snippet}
             onChange={e => setSnippet(e.target.value)}
-            placeholder="Paste your code here (up to 200 lines)..."
+            placeholder={isSecurityMode ? 'Paste code to audit for security issues...' : 'Paste your code here (up to 200 lines)...'}
             disabled={isStreaming}
             rows={8}
             className="max-h-[32vh] min-h-[10rem] w-full resize-y rounded-lg border border-surface-700 bg-surface-950 px-4 py-3 font-mono text-sm leading-6 text-white outline-none transition-colors placeholder:text-gray-600 focus:border-primary-500 focus:ring-2 focus:ring-primary-500/20 disabled:opacity-60"
@@ -186,6 +349,7 @@ export default function CodeReviewPanel({ repoId }) {
         )}
 
         {/* Review focus presets */}
+        {!isSecurityMode && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <span className="shrink-0 text-xs uppercase tracking-[0.16em] text-gray-500">Focus</span>
           {PRESETS.map((preset) => (
@@ -205,13 +369,14 @@ export default function CodeReviewPanel({ repoId }) {
             </button>
           ))}
         </div>
+        )}
 
         {/* Context field */}
         <input
           type="text"
           value={contextDescription}
           onChange={e => setContextDescription(e.target.value)}
-          placeholder="What is this code supposed to do? (optional)"
+          placeholder={isSecurityMode ? 'Audit context or threat model notes (optional)' : 'What is this code supposed to do? (optional)'}
           disabled={isStreaming}
           className="mt-3 w-full rounded-lg border border-surface-700 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition-colors placeholder:text-gray-600 focus:border-primary-500 focus:ring-2 focus:ring-primary-500/20 disabled:opacity-60"
         />
@@ -236,20 +401,33 @@ export default function CodeReviewPanel({ repoId }) {
                 disabled={!canSubmit}
                 className="w-full sm:w-auto"
               >
-                <Sparkles className="h-4 w-4" />
-                Review Code
+                {isSecurityMode ? <ShieldAlert className="h-4 w-4" /> : <Sparkles className="h-4 w-4" />}
+                {isSecurityMode ? 'Audit Code' : 'Review Code'}
               </Button>
 
               {/* Clean up this code — secondary/outlined */}
-              <Button
+              {!isSecurityMode && (
+                <Button
                 onClick={() => runReview('cleanup')}
                 disabled={!canSubmit}
                 variant="secondary"
                 className="w-full sm:w-auto"
-              >
-                <Code2 className="h-4 w-4" />
-                Clean up this code
-              </Button>
+                >
+                  <Code2 className="h-4 w-4" />
+                  Clean up this code
+                </Button>
+              )}
+              {isSecurityMode && (
+                <Button
+                  onClick={runWholeRepoAudit}
+                  disabled={isStreaming}
+                  variant="secondary"
+                  className="w-full sm:w-auto"
+                >
+                  <ShieldAlert className="h-4 w-4" />
+                  Run security audit
+                </Button>
+              )}
             </>
           )}
           <Badge className="sm:ml-auto">{lineCount} / {lineLimit} lines</Badge>
@@ -264,9 +442,9 @@ export default function CodeReviewPanel({ repoId }) {
         {/* Pre-submit empty state */}
         {!hasSubmitted && !isStreaming && (
           <EmptyState
-            icon={FileCode}
-            title="AI Code Review"
-            description="Paste a focused snippet, choose a review mode, and CodeLens will compare it against nearby codebase patterns."
+            icon={isSecurityMode ? ShieldAlert : FileCode}
+            title={isSecurityMode ? 'Security Audit' : 'AI Code Review'}
+            description={isSecurityMode ? 'Audit a file or run a capped whole-repo security pass against the highest-leverage files.' : 'Paste a focused snippet, choose a review mode, and CodeLens will compare it against nearby codebase patterns.'}
             className="min-h-[15rem] border-0 bg-transparent"
           />
         )}
@@ -289,6 +467,19 @@ export default function CodeReviewPanel({ repoId }) {
           </div>
         )}
 
+        {auditProgress && (
+          <div className="rounded-lg border border-indigo-500/20 bg-indigo-500/10 p-4 text-sm text-indigo-100">
+            <div className="flex items-center gap-2">
+              <Clock className="h-4 w-4" />
+              <span className="font-medium">
+                {auditProgress.status === 'skipped' ? 'Skipped' : auditProgress.status === 'budget_stopped' ? 'Budget stop' : 'Auditing'}
+              </span>
+              {auditProgress.total ? <span className="text-indigo-200/70">{auditProgress.index} / {auditProgress.total}</span> : null}
+            </div>
+            {auditProgress.file_path && <p className="mt-2 break-all font-mono text-xs text-indigo-100/80">{auditProgress.file_path}</p>}
+          </div>
+        )}
+
         {/* Answer — reuses AnswerBlock from SharedAnswerComponents */}
         {(answer || isStreaming) && (
           <div>
@@ -299,6 +490,36 @@ export default function CodeReviewPanel({ repoId }) {
               <p className="text-xs font-semibold uppercase tracking-widest text-gray-500">Review</p>
             </div>
             <AnswerBlock text={answer} isStreaming={isStreaming} />
+          </div>
+        )}
+
+        {findings.length > 0 && (
+          <div>
+            <div className="mb-3 flex items-center gap-2">
+              <div className="flex h-6 w-6 items-center justify-center rounded-full border border-red-500/25 bg-red-500/15">
+                <ShieldAlert className="h-3.5 w-3.5 text-red-300" />
+              </div>
+              <p className="text-xs font-semibold uppercase tracking-widest text-gray-500">Security findings</p>
+            </div>
+            <div className="space-y-3">
+              {findings.map((finding, i) => (
+                <FindingCard key={`${finding.file_path || 'snippet'}-${finding.line_reference || i}-${i}`} finding={finding} index={i} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {auditSummary && (
+          <div className="rounded-lg border border-surface-800 bg-surface-950/70 p-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge tone={auditSummary.status === 'partial' ? 'warning' : 'success'}>
+                {auditSummary.status === 'partial' ? 'Partial' : 'Complete'}
+              </Badge>
+              <Badge tone="subtle">{auditSummary.audited_count || 0} audited</Badge>
+              <Badge tone="subtle">{auditSummary.skipped_count || 0} skipped</Badge>
+              <Badge tone="subtle">{auditSummary.findings_count || 0} findings</Badge>
+            </div>
+            {auditSummary.narrative && <p className="mt-3 text-sm text-gray-300">{auditSummary.narrative}</p>}
           </div>
         )}
 
@@ -316,6 +537,31 @@ export default function CodeReviewPanel({ repoId }) {
             <div className="space-y-3">
               {sources.map((source, i) => (
                 <SourceCard key={`${source.file_path}-${source.start_line}`} source={source} index={i} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {auditHistory.length > 0 && !isStreaming && (
+          <div>
+            <div className="mb-3 flex items-center gap-2">
+              <div className="flex h-6 w-6 items-center justify-center rounded-full border border-gray-700 bg-gray-800">
+                <Clock className="h-3.5 w-3.5 text-gray-400" />
+              </div>
+              <p className="text-xs font-semibold uppercase tracking-widest text-gray-500">Security audit history</p>
+            </div>
+            <div className="space-y-2">
+              {auditHistory.slice(0, 5).map((audit) => (
+                <div key={audit.id} className="rounded-lg border border-surface-800 bg-surface-900/60 px-4 py-3 text-sm">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge tone={audit.findings_json?.status === 'partial' ? 'warning' : 'success'}>
+                      {audit.findings_json?.status || 'complete'}
+                    </Badge>
+                    <span className="text-gray-400">{new Date(audit.created_at).toLocaleString()}</span>
+                    <span className="text-gray-600">·</span>
+                    <span className="text-gray-400">{audit.findings_json?.summary?.findings_count || 0} findings</span>
+                  </div>
+                </div>
               ))}
             </div>
           </div>

@@ -39,7 +39,7 @@ function GraphToast({ message, visible }) {
   );
 }
 
-function GraphDetailsPanel({ node, onChatWithFile }) {
+function GraphDetailsPanel({ node, onChatWithFile, onAuditFile }) {
   return (
     <aside
       className={`w-full shrink-0 rounded-xl border border-surface-800 bg-surface-900/80 p-5 shadow-panel transition-all duration-200 xl:w-72 ${
@@ -83,6 +83,13 @@ function GraphDetailsPanel({ node, onChatWithFile }) {
             className="mt-5 rounded-xl border border-indigo-500/30 bg-indigo-500/10 px-4 py-3 text-sm font-semibold text-indigo-200 transition hover:bg-indigo-500/20"
           >
             Chat with this file
+          </button>
+
+          <button
+            onClick={() => onAuditFile?.(node.file_path)}
+            className="mt-2 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm font-semibold text-red-100 transition hover:bg-red-500/20"
+          >
+            Audit this file
           </button>
 
           <div className="mt-auto pt-5 text-xs text-gray-500">
@@ -337,6 +344,7 @@ export default function DependencyGraph({
   onAnalyseImpact,
   onClearImpactAnalysis,
   onChatWithFile,
+  onAuditFile,
   repoName,
 }) {
   const containerRef = useRef(null);
@@ -794,6 +802,15 @@ export default function DependencyGraph({
               Chat with this file
             </button>
             <button
+              onClick={() => {
+                onAuditFile?.(contextMenu.node.file_path);
+                setContextMenu(null);
+              }}
+              className="block w-full rounded-lg px-3 py-2 text-left text-sm text-red-200 transition hover:bg-gray-800"
+            >
+              Audit this file
+            </button>
+            <button
               onClick={async () => {
                 try {
                   await navigator.clipboard.writeText(contextMenu.node.file_path);
@@ -815,7 +832,7 @@ export default function DependencyGraph({
       {impactAnalysis ? (
         <ImpactAnalysisPanel impactAnalysis={impactAnalysis} onClearImpactAnalysis={onClearImpactAnalysis} />
       ) : (
-        <GraphDetailsPanel node={selectedNode} onChatWithFile={onChatWithFile} />
+        <GraphDetailsPanel node={selectedNode} onChatWithFile={onChatWithFile} onAuditFile={onAuditFile} />
       )}
     </div>
   );

@@ -103,6 +103,7 @@ export default function RepoView() {
   const [selectedNodeId, setSelectedNodeId] = useState(null);
   const [impactSourcePath, setImpactSourcePath] = useState(null);
   const [chatFilePath, setChatFilePath] = useState(null);
+  const [reviewPrefill, setReviewPrefill] = useState(null);
 
   const [analysisData, setAnalysisData]   = useState({ nodes: [], edges: [], issues: [] });
   const [hasFetchedData, setHasFetchedData] = useState(false);
@@ -311,6 +312,29 @@ export default function RepoView() {
     }, { replace: true });
   }, [setSearchParams]);
 
+  const handleAuditFile = useCallback(async (filePath) => {
+    if (!session?.access_token || !filePath) return;
+    try {
+      const res = await fetch(apiUrl(`/api/repos/${repoId}/file?path=${encodeURIComponent(filePath)}`), {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to fetch file content');
+      }
+      const data = await res.json();
+      setReviewPrefill({
+        mode: 'security_audit',
+        filePath,
+        content: data.content || '',
+        key: `${filePath}:${Date.now()}`,
+      });
+      setSearchParams({ tab: 'review' }, { replace: true });
+    } catch (err) {
+      toast.error(err.message || 'Failed to prepare security audit');
+    }
+  }, [repoId, session?.access_token, setSearchParams, toast]);
+
   const handleOpenDependencies = useCallback((issue) => {
     const packageName = issue?.description?.match(/:\s(@?[^@\s:]+(?:\/[^@\s:]+)?)@/)?.[1] || '';
     setSearchParams((current) => {
@@ -489,6 +513,7 @@ export default function RepoView() {
                   onAnalyseImpact={handleStartImpactAnalysis}
                   onClearImpactAnalysis={handleClearImpactAnalysis}
                   onChatWithFile={(filePath) => setChatFilePath(filePath)}
+                  onAuditFile={handleAuditFile}
                   repoName={repo?.name}
                 />
               </div>
@@ -499,6 +524,7 @@ export default function RepoView() {
                   selectedNode={selectedNode}
                   onNodeSelect={handleNodeSelect}
                   onAnalyseImpact={handleStartImpactAnalysis}
+                  onAuditFile={handleAuditFile}
                 />
               </div>
 
@@ -519,7 +545,7 @@ export default function RepoView() {
 
               {/* Review tab — CodeReviewPanel */}
               <div className={activeTab === 'review' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
-                <CodeReviewPanel repoId={repoId} />
+                <CodeReviewPanel repoId={repoId} prefill={reviewPrefill} />
               </div>
 
               {/* Settings tab — webhook / auto-sync */}
@@ -533,7 +559,7 @@ export default function RepoView() {
 
               {/* Files tab — repository file browser */}
               <div className={activeTab === 'files' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
-                <FileBrowser repoId={repoId} nodes={analysisData.nodes} />
+                <FileBrowser repoId={repoId} nodes={analysisData.nodes} onAuditFile={handleAuditFile} />
               </div>
 
               {/* Dependencies tab — package vulnerability scanning (US-045) */}
