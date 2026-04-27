@@ -17,6 +17,10 @@ const fs = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
 
+function duplicationDemoFallbackEnabled() {
+  return String(process.env.ENABLE_DUPLICATION_DEMO_FALLBACK || '').toLowerCase() === 'true';
+}
+
 function sha256(content) {
   return crypto.createHash('sha256').update(content).digest('hex');
 }
@@ -712,6 +716,37 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     // 11. Extract Semantic Chunks and Embed Vectors (US-017)
     if (!process.env.OPENAI_API_KEY) {
       console.log('[indexer] No OPENAI_API_KEY set — skipping embedding step.');
+      if (duplicationDemoFallbackEnabled()) {
+        try {
+          console.log(`[indexer] ENABLE_DUPLICATION_DEMO_FALLBACK=true — storing text-only chunks for ${repoId}`);
+          const fallbackChunks = [];
+          for (const file of pendingFiles) {
+            if (!changedFilePaths.has(file.path)) continue;
+            if (!file.content) continue;
+            fallbackChunks.push(...extractChunksFromFile(file.path, file.content, repoId).map(chunk => ({
+              repo_id: chunk.repo_id,
+              file_path: chunk.file_path,
+              start_line: chunk.start_line,
+              end_line: chunk.end_line,
+              content: chunk.content,
+              embedding: null,
+            })));
+          }
+
+          if (fallbackChunks.length > 0) {
+            const insertBatches = chunkArray(fallbackChunks, 500);
+            for (const insBatch of insertBatches) {
+              const { error: insErr } = await supabaseAdmin.from('code_chunks').insert(insBatch);
+              if (insErr) console.error(`[indexer] DB insert err for fallback chunks: ${insErr.message}`);
+            }
+          }
+
+          const result = await detectDuplicateCandidates(repoId, { allowTextFallback: true });
+          console.log(`[indexer] Demo fallback duplication scan saved ${result.inserted || 0} candidate pair(s).`);
+        } catch (fallbackErr) {
+          console.warn(`[indexer] Demo fallback duplication scan failed: ${fallbackErr.message}`);
+        }
+      }
     } else {
       try {
         console.log(`[indexer] Starting semantic chunking and embedding for ${repoId}`);

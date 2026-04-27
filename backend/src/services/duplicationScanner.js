@@ -4,6 +4,11 @@ const DEFAULT_THRESHOLD = 0.92;
 const MIN_CHUNK_LINES = 10;
 const EXCERPT_LINES = 8;
 const EXCERPT_CHARS = 200;
+const DEMO_FALLBACK_LIMIT = 5000;
+
+function isDemoFallbackEnabled() {
+  return String(process.env.ENABLE_DUPLICATION_DEMO_FALLBACK || '').toLowerCase() === 'true';
+}
 
 function chunkLineSpan(chunk = {}) {
   const start = Number(chunk.start_line || 0);
@@ -53,18 +58,104 @@ function dedupeCandidates(rows, repoId, threshold = DEFAULT_THRESHOLD) {
   return [...byPair.values()];
 }
 
-async function detectDuplicateCandidates(repoId, { threshold = DEFAULT_THRESHOLD } = {}) {
+function normalizeCodeForSimilarity(content = '') {
+  const keywords = new Set([
+    'break', 'case', 'catch', 'class', 'const', 'continue', 'default', 'else', 'export',
+    'false', 'for', 'from', 'function', 'if', 'import', 'in', 'let', 'new', 'null',
+    'return', 'switch', 'throw', 'true', 'try', 'while',
+  ]);
+
+  return String(content || '')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/.*$/gm, ' ')
+    .replace(/(['"`])(?:\\.|(?!\1)[\s\S])*\1/g, ' STR ')
+    .replace(/\b\d+(?:\.\d+)?\b/g, ' NUM ')
+    .replace(/\b[A-Za-z_$][\w$]*\b/g, (token) => (keywords.has(token) ? token : 'ID'))
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function bigrams(text = '') {
+  const value = String(text || '');
+  if (value.length < 2) return new Map([[value, 1]]);
+  const counts = new Map();
+  for (let i = 0; i < value.length - 1; i++) {
+    const gram = value.slice(i, i + 2);
+    counts.set(gram, (counts.get(gram) || 0) + 1);
+  }
+  return counts;
+}
+
+function diceSimilarity(a = '', b = '') {
+  const aGrams = bigrams(a);
+  const bGrams = bigrams(b);
+  const aTotal = [...aGrams.values()].reduce((sum, n) => sum + n, 0);
+  const bTotal = [...bGrams.values()].reduce((sum, n) => sum + n, 0);
+  if (aTotal === 0 && bTotal === 0) return 1;
+  if (aTotal === 0 || bTotal === 0) return 0;
+
+  let overlap = 0;
+  for (const [gram, count] of aGrams.entries()) {
+    overlap += Math.min(count, bGrams.get(gram) || 0);
+  }
+  return (2 * overlap) / (aTotal + bTotal);
+}
+
+function textSimilarity(a = '', b = '') {
+  return diceSimilarity(normalizeCodeForSimilarity(a), normalizeCodeForSimilarity(b));
+}
+
+async function findTextFallbackPairs(repoId, threshold = DEFAULT_THRESHOLD) {
+  const { data: chunks, error } = await supabaseAdmin
+    .from('code_chunks')
+    .select('id, repo_id, file_path, start_line, end_line, content')
+    .eq('repo_id', repoId)
+    .limit(DEMO_FALLBACK_LIMIT);
+
+  if (error) {
+    console.warn(`[duplication] Demo fallback chunk fetch failed for ${repoId}: ${error.message}`);
+    return [];
+  }
+
+  const eligible = (chunks || []).filter(chunk => (
+    chunk.repo_id === repoId
+    && chunkLineSpan(chunk) >= MIN_CHUNK_LINES
+    && String(chunk.content || '').trim().length > 0
+  ));
+
+  const pairs = [];
+  for (let i = 0; i < eligible.length; i++) {
+    for (let j = i + 1; j < eligible.length; j++) {
+      if (eligible[i].file_path === eligible[j].file_path) continue;
+      const similarity = textSimilarity(eligible[i].content, eligible[j].content);
+      if (similarity > threshold) {
+        pairs.push({
+          repo_id: repoId,
+          chunk_a_id: eligible[i].id,
+          chunk_b_id: eligible[j].id,
+          similarity,
+        });
+      }
+    }
+  }
+  return pairs;
+}
+
+async function detectDuplicateCandidates(repoId, { threshold = DEFAULT_THRESHOLD, allowTextFallback = isDemoFallbackEnabled() } = {}) {
   try {
     await supabaseAdmin.from('duplication_candidates').delete().eq('repo_id', repoId);
 
-    const { data: pairs, error } = await supabaseAdmin.rpc('find_duplicate_chunk_pairs', {
+    let { data: pairs, error } = await supabaseAdmin.rpc('find_duplicate_chunk_pairs', {
       p_repo_id: repoId,
       p_threshold: threshold,
     });
 
     if (error) {
       console.warn(`[duplication] Similarity search failed for ${repoId}: ${error.message}`);
-      return { inserted: 0, skipped: true };
+      if (!allowTextFallback) return { inserted: 0, skipped: true };
+      pairs = await findTextFallbackPairs(repoId, threshold);
+    } else if ((!pairs || pairs.length === 0) && allowTextFallback) {
+      pairs = await findTextFallbackPairs(repoId, threshold);
     }
 
     const candidates = dedupeCandidates(pairs || [], repoId, threshold);
@@ -91,8 +182,7 @@ async function detectDuplicateCandidates(repoId, { threshold = DEFAULT_THRESHOLD
       return a && b
         && a.repo_id === repoId
         && b.repo_id === repoId
-        && a.embedding
-        && b.embedding
+        && (allowTextFallback || (a.embedding && b.embedding))
         && chunkLineSpan(a) >= MIN_CHUNK_LINES
         && chunkLineSpan(b) >= MIN_CHUNK_LINES;
     });
@@ -240,11 +330,15 @@ module.exports = {
   MIN_CHUNK_LINES,
   canonicalPair,
   dedupeCandidates,
+  isDemoFallbackEnabled,
   detectDuplicateCandidates,
   buildDuplicationClusters,
   _private: {
     chunkLineSpan,
     makeExcerpt,
+    normalizeCodeForSimilarity,
+    textSimilarity,
+    findTextFallbackPairs,
     buildClusterObjects,
     severityForCluster,
   },
