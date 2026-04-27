@@ -25,6 +25,7 @@ function makeSupabaseMock({ rpcPairs = [], chunks = [] } = {}) {
     upsert(payload) { this.action = 'upsert'; this.payload = payload; return this; }
     eq(column, value) { this.filters.push({ column, value }); return this; }
     in(column, value) { this.filters.push({ column, value }); return this; }
+    limit() { return this; }
     then(resolve, reject) {
       if (this.table === 'duplication_candidates' && this.action === 'delete') {
         return Promise.resolve({ data: null, error: null }).then(resolve, reject);
@@ -35,6 +36,9 @@ function makeSupabaseMock({ rpcPairs = [], chunks = [] } = {}) {
       }
       if (this.table === 'code_chunks') {
         const idFilter = this.filters.find(f => f.column === 'id');
+        if (!idFilter) {
+          return Promise.resolve({ data: chunks, error: null }).then(resolve, reject);
+        }
         const wanted = new Set(idFilter?.value || []);
         return Promise.resolve({ data: chunks.filter(chunk => wanted.has(chunk.id)), error: null }).then(resolve, reject);
       }
@@ -117,6 +121,46 @@ describe('duplicationScanner', () => {
     expect(clusters[0].member_count).toBe(3);
     expect(clusters[0].severity).toBe('medium');
     expect(clusters[0].members.map(m => m.chunk_id)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('demo fallback finds normalized text duplicates without embeddings', async () => {
+    const { client, writes } = makeSupabaseMock({
+      rpcPairs: [],
+      chunks: [
+        {
+          id: 'a',
+          repo_id: 'repo-1',
+          file_path: 'a.js',
+          start_line: 1,
+          end_line: 12,
+          embedding: null,
+          content: 'export function calculateOrderTotals(order) {\nconst items = order.items;\nlet total = 0;\nfor (const item of items) {\nconst quantity = item.quantity;\nconst price = item.price;\nconst line = quantity * price;\ntotal += line;\n}\nreturn total;\n}\n',
+        },
+        {
+          id: 'b',
+          repo_id: 'repo-1',
+          file_path: 'b.js',
+          start_line: 1,
+          end_line: 12,
+          embedding: null,
+          content: 'export function calculateInvoiceTotals(invoice) {\nconst lines = invoice.lines;\nlet amount = 0;\nfor (const row of lines) {\nconst units = row.units;\nconst cost = row.cost;\nconst value = units * cost;\namount += value;\n}\nreturn amount;\n}\n',
+        },
+      ],
+    });
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = client;
+
+    const result = await detectDuplicateCandidates('repo-1', { allowTextFallback: true });
+
+    expect(result.inserted).toBe(1);
+    expect(writes.upsertPayload[0].chunk_a_id).toBe('a');
+    expect(writes.upsertPayload[0].chunk_b_id).toBe('b');
+    expect(writes.upsertPayload[0].similarity).toBeGreaterThan(0.92);
+  });
+
+  it('normalizes similar code with different names above the demo threshold', () => {
+    const a = 'function alpha(order) { const quantity = order.qty; return quantity * order.price; }';
+    const b = 'function beta(invoice) { const units = invoice.units; return units * invoice.cost; }';
+    expect(_private.textSimilarity(a, b)).toBeGreaterThan(0.92);
   });
 
   it('schema and migration define same-repo-safe duplicate storage and RPC behavior', () => {
