@@ -108,6 +108,7 @@ export default function RepoView() {
   const [analysisData, setAnalysisData]   = useState({ nodes: [], edges: [], issues: [] });
   const [hasFetchedData, setHasFetchedData] = useState(false);
   const [analysisError, setAnalysisError] = useState(null);
+  const [churnData, setChurnData] = useState([]);
 
   const [isLoading, setIsLoading]     = useState(true);
   const [error, setError]             = useState(null);
@@ -150,18 +151,29 @@ export default function RepoView() {
   const fetchAnalysisData = useCallback(async (force = false) => {
     if ((hasFetchedData && !force) || !session?.access_token) return;
     try {
-      const res = await fetch(apiUrl(`/api/repos/${repoId}/analysis`), {
-        headers: { Authorization: `Bearer ${session.access_token}` },
-      });
-      if (!res.ok) throw new Error('Failed to fetch analysis metadata');
+      const [analysisRes, churnRes] = await Promise.all([
+        fetch(apiUrl(`/api/repos/${repoId}/analysis`), {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        }),
+        fetch(apiUrl(`/api/repos/${repoId}/churn`), {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        }),
+      ]);
 
-      const data = await res.json();
+      if (!analysisRes.ok) throw new Error('Failed to fetch analysis metadata');
 
+      const data = await analysisRes.json();
       setAnalysisData({
         nodes:  data.nodes  || [],
         edges:  data.edges  || [],
         issues: data.issues || [],
       });
+
+      if (churnRes.ok) {
+        const churnJson = await churnRes.json();
+        setChurnData(churnJson.churn || []);
+      }
+
       setHasFetchedData(true);
       setAnalysisError(null);
     } catch (err) {
@@ -509,6 +521,7 @@ export default function RepoView() {
                   issues={analysisData.issues}
                   selectedNodeId={selectedNodeId}
                   impactAnalysis={impactAnalysis}
+                  churnData={churnData}
                   onNodeSelect={handleNodeSelect}
                   onAnalyseImpact={handleStartImpactAnalysis}
                   onClearImpactAnalysis={handleClearImpactAnalysis}
@@ -525,6 +538,8 @@ export default function RepoView() {
                   onNodeSelect={handleNodeSelect}
                   onAnalyseImpact={handleStartImpactAnalysis}
                   onAuditFile={handleAuditFile}
+                  churnData={churnData}
+                  repoSource={repo?.source}
                 />
               </div>
 

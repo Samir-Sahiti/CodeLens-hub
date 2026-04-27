@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useGraphSimulation } from '../hooks/useGraphSimulation';
 import { LANGUAGE_COLORS, formatLanguage } from '../lib/constants';
-import { ChevronDown, ChevronUp, Download, Search, Shield, X } from './ui/Icons';
+import { ChevronDown, ChevronUp, Download, Search, Shield, TrendingUp, X } from './ui/Icons';
 
 function GraphLegend() {
   const items = [
@@ -542,6 +542,7 @@ export default function DependencyGraph({
   issues,
   selectedNodeId,
   impactAnalysis,
+  churnData = [],
   onNodeSelect,
   onAnalyseImpact,
   onClearImpactAnalysis,
@@ -562,6 +563,9 @@ export default function DependencyGraph({
   // US-047: attack surface state
   const [attackSurfaceMode, setAttackSurfaceMode]   = useState(false);
   const [attackSurfaceSource, setAttackSurfaceSource] = useState(null); // graphId of selected source
+
+  // US-050: hotspot mode
+  const [hotspotGraphMode, setHotspotGraphMode] = useState(false);
 
   // Search state
   const [searchBarOpen, setSearchBarOpen] = useState(false);
@@ -811,6 +815,18 @@ export default function DependencyGraph({
     return { isActive: true, sourceIds: asSourceIds, sinkIds: asSinkIds, bothIds: asBothIds, pathNodeIds, pathEdgeIds };
   }, [attackSurfaceMode, asSourceIds, asSinkIds, asBothIds, attackSurfaceSource, currentSourcePaths]);
 
+  // US-050: hotspot scores mapped to graphIds
+  const hotspotModeData = useMemo(() => {
+    if (!hotspotGraphMode || churnData.length === 0) return null;
+    const pathToGraphId = new Map(graphNodes.map(n => [n.file_path, n.graphId]));
+    const scores = new Map();
+    for (const row of churnData) {
+      const gid = pathToGraphId.get(row.file_path);
+      if (gid != null) scores.set(gid, row.hotspot_score || 0);
+    }
+    return { isActive: true, scores };
+  }, [hotspotGraphMode, churnData, graphNodes]);
+
   // Search: filter simNodes by file path query
   const searchMatchNodes = useMemo(() => {
     if (!searchQuery.trim()) return [];
@@ -894,6 +910,7 @@ export default function DependencyGraph({
     selection: effectiveSelection,
     impactAnalysis,
     attackSurface: attackSurfaceData,
+    hotspotMode: hotspotModeData,
     focusNodeId: searchCurrentNode?.graphId || selection.primaryId,
     onNodeClick: handleNodeClick,
     onNodeContextMenu: handleNodeContextMenu,
@@ -1032,6 +1049,19 @@ export default function DependencyGraph({
             >
               <Shield className="mr-1.5 inline h-3.5 w-3.5" /> Attack Surface
             </button>
+            {churnData.length > 0 && (
+              <button
+                onClick={() => setHotspotGraphMode(v => !v)}
+                className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                  hotspotGraphMode
+                    ? 'border-orange-500/50 bg-orange-500/15 text-orange-300 hover:bg-orange-500/25'
+                    : 'border-gray-700 bg-gray-950/80 text-gray-400 hover:border-gray-500 hover:text-gray-200'
+                }`}
+                title="Hotspot colour mode: green → yellow → red by churn × complexity"
+              >
+                <TrendingUp className="mr-1.5 inline h-3.5 w-3.5" /> Hotspot
+              </button>
+            )}
             <button
               onClick={resetView}
               className="rounded-full border border-gray-700 bg-gray-950/80 px-4 py-2 text-sm font-medium text-gray-100 transition hover:border-gray-500 hover:bg-gray-900"

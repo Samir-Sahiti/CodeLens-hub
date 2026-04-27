@@ -44,4 +44,7 @@ router.get('/:repoId/file', requireAuth, repoController.getFileContent);
 // Fetch parsed dependency manifest data for the Dependencies tab (US-045)
 router.get('/:repoId/dependencies', requireAuth, repoController.getDependencies);
 
+// Fetch file churn data for the hotspot overlay (US-050)
+router.get('/:repoId/churn', requireAuth, repoController.getChurn);
+
 module.exports = router;

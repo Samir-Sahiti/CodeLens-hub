@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import * as d3 from 'd3';
 import VirtualTable from './VirtualTable';
 import { LANGUAGE_COLORS, formatLanguage } from '../lib/constants';
-import { ArrowDown, ArrowUp, Search, X } from './ui/Icons';
+import { ArrowDown, ArrowUp, Search, TrendingUp, X } from './ui/Icons';
 
 // ── Sub-component: language distribution with optional "show all" ─────────────
 function LangDistributionCard({ langCounts }) {
@@ -41,14 +41,19 @@ function LangDistributionCard({ langCounts }) {
 }
 
 
-export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact, onAuditFile }) {
+export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact, onAuditFile, churnData = [], repoSource }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [sortConfig, setSortConfig] = useState({ key: 'complexity_score', direction: 'desc' });
   const [showHistogram, setShowHistogram] = useState(false);
   const [complexityFilter, setComplexityFilter] = useState(null);
+  const [hotspotsMode, setHotspotsMode] = useState(false);
 
   const ringRef = useRef(null);
   const histRef = useRef(null);
+
+  // Build a fast lookup from file_path → churn row (US-050)
+  const churnMap = useMemo(() => new Map(churnData.map(r => [r.file_path, r])), [churnData]);
+  const hasChurn = churnData.length > 0;
 
   const calc90th = (arr, key) => {
     if (!arr || arr.length === 0) return 0;
@@ -211,13 +216,22 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
     return result;
   }, [nodes, searchQuery, complexityFilter]);
 
-  const sortedNodes = useMemo(() => [...filteredNodes].sort((a, b) => {
-    const valA = a[sortConfig.key] || 0;
-    const valB = b[sortConfig.key] || 0;
+  // Augment nodes with churn data and sort
+  const augmentedNodes = useMemo(() =>
+    filteredNodes.map(n => {
+      const c = churnMap.get(n.file_path);
+      return c ? { ...n, commit_count: c.commit_count, unique_authors: c.unique_authors, lines_changed: c.lines_changed, hotspot_score: c.hotspot_score } : n;
+    }),
+    [filteredNodes, churnMap]
+  );
+
+  const sortedNodes = useMemo(() => [...augmentedNodes].sort((a, b) => {
+    const valA = a[sortConfig.key] ?? 0;
+    const valB = b[sortConfig.key] ?? 0;
     if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
     if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
     return 0;
-  }), [filteredNodes, sortConfig]);
+  }), [augmentedNodes, sortConfig]);
 
   const handleSort = (key) => {
     setSortConfig((prev) => {
@@ -283,6 +297,26 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
               >
                 {showHistogram ? 'Hide chart' : 'Show distribution'}
               </button>
+              {repoSource === 'upload' ? (
+                <span className="rounded-md border border-gray-700 px-3 py-1.5 text-xs text-gray-500" title="Hotspot analysis requires Git history — connect this project via GitHub to enable.">
+                  <TrendingUp className="mr-1 inline h-3.5 w-3.5 opacity-40" />
+                  Hotspots (GitHub only)
+                </span>
+              ) : (
+                <button
+                  onClick={() => {
+                    setHotspotsMode(v => !v);
+                    if (!hotspotsMode) setSortConfig({ key: 'hotspot_score', direction: 'desc' });
+                    else setSortConfig({ key: 'complexity_score', direction: 'desc' });
+                  }}
+                  disabled={!hasChurn}
+                  title={hasChurn ? 'Show files ranked by churn × complexity' : 'Re-index to compute hotspot data'}
+                  className={`rounded-md border px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${hotspotsMode ? 'border-orange-500/40 bg-orange-500/15 text-orange-300' : 'border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200'}`}
+                >
+                  <TrendingUp className="mr-1 inline h-3.5 w-3.5" />
+                  {hotspotsMode ? 'Hotspots on' : 'Hotspots'}
+                </button>
+              )}
               {complexityFilter && (
                 <button
                   onClick={() => setComplexityFilter(null)}
@@ -325,56 +359,65 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
               containerHeight="100%"
               tableClassName="w-full text-left text-sm table-fixed"
               colGroup={
-                <colgroup>
-                  <col style={{ width: '36%' }} />
-                  <col style={{ width: '11%' }} />
-                  <col style={{ width: '10%' }} />
-                  <col style={{ width: '10%' }} />
-                  <col style={{ width: '11%' }} />
-                  <col style={{ width: '12%' }} />
-                </colgroup>
+                hotspotsMode ? (
+                  <colgroup>
+                    <col style={{ width: '38%' }} />
+                    <col style={{ width: '12%' }} />
+                    <col style={{ width: '12%' }} />
+                    <col style={{ width: '14%' }} />
+                    <col style={{ width: '12%' }} />
+                    <col style={{ width: '12%' }} />
+                  </colgroup>
+                ) : (
+                  <colgroup>
+                    <col style={{ width: '36%' }} />
+                    <col style={{ width: '11%' }} />
+                    <col style={{ width: '10%' }} />
+                    <col style={{ width: '10%' }} />
+                    <col style={{ width: '11%' }} />
+                    <col style={{ width: '12%' }} />
+                  </colgroup>
+                )
               }
               renderHeader={() => (
                 <thead className="bg-gray-800/95 backdrop-blur text-gray-300 z-10 shadow-sm border-b border-gray-700">
-                  <tr>
-                    <th onClick={() => handleSort('file_path')}>
-                      File Path {renderSortIcon('file_path')}
-                    </th>
-                    <th onClick={() => handleSort('language')}>
-                      Language {renderSortIcon('language')}
-                    </th>
-                    <th onClick={() => handleSort('line_count')}>
-                      Lines {renderSortIcon('line_count')}
-                    </th>
-                    <th onClick={() => handleSort('outgoing_count')}>
-                      Imports {renderSortIcon('outgoing_count')}
-                    </th>
-                    <th onClick={() => handleSort('incoming_count')}>
-                      Dependents {renderSortIcon('incoming_count')}
-                    </th>
-                    <th onClick={() => handleSort('complexity_score')}>
-                      Complexity {renderSortIcon('complexity_score')}
-                    </th>
-                  </tr>
+                  {hotspotsMode ? (
+                    <tr>
+                      <th onClick={() => handleSort('file_path')}>File Path {renderSortIcon('file_path')}</th>
+                      <th onClick={() => handleSort('hotspot_score')}>Score {renderSortIcon('hotspot_score')}</th>
+                      <th onClick={() => handleSort('commit_count')}>Commits {renderSortIcon('commit_count')}</th>
+                      <th onClick={() => handleSort('unique_authors')}>Authors {renderSortIcon('unique_authors')}</th>
+                      <th onClick={() => handleSort('lines_changed')}>Lines Δ {renderSortIcon('lines_changed')}</th>
+                      <th onClick={() => handleSort('complexity_score')}>Complexity {renderSortIcon('complexity_score')}</th>
+                    </tr>
+                  ) : (
+                    <tr>
+                      <th onClick={() => handleSort('file_path')}>File Path {renderSortIcon('file_path')}</th>
+                      <th onClick={() => handleSort('language')}>Language {renderSortIcon('language')}</th>
+                      <th onClick={() => handleSort('line_count')}>Lines {renderSortIcon('line_count')}</th>
+                      <th onClick={() => handleSort('outgoing_count')}>Imports {renderSortIcon('outgoing_count')}</th>
+                      <th onClick={() => handleSort('incoming_count')}>Dependents {renderSortIcon('incoming_count')}</th>
+                      <th onClick={() => handleSort('complexity_score')}>Complexity {renderSortIcon('complexity_score')}</th>
+                    </tr>
+                  )}
                 </thead>
               )}
               renderRow={(node, index, isFocused) => {
-                const isHighComplex = node.complexity_score > p90Complexity;
-                const isHighIncoming = node.incoming_count > p90Incoming;
                 const isSelected = selectedNode && (selectedNode.id || selectedNode.file_path) === (node.id || node.file_path);
+                const hotspot = node.hotspot_score || 0;
 
                 let rowClass = 'hover:bg-gray-800/60 cursor-pointer transition-colors';
                 let textFade = 'text-gray-300';
                 let metaFade = 'text-gray-500';
 
-                if (isHighComplex && isHighIncoming) {
-                  rowClass = 'bg-red-900/30 hover:bg-red-900/50 cursor-pointer transition-colors';
-                  textFade = 'text-red-100 font-medium';
-                  metaFade = 'text-red-300';
-                } else if (isHighComplex || isHighIncoming) {
-                  rowClass = 'bg-yellow-900/20 hover:bg-yellow-900/40 cursor-pointer transition-colors';
-                  textFade = 'text-yellow-100';
-                  metaFade = 'text-yellow-300/80';
+                if (hotspotsMode) {
+                  if (hotspot > 0.5) { rowClass = 'bg-red-900/30 hover:bg-red-900/50 cursor-pointer transition-colors'; textFade = 'text-red-100 font-medium'; metaFade = 'text-red-300'; }
+                  else if (hotspot > 0.2) { rowClass = 'bg-yellow-900/20 hover:bg-yellow-900/40 cursor-pointer transition-colors'; textFade = 'text-yellow-100'; metaFade = 'text-yellow-300/80'; }
+                } else {
+                  const isHighComplex = node.complexity_score > p90Complexity;
+                  const isHighIncoming = node.incoming_count > p90Incoming;
+                  if (isHighComplex && isHighIncoming) { rowClass = 'bg-red-900/30 hover:bg-red-900/50 cursor-pointer transition-colors'; textFade = 'text-red-100 font-medium'; metaFade = 'text-red-300'; }
+                  else if (isHighComplex || isHighIncoming) { rowClass = 'bg-yellow-900/20 hover:bg-yellow-900/40 cursor-pointer transition-colors'; textFade = 'text-yellow-100'; metaFade = 'text-yellow-300/80'; }
                 }
 
                 if (isSelected) rowClass = `${rowClass} ring-1 ring-inset ring-sky-400/70 bg-sky-500/10`;
@@ -382,35 +425,53 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
 
                 const complexityRatio = (node.complexity_score || 0) / maxComplexity;
                 const complexityBarColor = complexityRatio > 0.7 ? '#ef4444' : complexityRatio > 0.4 ? '#f59e0b' : '#22c55e';
+                const maxCommitCount = Math.max(1, ...augmentedNodes.map(n => n.commit_count || 0));
 
                 return (
-                  <tr
-                    key={node.id || node.file_path}
-                    aria-rowindex={index + 1}
-                    onClick={() => onNodeSelect(node.id || node.file_path)}
-                    className={rowClass}
-                    style={{ height: 44 }}
-                  >
+                  <tr key={node.id || node.file_path} aria-rowindex={index + 1} onClick={() => onNodeSelect(node.id || node.file_path)} className={rowClass} style={{ height: 44 }}>
                     <td className={`px-6 py-3 font-mono text-xs ${textFade} max-w-0`}>
                       <span className="block truncate" title={node.file_path}>{node.file_path}</span>
                     </td>
-                    <td className={`px-6 py-3 ${metaFade}`}>{formatLanguage(node.language)}</td>
-                    <td className="px-6 py-3 relative text-center">
-                      <span className={metaFade}>{node.line_count}</span>
-                      <div className="absolute bottom-0 left-0 h-0.5 rounded-full opacity-35 bg-sky-400" style={{ width: `${((node.line_count || 0) / maxLineCount) * 100}%` }} />
-                    </td>
-                    <td className="px-6 py-3 relative text-center">
-                      <span className={metaFade}>{node.outgoing_count}</span>
-                      <div className="absolute bottom-0 left-0 h-0.5 rounded-full opacity-35 bg-indigo-400" style={{ width: `${((node.outgoing_count || 0) / maxOutgoing) * 100}%` }} />
-                    </td>
-                    <td className="px-6 py-3 relative text-center">
-                      <span className={metaFade}>{node.incoming_count}</span>
-                      <div className="absolute bottom-0 left-0 h-0.5 rounded-full opacity-35 bg-violet-400" style={{ width: `${((node.incoming_count || 0) / maxIncoming) * 100}%` }} />
-                    </td>
-                    <td className="px-6 py-3 relative text-center">
-                      <span className={`font-medium ${textFade}`}>{Number(node.complexity_score).toFixed(2)}</span>
-                      <div className="absolute bottom-0 left-0 h-0.5 rounded-full opacity-40" style={{ width: `${complexityRatio * 100}%`, backgroundColor: complexityBarColor }} />
-                    </td>
+                    {hotspotsMode ? (
+                      <>
+                        <td className="px-6 py-3 relative text-center">
+                          <span className={`font-semibold ${hotspot > 0.5 ? 'text-red-300' : hotspot > 0.2 ? 'text-yellow-300' : metaFade}`}>
+                            {(hotspot * 100).toFixed(0)}
+                          </span>
+                          <div className="absolute bottom-0 left-0 h-0.5 rounded-full opacity-50" style={{ width: `${hotspot * 100}%`, backgroundColor: hotspot > 0.5 ? '#ef4444' : hotspot > 0.2 ? '#f59e0b' : '#22c55e' }} />
+                        </td>
+                        <td className="px-6 py-3 relative text-center">
+                          <span className={metaFade}>{node.commit_count ?? '—'}</span>
+                          {node.commit_count != null && <div className="absolute bottom-0 left-0 h-0.5 rounded-full opacity-35 bg-orange-400" style={{ width: `${((node.commit_count || 0) / maxCommitCount) * 100}%` }} />}
+                        </td>
+                        <td className={`px-6 py-3 text-center ${metaFade}`}>{node.unique_authors ?? '—'}</td>
+                        <td className={`px-6 py-3 text-center ${metaFade}`}>{node.lines_changed != null ? node.lines_changed.toLocaleString() : '—'}</td>
+                        <td className="px-6 py-3 relative text-center">
+                          <span className={`font-medium ${textFade}`}>{Number(node.complexity_score || 0).toFixed(2)}</span>
+                          <div className="absolute bottom-0 left-0 h-0.5 rounded-full opacity-40" style={{ width: `${complexityRatio * 100}%`, backgroundColor: complexityBarColor }} />
+                        </td>
+                      </>
+                    ) : (
+                      <>
+                        <td className={`px-6 py-3 ${metaFade}`}>{formatLanguage(node.language)}</td>
+                        <td className="px-6 py-3 relative text-center">
+                          <span className={metaFade}>{node.line_count}</span>
+                          <div className="absolute bottom-0 left-0 h-0.5 rounded-full opacity-35 bg-sky-400" style={{ width: `${((node.line_count || 0) / maxLineCount) * 100}%` }} />
+                        </td>
+                        <td className="px-6 py-3 relative text-center">
+                          <span className={metaFade}>{node.outgoing_count}</span>
+                          <div className="absolute bottom-0 left-0 h-0.5 rounded-full opacity-35 bg-indigo-400" style={{ width: `${((node.outgoing_count || 0) / maxOutgoing) * 100}%` }} />
+                        </td>
+                        <td className="px-6 py-3 relative text-center">
+                          <span className={metaFade}>{node.incoming_count}</span>
+                          <div className="absolute bottom-0 left-0 h-0.5 rounded-full opacity-35 bg-violet-400" style={{ width: `${((node.incoming_count || 0) / maxIncoming) * 100}%` }} />
+                        </td>
+                        <td className="px-6 py-3 relative text-center">
+                          <span className={`font-medium ${textFade}`}>{Number(node.complexity_score).toFixed(2)}</span>
+                          <div className="absolute bottom-0 left-0 h-0.5 rounded-full opacity-40" style={{ width: `${complexityRatio * 100}%`, backgroundColor: complexityBarColor }} />
+                        </td>
+                      </>
+                    )}
                   </tr>
                 );
               }}
@@ -460,6 +521,37 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
                   </div>
                 </div>
               </div>
+
+              {/* Churn stats (US-050) */}
+              {churnMap.has(selectedNode.file_path) && (() => {
+                const c = churnMap.get(selectedNode.file_path);
+                return (
+                  <div className="mt-3 rounded-xl border border-orange-500/20 bg-orange-500/10 p-3 space-y-2">
+                    <p className="text-xs uppercase tracking-[0.16em] text-orange-300/80">Git Churn (12 mo)</p>
+                    <div className="grid grid-cols-2 gap-2 text-sm">
+                      <div>
+                        <p className="text-xs text-gray-500">Commits</p>
+                        <p className="font-semibold text-orange-100">{c.commit_count}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-gray-500">Authors</p>
+                        <p className="font-semibold text-orange-100">{c.unique_authors}</p>
+                      </div>
+                      <div className="col-span-2">
+                        <p className="text-xs text-gray-500">Lines changed</p>
+                        <p className="font-semibold text-orange-100">{c.lines_changed.toLocaleString()}</p>
+                      </div>
+                      <div className="col-span-2">
+                        <p className="text-xs text-gray-500">Hotspot score</p>
+                        <div className="mt-1 h-1.5 w-full rounded-full bg-gray-800">
+                          <div className="h-1.5 rounded-full" style={{ width: `${Math.round((c.hotspot_score || 0) * 100)}%`, backgroundColor: (c.hotspot_score || 0) > 0.5 ? '#ef4444' : (c.hotspot_score || 0) > 0.2 ? '#f59e0b' : '#22c55e' }} />
+                        </div>
+                        <p className="mt-0.5 text-xs text-orange-200">{Math.round((c.hotspot_score || 0) * 100)}/100</p>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
 
               <button
                 onClick={() => onAnalyseImpact(selectedNode)}

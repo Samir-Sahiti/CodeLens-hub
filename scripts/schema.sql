@@ -33,6 +33,8 @@ COMMIT;
 ALTER TYPE issue_type ADD VALUE IF NOT EXISTS 'hardcoded_secret';
 COMMIT;
 ALTER TYPE issue_type ADD VALUE IF NOT EXISTS 'missing_auth';
+COMMIT;
+ALTER TYPE issue_type ADD VALUE IF NOT EXISTS 'refactoring_candidate';
 
 -- =============================================================================
 -- FUNCTIONS — Vault wrappers (US-039)
@@ -516,6 +518,43 @@ CREATE POLICY "Users can access dependency manifests for their repos"
   );
 
 -- =============================================================================
+-- FILE CHURN (US-050)
+-- Per-file Git commit statistics from the last 12 months.
+-- Rebuilt on every re-index for GitHub repos; upload-source repos leave this empty.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS file_churn (
+  id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  repo_id        UUID        NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+  file_path      TEXT        NOT NULL,
+  commit_count   INT         NOT NULL DEFAULT 0,
+  unique_authors INT         NOT NULL DEFAULT 0,
+  lines_changed  INT         NOT NULL DEFAULT 0,
+  last_modified  TIMESTAMPTZ,
+  UNIQUE (repo_id, file_path)
+);
+
+CREATE INDEX IF NOT EXISTS file_churn_repo_id_idx ON file_churn (repo_id);
+
+ALTER TABLE file_churn ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can access file_churn for their repos" ON file_churn;
+CREATE POLICY "Users can access file_churn for their repos"
+  ON file_churn FOR ALL
+  USING (
+    repo_id IN (
+      SELECT id FROM repositories
+      WHERE  user_id = auth.uid()
+      OR id IN (
+        SELECT repo_id FROM team_repositories
+        WHERE team_id IN (
+          SELECT team_id FROM team_members WHERE user_id = auth.uid()
+        )
+      )
+    )
+  );
+
+-- =============================================================================
 -- REINDEX CLEAR FUNCTION
 -- Deletes all derived data for a repo in a single transaction (1 RPC round
 -- trip instead of 6 separate PostgREST calls, avoiding per-table FK lock
@@ -534,6 +573,7 @@ BEGIN
   DELETE FROM graph_edges          WHERE repo_id = p_repo_id;
   DELETE FROM graph_nodes          WHERE repo_id = p_repo_id;
   DELETE FROM dependency_manifests WHERE repo_id = p_repo_id;
+  DELETE FROM file_churn           WHERE repo_id = p_repo_id;
 END;
 $$;
 

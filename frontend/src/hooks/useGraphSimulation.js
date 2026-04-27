@@ -19,6 +19,23 @@ function getNodeAtPoint(nodes, point) {
   return null;
 }
 
+// Interpolate between two hex colours by factor t ∈ [0,1]
+function lerpColor(a, b, t) {
+  const ah = parseInt(a.slice(1), 16), bh = parseInt(b.slice(1), 16);
+  const ar = (ah >> 16) & 0xff, ag = (ah >> 8) & 0xff, ab = ah & 0xff;
+  const br = (bh >> 16) & 0xff, bg = (bh >> 8) & 0xff, bb = bh & 0xff;
+  const r = Math.round(ar + (br - ar) * t);
+  const g = Math.round(ag + (bg - ag) * t);
+  const bv = Math.round(ab + (bb - ab) * t);
+  return `#${((1 << 24) | (r << 16) | (g << 8) | bv).toString(16).slice(1)}`;
+}
+
+function hotspotColor(score) {
+  // green (#22c55e) → yellow (#eab308) → red (#ef4444)
+  if (score <= 0.5) return lerpColor('#22c55e', '#eab308', score * 2);
+  return lerpColor('#eab308', '#ef4444', (score - 0.5) * 2);
+}
+
 export function useGraphSimulation({
   containerRef,
   svgRef,
@@ -29,6 +46,7 @@ export function useGraphSimulation({
   selection,
   impactAnalysis,
   attackSurface,
+  hotspotMode,
   focusNodeId,
   onNodeClick,
   onNodeContextMenu,
@@ -164,6 +182,9 @@ export function useGraphSimulation({
       ...transitiveImpactIds,
     ].filter(Boolean));
 
+    const isHotspotActive = Boolean(hotspotMode?.isActive);
+    const hotspotScores   = hotspotMode?.scores || new Map();
+
     const isAttackSurfaceActive = Boolean(attackSurface?.isActive);
     const asSourceIds   = attackSurface?.sourceIds   || new Set();
     const asSinkIds     = attackSurface?.sinkIds     || new Set();
@@ -173,6 +194,7 @@ export function useGraphSimulation({
     const hasPathHighlight = asPathNodeIds.size > 0;
 
     const getNodeOpacity = (nodeId) => {
+      if (isHotspotActive) return 1; // every node is coloured — none are dimmed
       if (isAttackSurfaceActive) {
         if (asSourceIds.has(nodeId) || asSinkIds.has(nodeId) || asBothIds.has(nodeId)) return 1;
         if (asPathNodeIds.has(nodeId)) return 1;
@@ -200,6 +222,10 @@ export function useGraphSimulation({
     };
 
     const getNodeFill = (node) => {
+      if (isHotspotActive) {
+        const score = hotspotScores.get(node.graphId);
+        return score != null ? hotspotColor(score) : '#374151'; // gray for files with no churn data
+      }
       if (isAttackSurfaceActive) {
         const id = node.graphId;
         if (asBothIds.has(id))     return '#eab308'; // yellow  — source + sink
@@ -655,6 +681,7 @@ export function useGraphSimulation({
     selection,
     impactAnalysis,
     attackSurface,
+    hotspotMode,
     focusNodeId,
     onBackgroundClick,
     onNodeClick,
