@@ -8,6 +8,7 @@ const { supabaseAdmin } = require('../db/supabase');
 const _indexer = require('../services/indexer');
 const { isManifestFile, parseManifest } = require('../services/manifestParser');
 const { scanDependencies } = require('../services/osvScanner');
+const { buildDuplicationClusters } = require('../services/duplicationScanner');
 const indexer = new Proxy({}, {
   get: (_t, prop) => (globalThis.__CODELENS_INDEXER__ || _indexer)[prop],
 });
@@ -807,4 +808,19 @@ const getChurn = async (req, res) => {
   }
 };
 
-module.exports = { connectRepo, uploadRepo, listRepos, getStatus, reindexRepo, deleteRepo, getAnalysisData, updateRepo, generateWebhook, getFileContent, getDependencies, getChurn };
+/** GET /api/repos/:repoId/duplication — duplicate code clusters (US-052) */
+const getDuplication = async (req, res) => {
+  const { repoId } = req.params;
+  const allowed = await canAccessRepo(repoId, req.user.id);
+  if (!allowed) return res.status(404).json({ error: 'Repository not found or unauthorized' });
+
+  try {
+    const clusters = await buildDuplicationClusters(repoId);
+    res.json({ clusters });
+  } catch (err) {
+    console.error('[getDuplication] Error:', err);
+    res.status(500).json({ error: 'Failed to fetch duplication clusters' });
+  }
+};
+
+module.exports = { connectRepo, uploadRepo, listRepos, getStatus, reindexRepo, deleteRepo, getAnalysisData, updateRepo, generateWebhook, getFileContent, getDependencies, getChurn, getDuplication };

@@ -160,6 +160,29 @@ function buildReviewPrompt(snippet, contextDescription, chunks, mode, filePath) 
   return { system, user };
 }
 
+function buildDuplicationRefactorPrompt(cluster = {}) {
+  const members = Array.isArray(cluster.members) ? cluster.members : [];
+  const blocks = members.map((member, index) => {
+    const header = `--- Duplicate member ${index + 1}: ${member.file_path || 'unknown'} lines ${member.start_line || '?'}-${member.end_line || '?'} ---`;
+    return `${header}\n${member.content || member.excerpt || ''}`;
+  }).join('\n\n');
+
+  return {
+    system: [
+      'You are helping a developer remove duplicated code.',
+      'Given semantically similar code chunks from one repository, propose a shared utility or abstraction.',
+      'Return a concise refactor plan, the proposed shared code in a fenced code block, and per-file replacement notes.',
+      'Do not invent missing files or APIs; base the proposal only on the supplied chunks.',
+    ].join(' '),
+    user: [
+      `Duplication cluster: ${cluster.member_count || members.length} chunks, ${cluster.total_lines || 0} total duplicated lines.`,
+      `Similarity range: ${cluster.similarity_min ?? 'unknown'} to ${cluster.similarity_max ?? 'unknown'}.`,
+      '',
+      blocks,
+    ].join('\n'),
+  };
+}
+
 function normalizeFinding(raw, fallback = {}) {
   if (!raw || typeof raw !== 'object') return null;
   const pick = (value, allowed, def) => allowed.includes(String(value || '').toLowerCase()) ? String(value).toLowerCase() : def;
@@ -664,16 +687,63 @@ const getSecurityAudit = async (req, res) => {
   res.json({ audit: data });
 };
 
+const duplicationRefactor = async (req, res) => {
+  const { repoId } = req.params;
+  const { cluster } = req.body || {};
+
+  if (!cluster || !Array.isArray(cluster.members) || cluster.members.length < 2) {
+    return res.status(400).json({ error: 'cluster with at least two members is required' });
+  }
+
+  const allowed = await canAccessRepo(repoId, req.user.id);
+  if (!allowed) {
+    return res.status(404).json({ error: 'Repository not found or unauthorized' });
+  }
+
+  openSse(res);
+  const send = sendFactory(res);
+
+  try {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      send({ type: 'error', message: 'Duplication refactor is not available: Anthropic API key not configured.' });
+      return res.end();
+    }
+
+    const { system, user } = buildDuplicationRefactorPrompt(cluster);
+    await streamClaude({
+      system,
+      user,
+      send,
+      userId: req.user.id,
+      endpoint: 'duplication_refactor',
+      maxTokens: 1800,
+    });
+
+    send({ type: 'done' });
+    res.end();
+  } catch (err) {
+    console.error('[duplication-refactor] Unhandled error:', err);
+    try {
+      send({ type: 'error', message: 'Failed to generate a duplication refactor. Please try again.' });
+      res.end();
+    } catch {
+      res.end();
+    }
+  }
+};
+
 module.exports = {
   review,
   runSecurityAudit,
   listSecurityAudits,
   getSecurityAudit,
+  duplicationRefactor,
   _private: {
     parseFindingsFromText,
     rerankSecurityChunks,
     securityKeywordScore,
     linkFindingsToIssues,
     estimateAuditTokens,
+    buildDuplicationRefactorPrompt,
   },
 };

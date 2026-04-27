@@ -36,7 +36,12 @@ describe('FileBrowser', () => {
     const onAuditFile = vi.fn();
 
     render(
-      <MemoryRouter>
+      <MemoryRouter
+        future={{
+          v7_startTransition: true,
+          v7_relativeSplatPath: true,
+        }}
+      >
         <FileBrowser
           repoId="repo-1"
           nodes={[{ id: 'n1', file_path: 'src/a.js', language: 'javascript' }]}

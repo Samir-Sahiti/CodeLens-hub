@@ -5,6 +5,7 @@ const { scanFileForInsecurePatterns } = require('./sastEngine'); // US-046
 const { scanFileForMissingAuth } = require('./authCoverageScanner'); // US-049
 const { classifyFile } = require('./attackSurfaceClassifier'); // US-047
 const { fetchRepoChurn } = require('./churnService'); // US-050
+const { detectDuplicateCandidates } = require('./duplicationScanner'); // US-052
 const { recordUsage } = require('./usageTracker'); // US-042
 const { isManifestFile, parseManifest } = require('./manifestParser'); // US-045
 const { scanDependencies } = require('./osvScanner'); // US-045
@@ -228,6 +229,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     await supabaseAdmin.from('dependency_manifests').delete().eq('repo_id', repoId);
     await supabaseAdmin.from('graph_edges').delete().eq('repo_id', repoId);
     await supabaseAdmin.from('file_churn').delete().eq('repo_id', repoId); // US-050
+    await supabaseAdmin.from('duplication_candidates').delete().eq('repo_id', repoId); // US-052
 
     if (changedOrDeletedPaths.length > 0) {
       const pathBatches = chunkArray(changedOrDeletedPaths, 150);
@@ -793,6 +795,15 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
         }
         console.log(`[indexer] Completely finished semantic embeddings mappings. Saved ${mappedPayloads.length} vectors!`);
         console.timeEnd(`[indexer] Phase 5: Embedding (${repoId})`);
+
+        try {
+          console.time(`[indexer] Phase Duplication (${repoId})`);
+          const result = await detectDuplicateCandidates(repoId);
+          console.log(`[indexer] Duplication scan saved ${result.inserted || 0} candidate pair(s).`);
+          console.timeEnd(`[indexer] Phase Duplication (${repoId})`);
+        } catch (duplicationError) {
+          console.warn(`[indexer] Duplication scan failed (best-effort): ${duplicationError.message}`);
+        }
 
       } catch (embeddingError) {
         console.warn(`[indexer] Global embedding step failed severely, isolating error entirely: ${embeddingError.message}`);

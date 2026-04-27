@@ -8,6 +8,7 @@ const { aiRateLimit }  = require('../middleware/aiRateLimit');
 router.post('/:repoId/security-audit', requireAuth, aiRateLimit, reviewController.runSecurityAudit);
 router.get('/:repoId/security-audits', requireAuth, reviewController.listSecurityAudits);
 router.get('/:repoId/security-audits/:auditId', requireAuth, reviewController.getSecurityAudit);
+router.post('/:repoId/duplication-refactor', requireAuth, aiRateLimit, reviewController.duplicationRefactor);
 
 // POST /api/review/:repoId   body: { snippet, context?, mode?, filePath? }
 router.post('/:repoId', requireAuth, aiRateLimit, reviewController.review);
