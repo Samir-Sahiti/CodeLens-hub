@@ -4,6 +4,7 @@ const { scanFileForSecrets } = require('./secretScanner');
 const { scanFileForInsecurePatterns } = require('./sastEngine'); // US-046
 const { scanFileForMissingAuth } = require('./authCoverageScanner'); // US-049
 const { classifyFile } = require('./attackSurfaceClassifier'); // US-047
+const { fetchRepoChurn } = require('./churnService'); // US-050
 const { recordUsage } = require('./usageTracker'); // US-042
 const { isManifestFile, parseManifest } = require('./manifestParser'); // US-045
 const { scanDependencies } = require('./osvScanner'); // US-045
@@ -226,6 +227,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     await supabaseAdmin.from('analysis_issues').delete().eq('repo_id', repoId);
     await supabaseAdmin.from('dependency_manifests').delete().eq('repo_id', repoId);
     await supabaseAdmin.from('graph_edges').delete().eq('repo_id', repoId);
+    await supabaseAdmin.from('file_churn').delete().eq('repo_id', repoId); // US-050
 
     if (changedOrDeletedPaths.length > 0) {
       const pathBatches = chunkArray(changedOrDeletedPaths, 150);
@@ -794,6 +796,44 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
 
       } catch (embeddingError) {
         console.warn(`[indexer] Global embedding step failed severely, isolating error entirely: ${embeddingError.message}`);
+      }
+    }
+
+    // US-050: Git history hotspots — GitHub repos only, best-effort
+    if (source === 'github' && token) {
+      try {
+        console.time(`[indexer] Phase Churn (${repoId})`);
+        const churnMap = await fetchRepoChurn(owner, name, token, repoId);
+
+        if (churnMap.size > 0) {
+          const complexityMap = new Map(finalNodes.map(n => [n.file_path, n.complexity_score || 0]));
+          const maxCount = Math.max(1, ...[...churnMap.values()].map(e => e.count));
+          const maxComplexity = Math.max(1, ...[...complexityMap.values()]);
+
+          const scoredFiles = [];
+          for (const [filePath, entry] of churnMap.entries()) {
+            const complexity = complexityMap.get(filePath) || 0;
+            const score = (entry.count / maxCount) * (complexity / maxComplexity);
+            if (score > 0) scoredFiles.push({ filePath, entry, complexity, score });
+          }
+          scoredFiles.sort((a, b) => b.score - a.score);
+
+          const top10 = scoredFiles.slice(0, 10);
+          if (top10.length > 0) {
+            const rfIssues = top10.map(({ filePath, entry, complexity, score }) => ({
+              repo_id: repoId,
+              type: 'refactoring_candidate',
+              severity: score > 0.5 ? 'high' : 'medium',
+              file_paths: [filePath],
+              description: `Hotspot score ${(score * 100).toFixed(0)}/100 — ${entry.count} commits in 12 months by ${entry.authors.size} author${entry.authors.size !== 1 ? 's' : ''}, ${entry.lines.toLocaleString()} lines changed, cyclomatic complexity ${complexity.toFixed(1)}.`,
+            }));
+            const { error: rfErr } = await supabaseAdmin.from('analysis_issues').insert(rfIssues);
+            if (rfErr) console.warn(`[indexer] refactoring_candidate insert error: ${rfErr.message}`);
+          }
+        }
+        console.timeEnd(`[indexer] Phase Churn (${repoId})`);
+      } catch (churnErr) {
+        console.warn(`[indexer] Churn analysis failed (best-effort, non-blocking): ${churnErr.message}`);
       }
     }
 

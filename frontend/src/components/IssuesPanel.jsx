@@ -4,7 +4,7 @@ import { apiUrl } from '../lib/api';
 import {
   Package, Lock, ShieldAlert, GitMerge,
   FileWarning, Link2, FileX, Search,
-  ChevronDown, ChevronUp, CheckCircle2, AlertTriangle,
+  ChevronDown, ChevronUp, CheckCircle2, AlertTriangle, TrendingUp,
 } from './ui/Icons';
 
 // ── Group config ─────────────────────────────────────────────────────────────
@@ -17,6 +17,7 @@ const GROUP_ORDER = [
   { type: 'god_file',              label: 'God Files',                         Icon: FileWarning   },
   { type: 'high_coupling',         label: 'High Coupling',                     Icon: Link2         },
   { type: 'dead_code',             label: 'Dead Code',                         Icon: FileX         },
+  { type: 'refactoring_candidate', label: 'Refactoring Candidates',            Icon: TrendingUp    },
 ];
 
 function getBadgeStyles(severity) {

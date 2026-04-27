@@ -760,4 +760,51 @@ function inferEcosystemFromManifest(manifestPath = '') {
   return 'unknown';
 }
 
-module.exports = { connectRepo, uploadRepo, listRepos, getStatus, reindexRepo, deleteRepo, getAnalysisData, updateRepo, generateWebhook, getFileContent, getDependencies };
+/** GET /api/repos/:repoId/churn — file churn data for the hotspot overlay (US-050) */
+const getChurn = async (req, res) => {
+  const { repoId } = req.params;
+  const allowed = await canAccessRepo(repoId, req.user.id);
+  if (!allowed) return res.status(404).json({ error: 'Repository not found or unauthorized' });
+
+  try {
+    const [
+      { data: churnRows, error: churnErr },
+      { data: nodeRows,  error: nodeErr  },
+    ] = await Promise.all([
+      supabaseAdmin.from('file_churn').select('file_path,commit_count,unique_authors,lines_changed,last_modified').eq('repo_id', repoId),
+      supabaseAdmin.from('graph_nodes').select('file_path,complexity_score').eq('repo_id', repoId),
+    ]);
+
+    if (churnErr) throw churnErr;
+    if (nodeErr)  throw nodeErr;
+
+    if (!churnRows || churnRows.length === 0) {
+      return res.json({ churn: [] });
+    }
+
+    const complexityMap = new Map((nodeRows || []).map(n => [n.file_path, n.complexity_score || 0]));
+    const maxCount      = Math.max(1, ...churnRows.map(r => r.commit_count));
+    const maxComplexity = Math.max(1, ...[...complexityMap.values()]);
+
+    const churn = churnRows.map(row => {
+      const complexity   = complexityMap.get(row.file_path) || 0;
+      const hotspotScore = (row.commit_count / maxCount) * (complexity / maxComplexity);
+      return {
+        file_path:      row.file_path,
+        commit_count:   row.commit_count,
+        unique_authors: row.unique_authors,
+        lines_changed:  row.lines_changed,
+        last_modified:  row.last_modified,
+        complexity_score: complexity,
+        hotspot_score:  hotspotScore,
+      };
+    });
+
+    res.json({ churn });
+  } catch (err) {
+    console.error('[getChurn] Error:', err);
+    res.status(500).json({ error: 'Failed to fetch churn data' });
+  }
+};
+
+module.exports = { connectRepo, uploadRepo, listRepos, getStatus, reindexRepo, deleteRepo, getAnalysisData, updateRepo, generateWebhook, getFileContent, getDependencies, getChurn };
