@@ -1,10 +1,16 @@
 import { useMemo, useState, useEffect, useCallback, memo } from 'react';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { useAuth } from '../context/AuthContext';
 import { apiUrl } from '../lib/api';
+import { getSyntaxLanguage } from '../lib/constants';
+import Modal from './ui/Modal';
+import { Button, Badge } from './ui/Primitives';
 import {
   Package, Lock, ShieldAlert, GitMerge,
   FileWarning, Link2, FileX, Search,
   ChevronDown, ChevronUp, CheckCircle2, AlertTriangle, TrendingUp,
+  Copy, Sparkles,
 } from './ui/Icons';
 
 // ── Group config ─────────────────────────────────────────────────────────────
@@ -150,11 +156,241 @@ const IssueCard = memo(function IssueCard({ issue, type, onIssueClick, onSuppres
   );
 });
 
+function formatPercent(value) {
+  const n = Number(value || 0);
+  return `${Math.round(n * 100)}%`;
+}
+
+function DuplicationClusterCard({ cluster, onOpen }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(cluster)}
+      className="flex flex-col rounded-xl border border-gray-800 bg-gray-900/50 p-5 text-left transition-all duration-200 hover:-translate-y-px hover:border-gray-700 hover:bg-gray-800/80 hover:shadow-lg"
+    >
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <span className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium uppercase tracking-wider ${getBadgeStyles(cluster.severity)}`}>
+          {cluster.severity || 'low'}
+        </span>
+        <span className="text-xs text-gray-500">
+          {cluster.member_count} chunks · {cluster.total_lines} duplicated lines · {formatPercent(cluster.similarity_min)}-{formatPercent(cluster.similarity_max)}
+        </span>
+      </div>
+
+      <div className="grid gap-3">
+        {(cluster.members || []).slice(0, 3).map((member) => (
+          <div key={member.chunk_id} className="rounded-lg border border-gray-800 bg-gray-950/50 p-3">
+            <p className="break-all font-mono text-xs text-indigo-300">
+              {member.file_path}:{member.start_line}-{member.end_line}
+            </p>
+            <p className="mt-2 line-clamp-3 whitespace-pre-wrap font-mono text-xs leading-relaxed text-gray-400">
+              {member.excerpt}
+            </p>
+          </div>
+        ))}
+        {cluster.member_count > 3 && (
+          <p className="text-xs text-gray-500">+ {cluster.member_count - 3} more duplicate member{cluster.member_count - 3 === 1 ? '' : 's'}</p>
+        )}
+      </div>
+    </button>
+  );
+}
+
+function DuplicationSection({ clusters, onOpen }) {
+  const [isOpen, setIsOpen] = useState(true);
+  if (!clusters.length) return null;
+
+  return (
+    <div className="mb-6 last:mb-0">
+      <button
+        type="button"
+        onClick={() => setIsOpen(v => !v)}
+        className="sticky top-0 z-10 w-full flex items-center justify-between bg-gray-950 border-b border-gray-800 shadow-sm pb-2 mb-3 pt-1 group"
+      >
+        <div className="flex items-center gap-2.5">
+          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gray-800 border border-gray-700">
+            <Copy className="h-3.5 w-3.5 text-gray-400 group-hover:text-white transition-colors" />
+          </div>
+          <h2 className="text-base font-semibold text-gray-200 group-hover:text-white transition-colors">
+            Duplication
+          </h2>
+          <span className="rounded-full bg-gray-800 px-2 py-0.5 text-xs font-medium text-gray-500">
+            {clusters.length}
+          </span>
+        </div>
+        {isOpen
+          ? <ChevronUp className="h-4 w-4 text-gray-600" />
+          : <ChevronDown className="h-4 w-4 text-gray-600" />
+        }
+      </button>
+
+      {isOpen && (
+        <div className="grid gap-3" style={{ animation: 'fadeIn 180ms ease both' }}>
+          {clusters.map((cluster) => (
+            <DuplicationClusterCard key={cluster.id} cluster={cluster} onOpen={onOpen} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MemberPicker({ label, members, value, onChange }) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-gray-500">{label}</span>
+      <select
+        value={value}
+        onChange={(event) => onChange(Number(event.target.value))}
+        className="w-full rounded-lg border border-gray-800 bg-gray-950 px-3 py-2 text-xs text-gray-200 outline-none focus:border-indigo-500"
+      >
+        {members.map((member, index) => (
+          <option key={member.chunk_id} value={index}>
+            {index + 1}. {member.file_path}:{member.start_line}-{member.end_line}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function CodePane({ member }) {
+  if (!member) return null;
+  return (
+    <div className="min-w-0 overflow-hidden rounded-xl border border-gray-800 bg-gray-950">
+      <div className="border-b border-gray-800 px-3 py-2">
+        <p className="break-all font-mono text-xs text-indigo-300">
+          {member.file_path}:{member.start_line}-{member.end_line}
+        </p>
+      </div>
+      <div className="max-h-96 overflow-auto">
+        <SyntaxHighlighter
+          language={getSyntaxLanguage(member.file_path)}
+          style={vscDarkPlus}
+          showLineNumbers
+          startingLineNumber={member.start_line || 1}
+          customStyle={{ margin: 0, borderRadius: 0, background: 'transparent', fontSize: '0.78rem', lineHeight: 1.55 }}
+          lineNumberStyle={{ color: '#6b7280', minWidth: '3em' }}
+        >
+          {member.content || member.excerpt || ''}
+        </SyntaxHighlighter>
+      </div>
+    </div>
+  );
+}
+
+function DuplicationDetailModal({ cluster, repoId, token, onClose }) {
+  const members = cluster?.members || [];
+  const [leftIndex, setLeftIndex] = useState(0);
+  const [rightIndex, setRightIndex] = useState(Math.min(1, Math.max(0, members.length - 1)));
+  const [isRefactoring, setIsRefactoring] = useState(false);
+  const [refactorText, setRefactorText] = useState('');
+  const [refactorError, setRefactorError] = useState(null);
+
+  useEffect(() => {
+    setLeftIndex(0);
+    setRightIndex(Math.min(1, Math.max(0, members.length - 1)));
+    setRefactorText('');
+    setRefactorError(null);
+  }, [cluster?.id, members.length]);
+
+  const askAi = useCallback(async () => {
+    if (!cluster || !token || isRefactoring) return;
+    setIsRefactoring(true);
+    setRefactorText('');
+    setRefactorError(null);
+
+    try {
+      const res = await fetch(apiUrl(`/api/review/${repoId}/duplication-refactor`), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ cluster }),
+      });
+      if (!res.ok || !res.body) throw new Error('Failed to start duplication refactor');
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split('\n\n');
+        buffer = events.pop() || '';
+        events.forEach((eventText) => {
+          const line = eventText.split('\n').find(line => line.startsWith('data: '));
+          if (!line) return;
+          try {
+            const event = JSON.parse(line.slice(6));
+            if (event.type === 'chunk') setRefactorText(prev => prev + event.text);
+            if (event.type === 'error') setRefactorError(event.message || 'Failed to generate refactor');
+          } catch {
+            // Ignore malformed partial SSE frames.
+          }
+        });
+      }
+    } catch (err) {
+      setRefactorError(err.message || 'Failed to generate refactor');
+    } finally {
+      setIsRefactoring(false);
+    }
+  }, [cluster, isRefactoring, repoId, token]);
+
+  return (
+    <Modal isOpen={!!cluster} onClose={onClose} title="Duplicate Code Cluster" maxWidth="max-w-6xl">
+      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-4 sm:p-5">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge tone={cluster?.severity === 'high' ? 'danger' : cluster?.severity === 'medium' ? 'warning' : 'subtle'}>
+            {cluster?.severity || 'low'}
+          </Badge>
+          <Badge tone="subtle">{cluster?.member_count || 0} chunks</Badge>
+          <Badge tone="subtle">{cluster?.total_lines || 0} lines</Badge>
+          <Badge tone="subtle">{formatPercent(cluster?.similarity_min)}-{formatPercent(cluster?.similarity_max)} similar</Badge>
+        </div>
+
+        <div className="grid gap-3 lg:grid-cols-2">
+          <MemberPicker label="Left pane" members={members} value={leftIndex} onChange={setLeftIndex} />
+          <MemberPicker label="Right pane" members={members} value={rightIndex} onChange={setRightIndex} />
+        </div>
+
+        <div className="grid min-h-0 gap-4 lg:grid-cols-2">
+          <CodePane member={members[leftIndex]} />
+          <CodePane member={members[rightIndex]} />
+        </div>
+
+        <div className="rounded-xl border border-gray-800 bg-gray-950/60 p-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-semibold text-gray-200">AI refactor proposal</p>
+              <p className="mt-1 text-xs text-gray-500">Generate a shared utility and replacement notes for this duplicate cluster.</p>
+            </div>
+            <Button onClick={askAi} disabled={isRefactoring} loading={isRefactoring} icon={Sparkles}>
+              {isRefactoring ? 'Refactoring...' : 'Ask AI to extract shared utility'}
+            </Button>
+          </div>
+          {refactorError && <p className="mt-3 text-sm text-red-400">{refactorError}</p>}
+          {refactorText && (
+            <div className="mt-4 whitespace-pre-wrap rounded-lg border border-gray-800 bg-gray-900 p-4 text-sm leading-relaxed text-gray-200">
+              {refactorText}
+            </div>
+          )}
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 // ── IssuesPanel (main) ────────────────────────────────────────────────────────
 export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDependencies, onOpenFile, repoId }) {
   const { session } = useAuth();
+  const accessToken = session?.access_token;
 
   const [localIssues, setLocalIssues] = useState(issues || []);
+  const [duplicationClusters, setDuplicationClusters] = useState([]);
+  const [selectedDuplicationCluster, setSelectedDuplicationCluster] = useState(null);
   const [filterText,  setFilterText]  = useState('');
   const [isFetching, setIsFetching] = useState(false);
   const [canMutateIssues, setCanMutateIssues] = useState(true);
@@ -169,11 +405,11 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
   // Fallback: Fetch issues directly from the backend to ensure we don't miss them
   useEffect(() => {
     const fetchIssuesDirectly = async () => {
-      if (!session?.access_token || !repoId) return;
+      if (!accessToken || !repoId) return;
       try {
         setIsFetching(true);
         const res = await fetch(apiUrl(`/api/analysis/${repoId}/issues`), {
-          headers: { Authorization: `Bearer ${session.access_token}` },
+          headers: { Authorization: `Bearer ${accessToken}` },
         });
         if (res.ok) {
           const data = await res.json();
@@ -189,14 +425,33 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
     };
 
     fetchIssuesDirectly();
-  }, [repoId, session]);
+  }, [repoId, accessToken]);
+
+  useEffect(() => {
+    const fetchDuplication = async () => {
+      if (!accessToken || !repoId) return;
+      try {
+        const res = await fetch(apiUrl(`/api/repos/${repoId}/duplication`), {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        if (!res.ok) throw new Error('Failed to fetch duplication clusters');
+        const data = await res.json();
+        setDuplicationClusters(data.clusters || []);
+      } catch (err) {
+        console.error('Failed to fetch duplication clusters', err);
+        setDuplicationClusters([]);
+      }
+    };
+
+    fetchDuplication();
+  }, [repoId, accessToken]);
 
   useEffect(() => {
     const fetchStatus = async () => {
-      if (!session?.access_token || !repoId) return;
+      if (!accessToken || !repoId) return;
       try {
         const res = await fetch(apiUrl(`/api/repos/${repoId}/status`), {
-          headers: { Authorization: `Bearer ${session.access_token}` },
+          headers: { Authorization: `Bearer ${accessToken}` },
         });
         if (!res.ok) throw new Error('Failed to fetch repo status');
         const data = await res.json();
@@ -209,7 +464,7 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
     };
 
     fetchStatus();
-  }, [repoId, session]);
+  }, [repoId, accessToken]);
 
   const nodeMap = useMemo(
     () => new Map((nodes || []).map(n => [n.file_path, n.id || n.file_path])),
@@ -296,24 +551,32 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
     }
   }, [canMutateIssues, repoId, session]);
 
-  if (!localIssues || localIssues.length === 0) {
+  if ((!localIssues || localIssues.length === 0) && duplicationClusters.length === 0) {
     return (
-      <div className="flex h-auto min-h-[30rem] flex-col items-center justify-center rounded-xl border border-dashed border-gray-700 bg-gray-900/30 px-6 text-center xl:h-[calc(100vh-12rem)]">
-        {isFetching ? (
-          <div className="flex flex-col items-center">
-            <div className="h-8 w-8 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent mb-3" />
-            <p className="text-sm text-gray-400">Loading issues...</p>
-          </div>
-        ) : (
-          <>
-            <div className="flex items-center justify-center w-16 h-16 rounded-full bg-green-500/10 border border-green-500/20 mb-4">
-              <CheckCircle2 className="w-8 h-8 text-green-400" />
+      <>
+        <div className="flex h-auto min-h-[30rem] flex-col items-center justify-center rounded-xl border border-dashed border-gray-700 bg-gray-900/30 px-6 text-center xl:h-[calc(100vh-12rem)]">
+          {isFetching ? (
+            <div className="flex flex-col items-center">
+              <div className="h-8 w-8 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent mb-3" />
+              <p className="text-sm text-gray-400">Loading issues...</p>
             </div>
-            <h3 className="text-lg font-medium text-gray-200">No issues detected</h3>
-            <p className="mt-1 text-sm text-gray-500">No architectural or security findings need attention.</p>
-          </>
-        )}
-      </div>
+          ) : (
+            <>
+              <div className="flex items-center justify-center w-16 h-16 rounded-full bg-green-500/10 border border-green-500/20 mb-4">
+                <CheckCircle2 className="w-8 h-8 text-green-400" />
+              </div>
+              <h3 className="text-lg font-medium text-gray-200">No issues detected</h3>
+              <p className="mt-1 text-sm text-gray-500">No architectural, security, or duplication findings need attention.</p>
+            </>
+          )}
+        </div>
+        <DuplicationDetailModal
+          cluster={selectedDuplicationCluster}
+          repoId={repoId}
+          token={accessToken}
+          onClose={() => setSelectedDuplicationCluster(null)}
+        />
+      </>
     );
   }
 
@@ -366,14 +629,25 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
           );
         })}
 
+        <DuplicationSection
+          clusters={duplicationClusters}
+          onOpen={setSelectedDuplicationCluster}
+        />
+
         {/* No filter results */}
-        {filterText && filteredIssues.length === 0 && (
+        {filterText && filteredIssues.length === 0 && duplicationClusters.length === 0 && (
           <div className="flex flex-col items-center justify-center py-16 text-gray-500">
             <Search className="h-8 w-8 mb-3 opacity-30" />
             <p className="text-sm">No issues match &ldquo;{filterText}&rdquo;</p>
           </div>
         )}
       </div>
+      <DuplicationDetailModal
+        cluster={selectedDuplicationCluster}
+        repoId={repoId}
+        token={accessToken}
+        onClose={() => setSelectedDuplicationCluster(null)}
+      />
     </div>
   );
 }

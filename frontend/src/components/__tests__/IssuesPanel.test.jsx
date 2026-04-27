@@ -8,6 +8,19 @@ vi.mock('../../context/AuthContext', () => ({
 
 import IssuesPanel from '../IssuesPanel';
 
+function makeSseResponse(events) {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream({
+    start(controller) {
+      for (const event of events) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+      }
+      controller.close();
+    },
+  });
+  return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+}
+
 beforeEach(() => {
   global.fetch = vi.fn(async (url) => {
     if (String(url).includes('/status')) {
@@ -20,6 +33,12 @@ beforeEach(() => {
       return {
         ok: true,
         json: async () => ({ data: [] }),
+      };
+    }
+    if (String(url).includes('/duplication')) {
+      return {
+        ok: true,
+        json: async () => ({ clusters: [] }),
       };
     }
     return {
@@ -104,6 +123,83 @@ describe('IssuesPanel', () => {
       expect(screen.getByText(/temporarily disabled while the repository is re-indexing/i)).toBeInTheDocument();
     });
     expect(screen.getByRole('button', { name: /mark as false positive/i })).toBeDisabled();
+  });
+
+  it('renders duplication clusters, opens two-pane detail, switches members, and streams AI refactor', async () => {
+    const user = userEvent.setup();
+    let refactorCalled = false;
+
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes('/status')) {
+        return {
+          ok: true,
+          json: async () => ({ status: 'ready', latest_job: { core_ready: true } }),
+        };
+      }
+      if (String(url).includes('/issues')) {
+        return {
+          ok: true,
+          json: async () => [],
+        };
+      }
+      if (String(url).includes('/duplication-refactor')) {
+        refactorCalled = true;
+        return makeSseResponse([
+          { type: 'chunk', text: 'Extract a shared helper.' },
+          { type: 'done' },
+        ]);
+      }
+      if (String(url).includes('/duplication')) {
+        return {
+          ok: true,
+          json: async () => ({
+            clusters: [{
+              id: 'dup-1',
+              severity: 'medium',
+              member_count: 3,
+              total_lines: 45,
+              similarity_min: 0.94,
+              similarity_max: 0.97,
+              members: [
+                { chunk_id: 'a', file_path: 'src/a.js', start_line: 1, end_line: 15, content: 'function sameA() {\n  return 1;\n}', excerpt: 'function sameA()' },
+                { chunk_id: 'b', file_path: 'src/b.js', start_line: 2, end_line: 16, content: 'function sameB() {\n  return 1;\n}', excerpt: 'function sameB()' },
+                { chunk_id: 'c', file_path: 'src/c.js', start_line: 3, end_line: 17, content: 'function sameC() {\n  return 1;\n}', excerpt: 'function sameC()' },
+              ],
+            }],
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({}),
+      };
+    });
+
+    render(
+      <IssuesPanel
+        repoId="repo-1"
+        nodes={[]}
+        issues={[]}
+        onNodeSelect={vi.fn()}
+        onOpenDependencies={vi.fn()}
+        onOpenFile={vi.fn()}
+      />
+    );
+
+    expect(await screen.findByText(/duplication/i)).toBeInTheDocument();
+    await user.click(screen.getByText(/3 chunks/i));
+
+    expect(await screen.findByRole('dialog', { name: /duplicate code cluster/i })).toBeInTheDocument();
+    expect(screen.getAllByText(/src\/a\.js:1-15/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/src\/b\.js:2-16/i).length).toBeGreaterThan(0);
+
+    const selects = screen.getAllByRole('combobox');
+    await user.selectOptions(selects[1], '2');
+    expect(screen.getAllByText(/src\/c\.js:3-17/i).length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole('button', { name: /ask ai to extract shared utility/i }));
+    expect(await screen.findByText(/extract a shared helper/i)).toBeInTheDocument();
+    expect(refactorCalled).toBe(true);
   });
 });
 

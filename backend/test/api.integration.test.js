@@ -227,6 +227,44 @@ describe('Backend API integration (mocked)', () => {
     expect(res.body.issues.length).toBe(1);
   });
 
+  it('GET /api/repos/:repoId/duplication returns grouped clusters', async () => {
+    supabaseAdminMock = createSupabaseMock({
+      'repositories.select.maybeSingle': async () => ({ data: { id: 'repo-1' }, error: null }),
+      'duplication_candidates.select.many': async () => ({
+        data: [
+          { id: 'p1', repo_id: 'repo-1', chunk_a_id: 'a', chunk_b_id: 'b', similarity: 0.95 },
+          { id: 'p2', repo_id: 'repo-1', chunk_a_id: 'b', chunk_b_id: 'c', similarity: 0.96 },
+        ],
+        error: null,
+      }),
+      'code_chunks.select.many': async () => ({
+        data: [
+          { id: 'a', repo_id: 'repo-1', file_path: 'a.js', start_line: 1, end_line: 12, content: 'a\n'.repeat(12) },
+          { id: 'b', repo_id: 'repo-1', file_path: 'b.js', start_line: 1, end_line: 12, content: 'b\n'.repeat(12) },
+          { id: 'c', repo_id: 'repo-1', file_path: 'c.js', start_line: 1, end_line: 12, content: 'c\n'.repeat(12) },
+        ],
+        error: null,
+      }),
+    });
+
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+    globalThis.__CODELENS_SUPABASE_ANON__ = supabaseAdminMock;
+
+    const repoController = (await import('../src/controllers/repoController.js')).default;
+    const app = express();
+    app.use(express.json());
+    app.get('/api/repos/:repoId/duplication', (req, _res, next) => { req.user = { id: 'user-1' }; next(); }, wrap(repoController.getDuplication));
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message || 'error' }));
+
+    const res = await request(app)
+      .get('/api/repos/repo-1/duplication')
+      .expect(200);
+
+    expect(res.body.clusters).toHaveLength(1);
+    expect(res.body.clusters[0].member_count).toBe(3);
+    expect(res.body.clusters[0].members[0].excerpt).toBeTruthy();
+  });
+
   it('POST /api/search/:repoId streams SSE chunks (mocked RAG + Claude)', async () => {
     supabaseAdminMock = createSupabaseMock({
       'repositories.select.single': async () => ({ data: { id: 'repo-1', status: 'ready' }, error: null }),
@@ -295,6 +333,58 @@ describe('Backend API integration (mocked)', () => {
     expect(res.text).toContain('"type":"sources"');
     expect(res.text).toContain('"type":"chunk"');
     expect(res.text).toContain('"type":"done"');
+  });
+
+  it('POST /api/review/:repoId/duplication-refactor streams Claude output and records usage', async () => {
+    supabaseAdminMock = createSupabaseMock({
+      'repositories.select.maybeSingle': async () => ({ data: { id: 'repo-1', status: 'ready' }, error: null }),
+      'api_usage.insert.many': async () => ({ data: null, error: null }),
+    });
+
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+    globalThis.__CODELENS_SUPABASE_ANON__ = supabaseAdminMock;
+
+    let anthropicArgs = null;
+    globalThis.__CODELENS_ANTHROPIC__ = {
+      messages: {
+        create: async (args) => {
+          anthropicArgs = args;
+          async function* gen() {
+            yield { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Extract shared utility.' } };
+            yield { type: 'message_delta', usage: { output_tokens: 7 } };
+          }
+          return gen();
+        },
+      },
+    };
+
+    const reviewController = (await import('../src/controllers/reviewController.js')).default;
+    const app = express();
+    app.use(express.json());
+    app.post('/api/review/:repoId/duplication-refactor', (req, _res, next) => { req.user = { id: 'user-1' }; next(); }, wrap(reviewController.duplicationRefactor));
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message || 'error' }));
+
+    const res = await request(app)
+      .post('/api/review/repo-1/duplication-refactor')
+      .send({
+        cluster: {
+          member_count: 2,
+          total_lines: 24,
+          similarity_min: 0.95,
+          similarity_max: 0.96,
+          members: [
+            { file_path: 'a.js', start_line: 1, end_line: 12, content: 'function a() {}' },
+            { file_path: 'b.js', start_line: 1, end_line: 12, content: 'function b() {}' },
+          ],
+        },
+      })
+      .expect(200);
+
+    expect(anthropicArgs.system).toContain('remove duplicated code');
+    expect(anthropicArgs.messages[0].content).toContain('a.js');
+    expect(res.text).toContain('Extract shared utility.');
+    expect(res.text).toContain('"type":"done"');
+    expect(supabaseCallLog).toContain('api_usage.insert.many');
   });
 
   it('POST /api/review/:repoId security_audit streams findings and uses security retrieval', async () => {

@@ -47,4 +47,7 @@ router.get('/:repoId/dependencies', requireAuth, repoController.getDependencies)
 // Fetch file churn data for the hotspot overlay (US-050)
 router.get('/:repoId/churn', requireAuth, repoController.getChurn);
 
+// Fetch duplicate code clusters (US-052)
+router.get('/:repoId/duplication', requireAuth, repoController.getDuplication);
+
 module.exports = router;
