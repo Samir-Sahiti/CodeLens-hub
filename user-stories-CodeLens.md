@@ -1705,3 +1705,329 @@ US-026: AI Code Review Panel
 | Sprint 10 — Security Suite (Part 1) | Weeks 19–20 | US-044 → US-046 |
 | Sprint 11 — Security Suite (Part 2) | Weeks 21–22 | US-047 → US-049 |
 | Sprint 12 — Analytics & Growth | Weeks 23–24 | US-050 → US-053 |
+
+# CodeLens — Epic: Codebase Onboarding & Tours
+
+These stories extend the existing `user-stories-CodeLens.md` with a new epic. They follow the same GitHub Issue format and continue the numbering from US-053.
+
+The epic delivers on the original product thesis — *"understand large and unfamiliar repositories quickly"* — by giving new contributors something better than a force-directed graph to stare at. Instead of exploring blindly, a developer asks "How does authentication work?" and gets an ordered, clickable tour: entry point → middleware → token validation → DB lookup, each step with a short AI-written explanation, syntax-highlighted code, and the dependency graph panning to follow along.
+
+---
+
+## 🗺️ EPIC: Codebase Onboarding & Tours
+
+---
+
+### US-054: Tours database schema
+
+**Labels:** `epic/tours` `database`
+**Milestone:** Sprint 13 — Weeks 25–26
+
+---
+
+**As a** developer
+**I want to** have the database tables and RLS in place to persist tours and their ordered steps
+**So that** every other story in this epic has a stable data layer to build against
+
+**Acceptance Criteria**
+- [ ] New `tours` table with columns `{ id, repo_id, created_by, title, description, original_query, is_auto_generated, is_team_shared, forked_from, created_at, updated_at }`
+- [ ] New `tour_steps` table with columns `{ id, tour_id, step_order, file_path, start_line, end_line, explanation, created_at }` and `UNIQUE (tour_id, step_order)`
+- [ ] Both tables have `repo_id` / `tour_id` foreign keys with `ON DELETE CASCADE` so deleting a repo or tour cleans up cleanly
+- [ ] RLS enabled on both — personal tours readable/writable by `created_by`, team-shared tours readable by any `team_members` user whose team has the repo via `team_repositories`
+- [ ] `updated_at` automatically maintained via a trigger on `tours` (any UPDATE bumps it)
+- [ ] Index on `tour_steps (tour_id, step_order)` for ordered fetches
+- [ ] Index on `tours (repo_id, is_team_shared)` for the library view
+- [ ] Migration is idempotent in the same style as the existing `schema.sql` (DO blocks for enums, `CREATE TABLE IF NOT EXISTS`, `DROP POLICY IF EXISTS` before `CREATE POLICY`)
+
+**Note**
+> The RLS policy for team-shared tours mirrors the pattern already used by `repositories` and `file_contents` — a sub-select against `team_members` and `team_repositories`. Keep `forked_from` nullable so it's only set when a user copies someone else's team tour (US-061).
+> `original_query` stores the natural-language prompt that produced an AI-generated tour. It's `NULL` for hand-curated tours and useful both for re-generation and for showing "Generated from: How does authentication work?" in the library.
+> The `updated_at` trigger pattern:
+> ```sql
+> CREATE OR REPLACE FUNCTION set_updated_at() RETURNS TRIGGER AS $$
+> BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
+> $$ LANGUAGE plpgsql;
+> CREATE TRIGGER tours_set_updated_at BEFORE UPDATE ON tours
+>   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+> ```
+> Append the new tables to `scripts/schema.sql` so the file remains the single source of truth.
+
+---
+
+### US-055: Tour generation backend (RAG + graph walk)
+
+**Labels:** `epic/tours` `epic/ai`
+**Milestone:** Sprint 13 — Weeks 25–26
+
+---
+
+**As a** developer
+**I want to** type a natural-language question and get back an ordered tour through the relevant files
+**So that** I can learn how a feature works as a guided narrative instead of as a single RAG paragraph
+
+**Acceptance Criteria**
+- [ ] `POST /api/repos/:repoId/tours/generate` accepts `{ query: string, save?: boolean }`
+- [ ] Pipeline:
+  1. Embed the query, retrieve the top 20 most-similar `code_chunks` for the repo
+  2. Group retrieved chunks by `file_path` to produce a "relevant set" of files
+  3. Pick the **starting file** — the file in the relevant set with the lowest in-bound depth from any node classified as `source` (US-047). If no `source` exists, pick the relevant-set file with the highest `incoming_count`
+  4. Walk forward through `graph_edges`, BFS-style, preferring edges to files in the relevant set; collect 5–8 ordered steps
+  5. For each step, call Claude with the file content + chunk excerpts + the tour's overall context, requesting a 2–4 sentence explanation of *what this step does in the flow*
+  6. If `save: true`, persist the tour and its steps; return the full tour record
+- [ ] Each generated step records `file_path`, the line range of the most-relevant chunk in that file, and the Claude-written explanation
+- [ ] If RAG returns no hit above the existing 0.4-distance threshold, the endpoint returns `404` with `{ error: "No relevant code found for that query" }` — no empty tour is saved
+- [ ] Endpoint is auth-gated; verifies the user has read access to `:repoId` via existing repository RLS check
+- [ ] Token usage counted against the per-user daily budget from US-042
+- [ ] Generation is non-streaming (returns the complete saved tour) — Claude calls inside the loop are awaited sequentially, capped at 8 steps maximum to bound cost
+- [ ] Generation logs each step to console so failures during the Claude loop are debuggable
+
+**Note**
+> The graph-walk heuristic is the heart of this story. RAG alone gives a *bag* of relevant chunks; the walk gives them an *order* that matches how the code actually flows. Pseudocode for the walk:
+> ```
+> visited = {start}
+> result = [start]
+> queue = [start]
+> while queue and len(result) < 8:
+>   current = queue.shift()
+>   neighbors = graph_edges.where(from_path == current).map(to_path)
+>   priority = neighbors.filter(n => relevant_set.has(n)).sort(by relevance score desc)
+>   for n in priority + neighbors.filter(n => !relevant_set.has(n)).slice(0, 1):
+>     if n not in visited:
+>       visited.add(n); result.push(n); queue.push(n)
+> ```
+> The Claude prompt for each step's explanation:
+> *"You are writing one step of a guided tour through a codebase. The user asked: '{query}'. The tour so far has covered: {previous_step_titles}. The current step is the file `{file_path}`. Here's the relevant excerpt:\n\n{excerpt}\n\nWrite 2–4 sentences explaining what role this file plays in answering the user's question. Do not summarise the whole file — focus on its role in this specific flow."*
+> Use `claude-sonnet-4-20250514` (consistent with the rest of the AI stack).
+> The 8-step cap exists for cost — eight Claude calls per generation is plenty for a coherent narrative; more becomes slop.
+
+---
+
+### US-056: Tour viewer overlay UI
+
+**Labels:** `epic/tours`
+**Milestone:** Sprint 13 — Weeks 25–26
+
+---
+
+**As a** developer
+**I want to** read each tour step in a clear, focused panel with the relevant code and explanation side-by-side
+**So that** I can move through a tour at my own pace without losing context
+
+**Acceptance Criteria**
+- [ ] A `TourViewer` component slides in from the right when a tour starts
+- [ ] Header shows: tour title, step counter ("Step 3 of 7"), close (✕) button
+- [ ] Progress bar at the top of the panel reflects the current step
+- [ ] Body shows: file path (clickable, copies to clipboard), line range, AI-written explanation, syntax-highlighted code excerpt for that step's line range
+- [ ] Footer has Prev / Next buttons; Prev disabled on step 1, Next replaced with "Finish" on the last step
+- [ ] Keyboard shortcuts: `←` and `→` navigate steps, `Esc` closes the tour
+- [ ] Closing the tour mid-way preserves progress in component state — re-opening the same tour in the same session resumes at the last visited step
+- [ ] If the tour's referenced file no longer exists in the current repo state (e.g. renamed since generation), the step shows "This file is no longer present in the latest index" with a graceful Skip button
+- [ ] Component is responsive — collapses to a bottom sheet on screens narrower than `lg`
+- [ ] Reuses the existing syntax highlighter and theme from `SharedAnswerComponents.jsx` for visual consistency
+
+**Note**
+> Code excerpt fetching: hit the existing `GET /api/repos/:repoId/file?path=...` endpoint from US-037/US-043, then slice the lines locally to the step's range. No new backend route needed.
+> Resume-on-reopen state should live in the `RepoView` page-level state (or a small context), not in `localStorage` — tours are short and per-session resumption is fine.
+> Don't try to make the tour panel a modal — it must coexist with the graph (US-057) so the user can see both at once.
+
+---
+
+### US-057: Graph synchronisation with the active tour step
+
+**Labels:** `epic/tours` `epic/graph`
+**Milestone:** Sprint 13 — Weeks 25–26
+
+---
+
+**As a** developer following a tour
+**I want** the dependency graph to follow along visually as I advance through steps
+**So that** I see how each step connects to the others and build a spatial mental model of the flow
+
+**Acceptance Criteria**
+- [ ] When a tour is active, the graph enters a "tour" visual mode (similar to the existing impact-analysis and attack-surface modes)
+- [ ] All step nodes rendered with a violet halo and a numeric badge matching their `step_order`
+- [ ] Edges between consecutive step nodes drawn as thicker, animated violet edges (using the same flow-animation style as US-047 attack paths)
+- [ ] Non-tour nodes dimmed to 12% opacity (matches existing dim convention)
+- [ ] On step change, the graph pans/zooms smoothly to centre the new active node — active node gets an additional pulse animation for ~1 s
+- [ ] Active node is rendered slightly larger than the other tour nodes
+- [ ] Clicking any tour-step node directly jumps the viewer to that step
+- [ ] Exiting the tour restores the previous graph mode (default, impact, or attack surface)
+- [ ] Tour mode is mutually exclusive with impact analysis and attack surface — entering one cancels the others, with a brief toast explaining the swap
+
+**Note**
+> Wire this into `useGraphSimulation.js` alongside the existing visual-mode logic. The mode signature is already established (`selection`, `impact`, `attackSurface`); add `tour` as a peer mode that takes `{ activeStepIndex, stepNodeIds }`.
+> The pan/zoom transition should use D3's `transition().duration(600)` on the SVG/canvas viewport — too fast feels jerky, too slow makes the user wait.
+> The numeric step badges go on top of the existing language-colour fill — a small white circle with the step number works well at any zoom.
+
+---
+
+### US-058: Tour library panel
+
+**Labels:** `epic/tours` `epic/dashboard`
+**Milestone:** Sprint 14 — Weeks 27–28
+
+---
+
+**As a** developer working in a repo
+**I want to** see all available tours for that repo in one place with a clear way to start any of them
+**So that** I can choose between tours rather than always generating one from scratch
+
+**Acceptance Criteria**
+- [ ] New "Tours" item in the repo sidebar nav (between Search and Code Review)
+- [ ] Library page lists all tours the user can access for the current repo, grouped:
+  - "Featured" — the auto-generated Start Here tour (US-059), if present
+  - "My tours" — tours where `created_by = auth.uid()`
+  - "Team tours" — tours with `is_team_shared = true` from teammates
+- [ ] Each tour card shows: title, description (or original query if no description), step count, creator avatar + name, last updated, "Start tour" button
+- [ ] An "Ask a question to generate a new tour" composer at the top — submits to US-055 with `save: true` and starts the new tour immediately
+- [ ] Tours can be deleted by their creator from the card overflow menu — confirmation dialog required
+- [ ] Empty state when no tours exist: "Tours turn questions about this repo into guided walkthroughs" with the composer focused
+- [ ] Library is paginated only if a single group exceeds 30 tours — initial load shows all tours otherwise (most repos won't hit the cap)
+
+**Note**
+> `GET /api/repos/:repoId/tours` returns all tours visible to the user under the schema's RLS rules. The frontend then groups them client-side. No need for separate endpoints per group.
+> The composer is a thin wrapper around US-055 — same input shape, same backend. The only UX difference is that on success it auto-starts the tour rather than just landing the user on the new tour's card.
+> Don't show "Forked from" attribution as a card-level feature here — it's a property of the tour itself and lives in the viewer header (US-061).
+
+---
+
+### US-059: Auto-generated "Start here" tour
+
+**Labels:** `epic/tours` `epic/ai`
+**Milestone:** Sprint 14 — Weeks 27–28
+
+---
+
+**As a** developer opening a brand-new repository for the first time
+**I want** a default tour pre-generated that walks me through the repo's most important files
+**So that** I have an immediate way to start understanding the codebase without having to formulate a question first
+
+**Acceptance Criteria**
+- [ ] When indexing finishes (`status` transitions to `ready`), the pipeline kicks off a one-time Start Here tour generation
+- [ ] Tour is generated with a fixed system prompt (no user query) using the same backend endpoint as US-055 with an internal flag
+- [ ] Algorithm for the Start Here tour ignores the RAG step entirely and instead:
+  1. Pick start node = the file with `node_classification = 'source'` having the highest `incoming_count`. Fall back to highest-`incoming_count` overall if no source exists.
+  2. Walk forward through `graph_edges`, preferring nodes with the highest `incoming_count + complexity_score` at each step
+  3. Cap at 6 steps
+- [ ] The resulting tour is saved with `is_auto_generated = true`, `title = "Start Here"`, `description = "An auto-generated walkthrough of this repo's most important files."`, and `original_query = NULL`
+- [ ] Re-indexing a repo regenerates the Start Here tour; the previous one is replaced (deleted then re-inserted) so it stays current
+- [ ] Library panel (US-058) shows the Start Here tour at the top under a "Featured" group with a star icon
+- [ ] If the repo has fewer than 4 graph nodes, no Start Here tour is generated (it would be useless) — the library shows the composer empty state instead
+- [ ] Generation runs as a fire-and-forget step at the very end of the indexing pipeline; failures are logged and never block indexing completion
+
+**Note**
+> This is the feature that makes a fresh repo feel alive instead of intimidating. It must be ready by the time the user clicks into the repo for the first time, hence the kick-off at the end of indexing.
+> The selection heuristic — "high incoming + high complexity" — biases toward files that are both central and substantive. It's the same scoring used by US-048's whole-repo audit and works well empirically.
+> Keep the Claude calls to ≤6 here to stay generous with the daily budget. The Start Here tour fires automatically on every re-index, so it will be the largest single source of background AI cost — keep it tight.
+
+---
+
+### US-060: Editing AI-generated tours
+
+**Labels:** `epic/tours`
+**Milestone:** Sprint 14 — Weeks 27–28
+
+---
+
+**As a** developer who knows the codebase
+**I want to** correct or improve a tour's steps, ordering, and explanations
+**So that** I can polish AI-generated tours into accurate, hand-crafted walkthroughs for my team
+
+**Acceptance Criteria**
+- [ ] An "Edit" action on a tour card (creator only) opens the tour in edit mode
+- [ ] Edit mode shows all steps as a vertical, drag-reorderable list
+- [ ] Each step is editable in place: explanation textarea, file path (with autocomplete against `graph_nodes` for the repo), start line, end line
+- [ ] An "Add step" button at the end of the list inserts a new step requiring file path + line range + explanation
+- [ ] A "Delete" icon on each step removes it; minimum 2 steps required (deletes disabled below that)
+- [ ] Tour-level metadata editable: title, description
+- [ ] "Save" persists changes via `PATCH /api/repos/:repoId/tours/:tourId`; "Cancel" discards
+- [ ] Reordering updates `step_order` on save; conflicts (two steps with the same order) impossible because the backend renumbers all steps `1..N` on every save
+- [ ] Optimistic UI: drag/reorder feels instant; save shows a small inline spinner without blocking the panel
+- [ ] Validation: explanation min 10 chars, file path must exist in `graph_nodes` for this repo, end_line ≥ start_line
+- [ ] Non-creators viewing the tour see no Edit affordance
+
+**Note**
+> Use a small, dependency-free drag-and-drop implementation — the existing stack already has everything needed (React state + a drop zone per row). No need to pull in `react-beautiful-dnd`.
+> The autocomplete data source is already in memory: `graph_nodes` is loaded for the repo on mount per US-013. Filter as the user types.
+> Backend renumbering on save: receive `[{ tempId, file_path, start_line, end_line, explanation, order }]`, sort by `order`, reassign `step_order = idx + 1`, do a `DELETE all old steps` + bulk insert new steps inside one transaction. Simpler and safer than reconciling individual step IDs.
+
+---
+
+### US-061: Team-shared tours
+
+**Labels:** `epic/tours` `epic/auth`
+**Milestone:** Sprint 14 — Weeks 27–28
+
+---
+
+**As a** senior developer onboarding new joiners
+**I want to** publish curated tours visible to all my teammates and let them fork tours into their own copies
+**So that** the team builds a shared library of walkthroughs without one person being a bottleneck for every change
+
+**Acceptance Criteria**
+- [ ] In tour edit mode (US-060), a toggle "Share with team" sets `is_team_shared = true`
+- [ ] Sharing is only available for tours owned by the current user *and* on a repo associated with at least one team via `team_repositories`; otherwise the toggle is hidden with a tooltip explaining why
+- [ ] Shared tours appear under "Team tours" in every teammate's library (US-058) for that repo
+- [ ] Teammates cannot edit a shared tour they don't own — the Edit action is replaced with a "Fork" action
+- [ ] Forking calls `POST /api/repos/:repoId/tours/:tourId/fork` which deep-copies the tour and all steps, sets `created_by = auth.uid()`, sets `forked_from = original_tour_id`, sets `is_team_shared = false` by default, and prefixes the title with "Copy of "
+- [ ] The viewer header (US-056) shows a small "Forked from {original creator}" line when `forked_from` is set
+- [ ] Unsharing a tour (toggling `is_team_shared` back off) does not affect existing forks
+- [ ] Deleting a shared tour shows an extra warning: "X teammates can currently see this tour" with the count fetched at delete time
+- [ ] RLS prevents non-team-members from seeing shared tours even if they guess the tour ID — verified by an integration test
+
+**Note**
+> "Team" in CodeLens already means "the set of users with access to a shared repo via `team_members` + `team_repositories`" (US-034). Reuse that exactly — don't introduce a new sharing scope.
+> The fork endpoint is a thin RPC over the existing schema:
+> ```sql
+> -- inside a transaction
+> INSERT INTO tours (repo_id, created_by, title, description, original_query, forked_from)
+>   SELECT repo_id, auth.uid(), 'Copy of ' || title, description, original_query, id
+>   FROM tours WHERE id = $1
+>   RETURNING id;
+> -- then bulk insert tour_steps copying all rows from the source tour
+> ```
+> Forks are independent after creation — editing the original does not propagate to forks (this is the desired behaviour, not a limitation).
+
+---
+
+### US-062: Deep links to tour steps
+
+**Labels:** `epic/tours`
+**Milestone:** Sprint 14 — Weeks 27–28
+
+---
+
+**As a** developer reviewing a PR or chatting in Slack
+**I want to** share a link to a specific step of a specific tour
+**So that** I can point a colleague at "this is the bit that matters" without making them navigate the library themselves
+
+**Acceptance Criteria**
+- [ ] In the tour viewer (US-056), a "Copy link" button next to the step counter copies a shareable URL to the clipboard
+- [ ] URL format: `/repo/:repoId?tour=:tourId&step=:stepNumber`
+- [ ] Opening the URL while signed in: lands on the repo, automatically opens the specified tour at the specified step
+- [ ] Opening the URL while signed out: redirects to `/login` with `redirect_to` set to the original URL; after sign-in lands on the deep-linked step
+- [ ] If the user lacks access to the tour (RLS blocks the fetch): show a friendly "This tour is not available to you" page with a link back to the dashboard, not a generic 404
+- [ ] If `step` is out of range, the tour opens at step 1 with a small toast explaining the fallback
+- [ ] If `tour` ID does not exist or has been deleted: same friendly message as the no-access case
+- [ ] Step-link copy shows a toast: "Link copied — step 3 of {tour title}"
+- [ ] Browser back/forward navigates between steps within an active tour, in addition to the existing Prev/Next buttons
+
+**Note**
+> Use URL search params, not React Router params, to avoid adding new route segments — the repo route stays `/repo/:repoId` and the tour state lives in `?tour=&step=`. This keeps the existing tab/state machinery unaffected.
+> The "back/forward navigates steps" requirement is what makes this feel native: each step change does a `history.replaceState` (not push) for in-tour Next/Prev, but the *initial* tour-open does a `history.pushState`. That way the back button takes the user out of the tour, not back through every step they've already seen.
+> `redirect_to` is already supported by the auth flow from US-003 — verify it round-trips query params correctly.
+
+---
+
+## 🏷️ New Label
+
+| Label | Color | Description |
+|---|---|---|
+| `epic/tours` | `#7E22CE` | Codebase tours, onboarding, and guided walkthroughs |
+
+## 📅 New Milestones
+
+| Milestone | Weeks | Stories |
+|---|---|---|
+| Sprint 13 — Tours Foundation | Weeks 25–26 | US-054 → US-057 |
+| Sprint 14 — Tours Polish & Sharing | Weeks 27–28 | US-058 → US-062 |
