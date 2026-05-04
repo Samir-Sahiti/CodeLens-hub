@@ -30,6 +30,7 @@ export {
   TrendingUp,
   TrendingDown,
   Activity,
+  CirclePercent,
 
   // Files
   FolderTree,

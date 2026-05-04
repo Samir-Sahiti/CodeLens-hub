@@ -47,6 +47,7 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
   const [showHistogram, setShowHistogram] = useState(false);
   const [complexityFilter, setComplexityFilter] = useState(null);
   const [hotspotsMode, setHotspotsMode] = useState(false);
+  const [showCoverageGaps, setShowCoverageGaps] = useState(false);
 
   const ringRef = useRef(null);
   const histRef = useRef(null);
@@ -349,9 +350,16 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
                 </button>
               )}
               {coverageGaps.length > 0 && (
-                <span className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-200">
-                  {coverageGaps.length} coverage gap{coverageGaps.length !== 1 ? 's' : ''}
-                </span>
+                <button
+                  onClick={() => setShowCoverageGaps((v) => !v)}
+                  className={`rounded-md border px-3 py-1.5 text-xs font-medium transition ${
+                    showCoverageGaps
+                      ? 'border-red-500/40 bg-red-500/15 text-red-200'
+                      : 'border-red-500/30 bg-red-500/10 text-red-200 hover:bg-red-500/15'
+                  }`}
+                >
+                  {showCoverageGaps ? 'Hide' : 'Show'} {coverageGaps.length} coverage gap{coverageGaps.length !== 1 ? 's' : ''}
+                </button>
               )}
             </div>
             <label className="flex w-full items-center gap-2 rounded-md border border-gray-700 bg-gray-950 px-3 py-1.5 text-sm text-white transition-colors focus-within:border-indigo-500 sm:w-72">
@@ -377,10 +385,14 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
             </div>
           )}
 
-          {coverageGaps.length > 0 && (
+          {showCoverageGaps && coverageGaps.length > 0 && (
             <div className="shrink-0 border-b border-gray-800 bg-red-950/20 px-4 py-3">
-              <p className="mb-2 text-[10px] uppercase tracking-[0.2em] text-red-300/80">Coverage gaps</p>
-              <div className="flex flex-wrap gap-2">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <p className="text-[10px] uppercase tracking-[0.2em] text-red-300/80">Coverage gaps</p>
+                <span className="text-xs text-red-200/70">{coverageGaps.length} uncovered source files</span>
+              </div>
+              <div className="max-h-32 overflow-y-auto pr-1">
+                <div className="flex flex-wrap gap-2">
                 {coverageGaps.map((node) => (
                   <button
                     key={node.file_path}
@@ -391,6 +403,7 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
                     {node.file_path}
                   </button>
                 ))}
+                </div>
               </div>
             </div>
           )}

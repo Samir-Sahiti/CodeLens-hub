@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useGraphSimulation } from '../hooks/useGraphSimulation';
 import { LANGUAGE_COLORS, formatLanguage } from '../lib/constants';
-import { ChevronDown, ChevronUp, Download, Search, Shield, TrendingUp, X } from './ui/Icons';
+import { ChevronDown, ChevronUp, CirclePercent, Download, Search, Shield, TrendingUp, X } from './ui/Icons';
 
 function GraphLegend() {
   const items = [
@@ -945,6 +945,18 @@ export default function DependencyGraph({
     onBackgroundClick: handleBackgroundClick,
   });
 
+  const handleResetView = useCallback(() => {
+    setContextMenu(null);
+    setSearchQuery('');
+    setSearchCurrent(0);
+    setAttackSurfaceSource(null);
+    setAttackSurfaceMode(false);
+    setCoverageGraphMode(false);
+    setHotspotGraphMode(false);
+    onClearImpactAnalysis?.();
+    onNodeSelect(null);
+    resetView();
+  }, [onClearImpactAnalysis, onNodeSelect, resetView]);
 
   if (graphNodes.length === 0) {
     return (
@@ -1095,7 +1107,7 @@ export default function DependencyGraph({
               }`}
               title="Toggle test coverage overlay"
             >
-              Coverage
+              <CirclePercent className="mr-1.5 inline h-3.5 w-3.5" /> Coverage
             </button>
             {churnData.length > 0 && (
               <button
@@ -1111,7 +1123,7 @@ export default function DependencyGraph({
               </button>
             )}
             <button
-              onClick={resetView}
+              onClick={handleResetView}
               className="rounded-full border border-gray-700 bg-gray-950/80 px-4 py-2 text-sm font-medium text-gray-100 transition hover:border-gray-500 hover:bg-gray-900"
             >
               Reset view
