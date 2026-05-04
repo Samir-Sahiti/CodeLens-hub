@@ -15,8 +15,101 @@ import {
 import {
   X, GitCompare, GitBranch, Plus, Minus, AlertTriangle,
   FileCode, ArrowRight, TrendingUp, TrendingDown,
-  GitMerge, FileWarning, Link2, RefreshCw, Info,
+  GitMerge, FileWarning, Link2, RefreshCw, Info, Check, ChevronDown,
 } from './ui/Icons';
+
+// ── Branch picker combobox ────────────────────────────────────────────────
+
+function BranchPicker({ value, onChange, branches, loading, placeholder, label, autoFocus }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const containerRef = useRef(null);
+
+  // Sync external value → internal query (so the displayed text stays in sync)
+  useEffect(() => { setQuery(value); }, [value]);
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => {
+      if (containerRef.current && !containerRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  const filtered = query.trim()
+    ? branches.filter((b) => b.toLowerCase().includes(query.trim().toLowerCase()))
+    : branches;
+
+  const handleSelect = (branch) => {
+    onChange(branch);
+    setQuery(branch);
+    setOpen(false);
+  };
+
+  const handleInputChange = (e) => {
+    setQuery(e.target.value);
+    onChange(e.target.value);
+    setOpen(true);
+  };
+
+  return (
+    <div className="flex flex-col gap-1 min-w-0" ref={containerRef}>
+      {label && <label className="text-xs text-gray-500 font-medium">{label}</label>}
+      <div className="relative">
+        <GitBranch className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-500 z-10" />
+        <input
+          className="h-9 w-52 rounded-lg border border-gray-700 bg-gray-800 pl-8 pr-8 text-sm text-white placeholder-gray-600 focus:border-indigo-500 focus:outline-none"
+          value={query}
+          onChange={handleInputChange}
+          onFocus={() => setOpen(true)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') { setOpen(false); e.stopPropagation(); }
+            if (e.key === 'Enter') setOpen(false);
+          }}
+          placeholder={placeholder}
+          autoFocus={autoFocus}
+        />
+        <button
+          tabIndex={-1}
+          onMouseDown={(e) => { e.preventDefault(); setOpen((v) => !v); }}
+          className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
+        >
+          {loading
+            ? <div className="h-3 w-3 animate-spin rounded-full border-2 border-gray-500 border-t-transparent" />
+            : <ChevronDown className="h-3.5 w-3.5" />}
+        </button>
+
+        {open && (
+          <ul className="absolute z-50 mt-1 w-full max-h-52 overflow-y-auto rounded-lg border border-gray-700 bg-gray-900 shadow-xl py-1">
+            {loading && (
+              <li className="px-3 py-2 text-xs text-gray-500">Loading branches…</li>
+            )}
+            {!loading && filtered.length === 0 && (
+              <li className="px-3 py-2 text-xs text-gray-500">
+                {query ? `No match — "${query}" will be used as-is` : 'No branches found'}
+              </li>
+            )}
+            {!loading && filtered.map((branch) => (
+              <li
+                key={branch}
+                onMouseDown={(e) => { e.preventDefault(); handleSelect(branch); }}
+                className={`flex items-center gap-2 px-3 py-2 text-sm cursor-pointer rounded transition-colors ${
+                  value === branch ? 'bg-indigo-600/20 text-indigo-300' : 'text-gray-300 hover:bg-gray-800'
+                }`}
+              >
+                <GitBranch className="h-3 w-3 text-gray-500 shrink-0" />
+                <span className="flex-1 truncate font-mono text-xs">{branch}</span>
+                {value === branch && <Check className="h-3.5 w-3.5 text-indigo-400 shrink-0" />}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -376,7 +469,22 @@ export default function ArchDiffModal({ repoId, defaultBranch = 'main', onClose 
   const [loading, setLoading] = useState(false);
   const [diff, setDiff]   = useState(null);
   const [error, setError] = useState(null);
-  const [view, setView]   = useState('summary'); // 'summary' | 'graph' | 'files' | 'edges' | 'issues' | 'complexity'
+  const [view, setView]   = useState('summary');
+
+  const [branches, setBranches]           = useState([]);
+  const [branchesLoading, setBranchesLoading] = useState(true);
+
+  // Fetch branch list once on mount
+  useEffect(() => {
+    if (!session?.access_token) return;
+    fetch(apiUrl(`/api/repos/${repoId}/branches`), {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    })
+      .then((r) => r.json())
+      .then((data) => setBranches(data.branches || []))
+      .catch(() => {})
+      .finally(() => setBranchesLoading(false));
+  }, [repoId, session?.access_token]);
 
   // Close on Escape
   useEffect(() => {
@@ -405,10 +513,6 @@ export default function ArchDiffModal({ repoId, defaultBranch = 'main', onClose 
       setLoading(false);
     }
   }, [repoId, baseRef, headRef, session?.access_token]);
-
-  const handleKeyDown = useCallback((e) => {
-    if (e.key === 'Enter') runDiff();
-  }, [runDiff]);
 
   const s = diff?.summary;
   const changedNodes = diff ? diff.nodes.filter((n) => n.status !== 'unchanged') : [];
@@ -446,36 +550,26 @@ export default function ArchDiffModal({ repoId, defaultBranch = 'main', onClose 
 
         {/* Ref selector */}
         <div className="flex items-end gap-3 px-6 py-4 border-b border-gray-800 bg-gray-900/40 shrink-0 flex-wrap">
-          <div className="flex flex-col gap-1 min-w-0">
-            <label className="text-xs text-gray-500 font-medium">Base ref</label>
-            <div className="relative">
-              <GitBranch className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-500" />
-              <input
-                className="h-9 rounded-lg border border-gray-700 bg-gray-800 pl-8 pr-3 text-sm text-white placeholder-gray-600 focus:border-indigo-500 focus:outline-none w-44"
-                value={baseRef}
-                onChange={(e) => setBaseRef(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="main"
-              />
-            </div>
-          </div>
+          <BranchPicker
+            label="Base"
+            value={baseRef}
+            onChange={setBaseRef}
+            branches={branches}
+            loading={branchesLoading}
+            placeholder={defaultBranch}
+          />
 
           <ArrowRight className="h-4 w-4 text-gray-600 mb-2 shrink-0" />
 
-          <div className="flex flex-col gap-1 min-w-0">
-            <label className="text-xs text-gray-500 font-medium">Head ref</label>
-            <div className="relative">
-              <GitBranch className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-500" />
-              <input
-                className="h-9 rounded-lg border border-gray-700 bg-gray-800 pl-8 pr-3 text-sm text-white placeholder-gray-600 focus:border-indigo-500 focus:outline-none w-52"
-                value={headRef}
-                onChange={(e) => setHeadRef(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="feature/my-branch or SHA"
-                autoFocus
-              />
-            </div>
-          </div>
+          <BranchPicker
+            label="Head"
+            value={headRef}
+            onChange={setHeadRef}
+            branches={branches}
+            loading={branchesLoading}
+            placeholder="feature/my-branch or SHA"
+            autoFocus
+          />
 
           <Button
             onClick={runDiff}
