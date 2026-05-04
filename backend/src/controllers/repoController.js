@@ -828,6 +828,58 @@ const getDuplication = async (req, res) => {
 };
 
 /**
+ * GET /api/repos/:repoId/branches
+ * Returns up to 100 branch names for the repo (US-051 branch picker).
+ */
+const getBranches = async (req, res) => {
+  const { repoId } = req.params;
+
+  const allowed = await canAccessRepo(repoId, req.user.id);
+  if (!allowed) return res.status(404).json({ error: 'Repository not found or unauthorized' });
+
+  const { data: repo } = await supabaseAdmin
+    .from('repositories')
+    .select('full_name, name, source, default_branch')
+    .eq('id', repoId)
+    .single();
+
+  if (!repo || repo.source !== 'github') {
+    return res.json({ branches: [], default_branch: 'main' });
+  }
+
+  const fullName = repo.full_name || repo.name || '';
+  const [owner, repoName] = fullName.split('/');
+  if (!owner || !repoName) return res.json({ branches: [], default_branch: repo.default_branch || 'main' });
+
+  const githubToken = await _getGithubTokenForUser(req.user.id);
+  if (!githubToken) return res.json({ branches: [], default_branch: repo.default_branch || 'main' });
+
+  try {
+    const octokit = new Octokit({ auth: githubToken });
+    const { data } = await octokit.rest.repos.listBranches({
+      owner,
+      repo: repoName,
+      per_page: 100,
+    });
+
+    const defaultBranch = repo.default_branch || 'main';
+    const names = (data || []).map((b) => b.name);
+
+    // Sort: default branch first, then alphabetically
+    names.sort((a, b) => {
+      if (a === defaultBranch) return -1;
+      if (b === defaultBranch) return 1;
+      return a.localeCompare(b);
+    });
+
+    res.json({ branches: names, default_branch: defaultBranch });
+  } catch (err) {
+    console.warn('[getBranches]', err.message);
+    res.json({ branches: [], default_branch: repo.default_branch || 'main' });
+  }
+};
+
+/**
  * GET /api/repos/:repoId/diff?base=<ref>&head=<ref>
  * Computes or returns a cached architectural diff between two git refs (US-051).
  * Only supported for GitHub-sourced repositories.
@@ -930,4 +982,4 @@ const getDiff = async (req, res) => {
   }
 };
 
-module.exports = { connectRepo, uploadRepo, listRepos, getStatus, reindexRepo, deleteRepo, getAnalysisData, updateRepo, generateWebhook, getFileContent, getDependencies, getChurn, getDuplication, getDiff };
+module.exports = { connectRepo, uploadRepo, listRepos, getStatus, reindexRepo, deleteRepo, getAnalysisData, updateRepo, generateWebhook, getFileContent, getDependencies, getChurn, getDuplication, getBranches, getDiff };
