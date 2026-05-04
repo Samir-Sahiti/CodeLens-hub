@@ -47,6 +47,7 @@ export function useGraphSimulation({
   impactAnalysis,
   attackSurface,
   hotspotMode,
+  coverageMode,
   focusNodeId,
   onNodeClick,
   onNodeContextMenu,
@@ -184,6 +185,7 @@ export function useGraphSimulation({
 
     const isHotspotActive = Boolean(hotspotMode?.isActive);
     const hotspotScores   = hotspotMode?.scores || new Map();
+    const isCoverageActive = Boolean(coverageMode?.isActive);
 
     const isAttackSurfaceActive = Boolean(attackSurface?.isActive);
     const asSourceIds   = attackSurface?.sourceIds   || new Set();
@@ -194,6 +196,10 @@ export function useGraphSimulation({
     const hasPathHighlight = asPathNodeIds.size > 0;
 
     const getNodeOpacity = (nodeId) => {
+      if (isCoverageActive) {
+        const node = localNodes.find((n) => n.graphId === nodeId);
+        return node?.is_test_file ? 0.3 : 1;
+      }
       if (isHotspotActive) return 1; // every node is coloured — none are dimmed
       if (isAttackSurfaceActive) {
         if (asSourceIds.has(nodeId) || asSinkIds.has(nodeId) || asBothIds.has(nodeId)) return 1;
@@ -222,6 +228,15 @@ export function useGraphSimulation({
     };
 
     const getNodeFill = (node) => {
+      if (isCoverageActive) {
+        if (node.is_test_file) return '#9ca3af';
+        if (node.coverage_percentage != null) {
+          if (Number(node.coverage_percentage) >= 80) return '#22c55e';
+          if (Number(node.coverage_percentage) > 0) return '#facc15';
+          return '#ef4444';
+        }
+        return node.has_test_coverage ? '#22c55e' : '#ef4444';
+      }
       if (isHotspotActive) {
         const score = hotspotScores.get(node.graphId);
         return score != null ? hotspotColor(score) : '#374151'; // gray for files with no churn data
@@ -682,6 +697,7 @@ export function useGraphSimulation({
     impactAnalysis,
     attackSurface,
     hotspotMode,
+    coverageMode,
     focusNodeId,
     onBackgroundClick,
     onNodeClick,
