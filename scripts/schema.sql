@@ -35,6 +35,8 @@ COMMIT;
 ALTER TYPE issue_type ADD VALUE IF NOT EXISTS 'missing_auth';
 COMMIT;
 ALTER TYPE issue_type ADD VALUE IF NOT EXISTS 'refactoring_candidate';
+COMMIT;
+ALTER TYPE issue_type ADD VALUE IF NOT EXISTS 'untested_critical_file';
 
 -- =============================================================================
 -- FUNCTIONS — Vault wrappers (US-039)
@@ -135,12 +137,14 @@ CREATE TABLE IF NOT EXISTS repositories (
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   webhook_secret    TEXT,
   auto_sync_enabled BOOLEAN     NOT NULL DEFAULT false,
+  has_coverage_files BOOLEAN    NOT NULL DEFAULT false,
   sast_disabled_rules TEXT[]    DEFAULT '{}'
 );
 
 -- Columns added in later sprints — safe to re-run
 ALTER TABLE repositories ADD COLUMN IF NOT EXISTS webhook_secret     TEXT;
 ALTER TABLE repositories ADD COLUMN IF NOT EXISTS auto_sync_enabled  BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE repositories ADD COLUMN IF NOT EXISTS has_coverage_files BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE repositories ADD COLUMN IF NOT EXISTS sast_disabled_rules TEXT[] DEFAULT '{}';
 
 ALTER TABLE repositories ENABLE ROW LEVEL SECURITY;
@@ -180,6 +184,13 @@ CREATE TABLE IF NOT EXISTS graph_nodes (
 ALTER TABLE graph_nodes ADD COLUMN IF NOT EXISTS content_hash TEXT;
 -- US-047: attack surface classification ('source', 'sink', 'both', or null)
 ALTER TABLE graph_nodes ADD COLUMN IF NOT EXISTS node_classification TEXT;
+-- US-053: test coverage overlay and formal coverage overrides
+ALTER TABLE graph_nodes ADD COLUMN IF NOT EXISTS has_test_coverage BOOLEAN DEFAULT FALSE;
+ALTER TABLE graph_nodes ADD COLUMN IF NOT EXISTS is_test_file BOOLEAN DEFAULT FALSE;
+ALTER TABLE graph_nodes ADD COLUMN IF NOT EXISTS coverage_percentage FLOAT;
+ALTER TABLE graph_nodes DROP CONSTRAINT IF EXISTS graph_nodes_coverage_percentage_bounds;
+ALTER TABLE graph_nodes ADD CONSTRAINT graph_nodes_coverage_percentage_bounds
+  CHECK (coverage_percentage IS NULL OR (coverage_percentage >= 0 AND coverage_percentage <= 100));
 
 CREATE INDEX IF NOT EXISTS graph_nodes_repo_id_idx ON graph_nodes (repo_id);
 

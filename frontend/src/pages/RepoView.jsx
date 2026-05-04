@@ -106,7 +106,7 @@ export default function RepoView() {
   const [chatFilePath, setChatFilePath] = useState(null);
   const [reviewPrefill, setReviewPrefill] = useState(null);
 
-  const [analysisData, setAnalysisData]   = useState({ nodes: [], edges: [], issues: [] });
+  const [analysisData, setAnalysisData]   = useState({ nodes: [], edges: [], issues: [], hasCoverageFiles: false });
   const [hasFetchedData, setHasFetchedData] = useState(false);
   const [analysisError, setAnalysisError] = useState(null);
   const [churnData, setChurnData] = useState([]);
@@ -169,6 +169,7 @@ export default function RepoView() {
         nodes:  data.nodes  || [],
         edges:  data.edges  || [],
         issues: data.issues || [],
+        hasCoverageFiles: Boolean(data.hasCoverageFiles),
       });
 
       if (churnRes.ok) {
@@ -250,7 +251,7 @@ export default function RepoView() {
 
   useEffect(() => {
     return () => {
-      setAnalysisData({ nodes: [], edges: [], issues: [] });
+      setAnalysisData({ nodes: [], edges: [], issues: [], hasCoverageFiles: false });
       setRepoCtx(null);
       setIssueCount(0);
     };
@@ -298,7 +299,7 @@ export default function RepoView() {
       // Batch all resets + optimistic status change in one render so the UI
       // jumps straight to the "Indexing…" screen without flashing stale data
       setHasFetchedData(false);
-      setAnalysisData({ nodes: [], edges: [], issues: [] });
+      setAnalysisData({ nodes: [], edges: [], issues: [], hasCoverageFiles: false });
       setDepsRefreshKey(k => k + 1);
       setImpactSourcePath(null);
       setRepo(prev => prev ? { ...prev, status: 'pending', file_count: 0, indexed_at: null } : prev);
@@ -554,6 +555,7 @@ export default function RepoView() {
                   onAuditFile={handleAuditFile}
                   churnData={churnData}
                   repoSource={repo?.source}
+                  hasCoverageFiles={analysisData.hasCoverageFiles}
                 />
               </div>
 

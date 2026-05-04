@@ -27,6 +27,26 @@ function GraphLegend() {
   );
 }
 
+function CoverageLegend() {
+  const items = [
+    { label: 'Covered', color: '#22c55e' },
+    { label: 'Low coverage', color: '#facc15' },
+    { label: 'Uncovered', color: '#ef4444' },
+    { label: 'Test file', color: '#9ca3af', muted: true },
+  ];
+
+  return (
+    <div className="flex flex-wrap items-center gap-3 text-xs text-gray-400">
+      {items.map((item) => (
+        <div key={item.label} className="flex items-center gap-2 rounded-full border border-gray-800 bg-gray-950/80 px-3 py-1">
+          <span className={`h-2.5 w-2.5 rounded-full ${item.muted ? 'opacity-30' : ''}`} style={{ backgroundColor: item.color }} />
+          <span>{item.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function GraphToast({ message, visible }) {
   return (
     <div
@@ -566,6 +586,7 @@ export default function DependencyGraph({
 
   // US-050: hotspot mode
   const [hotspotGraphMode, setHotspotGraphMode] = useState(false);
+  const [coverageGraphMode, setCoverageGraphMode] = useState(false);
 
   // Search state
   const [searchBarOpen, setSearchBarOpen] = useState(false);
@@ -676,7 +697,7 @@ export default function DependencyGraph({
   }, [edges, graphNodeByPath]);
 
   // Compute clustered data when clustering is enabled and there are many nodes
-  const shouldCluster = clusteringEnabled && graphNodes.length > 300;
+  const shouldCluster = clusteringEnabled && graphNodes.length > 300 && !coverageGraphMode;
 
   const clusteredData = useMemo(() => {
     if (!shouldCluster) return null;
@@ -827,6 +848,11 @@ export default function DependencyGraph({
     return { isActive: true, scores };
   }, [hotspotGraphMode, churnData, graphNodes]);
 
+  const coverageModeData = useMemo(() => {
+    if (!coverageGraphMode) return null;
+    return { isActive: true };
+  }, [coverageGraphMode]);
+
   // Search: filter simNodes by file path query
   const searchMatchNodes = useMemo(() => {
     if (!searchQuery.trim()) return [];
@@ -911,6 +937,7 @@ export default function DependencyGraph({
     impactAnalysis,
     attackSurface: attackSurfaceData,
     hotspotMode: hotspotModeData,
+    coverageMode: coverageModeData,
     focusNodeId: searchCurrentNode?.graphId || selection.primaryId,
     onNodeClick: handleNodeClick,
     onNodeContextMenu: handleNodeContextMenu,
@@ -965,7 +992,7 @@ export default function DependencyGraph({
         )}
 
         <div className="absolute left-3 right-3 top-3 z-10 flex flex-wrap items-start justify-between gap-2 sm:left-4 sm:right-4 sm:top-4 sm:gap-3">
-          <GraphLegend />
+          {coverageGraphMode ? <CoverageLegend /> : <GraphLegend />}
           <div className="flex flex-wrap items-center justify-end gap-2">
             <span className="rounded-full border border-gray-700 bg-gray-950/80 px-3 py-1 text-xs uppercase tracking-[0.18em] text-gray-400">
               {renderMode === 'canvas' ? 'Canvas mode' : 'SVG mode'}
@@ -1033,6 +1060,7 @@ export default function DependencyGraph({
                 const next = !attackSurfaceMode;
                 setAttackSurfaceMode(next);
                 setAttackSurfaceSource(null);
+                if (next) setCoverageGraphMode(false);
                 // Clustering uses cluster-level edge IDs that are incompatible with
                 // individual-node path IDs — force flat mode while attack surface is on.
                 if (next) {
@@ -1048,6 +1076,26 @@ export default function DependencyGraph({
               title="Toggle attack surface mapping (US-047)"
             >
               <Shield className="mr-1.5 inline h-3.5 w-3.5" /> Attack Surface
+            </button>
+            <button
+              onClick={() => {
+                const next = !coverageGraphMode;
+                setCoverageGraphMode(next);
+                if (next) {
+                  setAttackSurfaceMode(false);
+                  setAttackSurfaceSource(null);
+                  setClusteringEnabled(false);
+                  setExpandedClusters(new Set());
+                }
+              }}
+              className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                coverageGraphMode
+                  ? 'border-emerald-500/50 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25'
+                  : 'border-gray-700 bg-gray-950/80 text-gray-400 hover:border-gray-500 hover:text-gray-200'
+              }`}
+              title="Toggle test coverage overlay"
+            >
+              Coverage
             </button>
             {churnData.length > 0 && (
               <button

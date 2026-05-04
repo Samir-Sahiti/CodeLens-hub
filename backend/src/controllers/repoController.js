@@ -327,15 +327,18 @@ const getAnalysisData = async (req, res) => {
 
   try {
     const [
+      { data: repoMeta, error: repoMetaErr },
       { data: nodes, error: nodesErr },
       { data: edges, error: edgesErr },
       { data: issues, error: issuesErr }
     ] = await Promise.all([
+      supabaseAdmin.from('repositories').select('has_coverage_files').eq('id', repoId).single(),
       supabaseAdmin.from('graph_nodes').select('*').eq('repo_id', repoId).order('file_path', { ascending: true }),
       supabaseAdmin.from('graph_edges').select('*').eq('repo_id', repoId).order('from_path', { ascending: true }).order('to_path', { ascending: true }),
       supabaseAdmin.from('analysis_issues').select('*').eq('repo_id', repoId).order('id', { ascending: true })
     ]);
 
+    if (repoMetaErr) throw repoMetaErr;
     if (nodesErr) throw nodesErr;
     if (edgesErr) throw edgesErr;
     if (issuesErr) throw issuesErr;
@@ -345,7 +348,8 @@ const getAnalysisData = async (req, res) => {
     res.json({
       nodes: nodes || [],
       edges: edges || [],
-      issues: issues || []
+      issues: issues || [],
+      hasCoverageFiles: Boolean(repoMeta?.has_coverage_files)
     });
   } catch (err) {
     console.error('[getAnalysisData] Error:', err);
