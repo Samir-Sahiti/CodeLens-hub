@@ -41,7 +41,7 @@ function LangDistributionCard({ langCounts }) {
 }
 
 
-export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact, onAuditFile, churnData = [], repoSource }) {
+export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnalyseImpact, onAuditFile, churnData = [], repoSource, hasCoverageFiles = false }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [sortConfig, setSortConfig] = useState({ key: 'complexity_score', direction: 'desc' });
   const [showHistogram, setShowHistogram] = useState(false);
@@ -58,12 +58,24 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
   const calc90th = (arr, key) => {
     if (!arr || arr.length === 0) return 0;
     const sortedVals = arr.map((n) => n[key] || 0).sort((a, b) => a - b);
-    const index = Math.floor(0.9 * sortedVals.length);
+    const index = Math.floor((sortedVals.length - 1) * 0.9);
     return sortedVals[Math.min(index, sortedVals.length - 1)] || 0;
   };
 
   const p90Complexity = useMemo(() => calc90th(nodes, 'complexity_score'), [nodes]);
   const p90Incoming = useMemo(() => calc90th(nodes, 'incoming_count'), [nodes]);
+  const sourceNodes = useMemo(() => nodes.filter((node) => !node.is_test_file), [nodes]);
+  const coverageSummary = useMemo(() => {
+    const covered = sourceNodes.filter((node) => (
+      node.coverage_percentage != null ? Number(node.coverage_percentage) > 0 : node.has_test_coverage
+    )).length;
+    const total = sourceNodes.length;
+    const percent = total > 0 ? Math.round((covered / total) * 100) : 0;
+    return { covered, total, percent };
+  }, [sourceNodes]);
+  const coverageGaps = useMemo(() => sourceNodes
+    .filter((node) => node.coverage_percentage === 0 || (node.coverage_percentage == null && node.has_test_coverage === false))
+    .sort((a, b) => ((b.incoming_count || 0) * (b.complexity_score || 0)) - ((a.incoming_count || 0) * (a.complexity_score || 0))), [sourceNodes]);
 
   const { criticalCount, atRiskCount, totalLines, avgComplexity, langCounts } = useMemo(() => {
     let critical = 0;
@@ -252,7 +264,7 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
       style={{ background: 'radial-gradient(ellipse at top, rgba(99,102,241,0.06), transparent 60%)' }}
     >
       {/* ── Summary cards row ── */}
-      <div className="grid shrink-0 grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid shrink-0 grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
         {/* Health score ring */}
         <div className="flex min-w-0 items-center gap-4 rounded-xl border border-gray-800 bg-gray-900/60 px-5 py-3">
           <svg ref={ringRef} width="72" height="72" />
@@ -283,6 +295,16 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
 
         {/* Language distribution — with showAll toggle */}
         <LangDistributionCard langCounts={langCounts} />
+
+        <div className="flex min-w-0 flex-col justify-center rounded-xl border border-gray-800 bg-gray-900/60 px-5 py-3" style={{ borderTopColor: coverageSummary.percent >= 80 ? '#22c55e' : coverageSummary.percent > 0 ? '#facc15' : '#ef4444', borderTopWidth: 2 }}>
+          <p className="text-[10px] uppercase tracking-[0.2em] text-gray-500 mb-1">Test Coverage</p>
+          <p className="text-xl font-bold text-white">{coverageSummary.percent}%</p>
+          <p className="text-xs text-gray-500 mt-0.5">
+            {hasCoverageFiles
+              ? `${coverageSummary.covered} of ${coverageSummary.total} source files are covered via execution data or imports (${coverageSummary.percent}% by file)`
+              : `${coverageSummary.covered} of ${coverageSummary.total} source files are referenced by at least one test (${coverageSummary.percent}% by file)`}
+          </p>
+        </div>
       </div>
 
       {/* ── Table + sidebar ── */}
@@ -326,6 +348,11 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
                   <X className="h-3 w-3" />
                 </button>
               )}
+              {coverageGaps.length > 0 && (
+                <span className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-200">
+                  {coverageGaps.length} coverage gap{coverageGaps.length !== 1 ? 's' : ''}
+                </span>
+              )}
             </div>
             <label className="flex w-full items-center gap-2 rounded-md border border-gray-700 bg-gray-950 px-3 py-1.5 text-sm text-white transition-colors focus-within:border-indigo-500 sm:w-72">
               <Search className="h-4 w-4 shrink-0 text-gray-500" />
@@ -347,6 +374,24 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
                 {complexityFilter && <span className="text-[10px] text-indigo-400">Filtered: {sortedNodes.length} files</span>}
               </div>
               <svg ref={histRef} className="w-full" />
+            </div>
+          )}
+
+          {coverageGaps.length > 0 && (
+            <div className="shrink-0 border-b border-gray-800 bg-red-950/20 px-4 py-3">
+              <p className="mb-2 text-[10px] uppercase tracking-[0.2em] text-red-300/80">Coverage gaps</p>
+              <div className="flex flex-wrap gap-2">
+                {coverageGaps.map((node) => (
+                  <button
+                    key={node.file_path}
+                    onClick={() => onNodeSelect(node.id || node.file_path)}
+                    className="max-w-full truncate rounded-md border border-red-500/25 bg-red-500/10 px-2.5 py-1 font-mono text-xs text-red-100 transition hover:bg-red-500/20"
+                    title={`${node.file_path} · dependents ${node.incoming_count || 0} · complexity ${Number(node.complexity_score || 0).toFixed(2)}`}
+                  >
+                    {node.file_path}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
 

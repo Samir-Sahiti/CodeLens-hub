@@ -1,11 +1,13 @@
 const { parseFile } = require('../parsers/repositoryParser');
 const { extractChunksFromFile } = require('../parsers/chunkParser');
+const { detectIssues } = require('./issueDetection');
 const { scanFileForSecrets } = require('./secretScanner');
 const { scanFileForInsecurePatterns } = require('./sastEngine'); // US-046
 const { scanFileForMissingAuth } = require('./authCoverageScanner'); // US-049
 const { classifyFile } = require('./attackSurfaceClassifier'); // US-047
 const { fetchRepoChurn } = require('./churnService'); // US-050
 const { detectDuplicateCandidates } = require('./duplicationScanner'); // US-052
+const { isTestFilePath, parseCoverageOverrides } = require('./testCoverageService'); // US-053
 const { recordUsage } = require('./usageTracker'); // US-042
 const { isManifestFile, parseManifest } = require('./manifestParser'); // US-045
 const { scanDependencies } = require('./osvScanner'); // US-045
@@ -100,7 +102,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     // and fall back to a full index on this run.
     const { data: existingNodeRows } = await supabaseAdmin
       .from('graph_nodes')
-      .select('file_path, content_hash, language, line_count, complexity_score, node_classification')
+      .select('file_path, content_hash, language, line_count, complexity_score, node_classification, is_test_file')
       .eq('repo_id', repoId);
     const existingNodeMap = new Map((existingNodeRows || []).map(n => [n.file_path, n]));
 
@@ -234,6 +236,10 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     await supabaseAdmin.from('graph_edges').delete().eq('repo_id', repoId);
     await supabaseAdmin.from('file_churn').delete().eq('repo_id', repoId); // US-050
     await supabaseAdmin.from('duplication_candidates').delete().eq('repo_id', repoId); // US-052
+    await supabaseAdmin
+      .from('graph_nodes')
+      .update({ has_test_coverage: false, coverage_percentage: null, is_test_file: false })
+      .eq('repo_id', repoId);
 
     if (changedOrDeletedPaths.length > 0) {
       const pathBatches = chunkArray(changedOrDeletedPaths, 150);
@@ -395,6 +401,9 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
           complexity_score: existing.complexity_score || 1,
           content_hash: existing.content_hash,
           node_classification: existing.node_classification || null,
+          has_test_coverage: false,
+          is_test_file: isTestFilePath(filePath),
+          coverage_percentage: null,
           outgoing_count: 0,
           incoming_count: 0,
         });
@@ -436,6 +445,9 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
         complexity_score: file.complexity || 1,
         content_hash: originalFile?.contentHash || null,
         node_classification: originalFile?.content ? classifyFile(file.filePath, originalFile.content) : null,
+        has_test_coverage: false,
+        is_test_file: isTestFilePath(file.filePath),
+        coverage_percentage: null,
       });
 
       for (const imp of file.imports) {
@@ -457,7 +469,25 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       }
     }
     const uniqueEdges = Array.from(edgeMap.values());
-    const uniqueNodes = Array.from(nodeMap.values());
+    let uniqueNodes = Array.from(nodeMap.values());
+
+    const testFilesSet = new Set(uniqueNodes.filter((node) => node.is_test_file).map((node) => node.file_path));
+    const heuristicCoveredPaths = new Set();
+    for (const edge of uniqueEdges) {
+      if (testFilesSet.has(edge.from_path)) heuristicCoveredPaths.add(edge.to_path);
+    }
+
+    const { coverageByPath, hasCoverageFiles } = await parseCoverageOverrides(extractDir, uniqueNodes.map((node) => node.file_path));
+    uniqueNodes = uniqueNodes.map((node) => {
+      const hasFormalCoverage = coverageByPath.has(node.file_path);
+      return {
+        ...node,
+        is_test_file: isTestFilePath(node.file_path),
+        has_test_coverage: hasFormalCoverage ? false : heuristicCoveredPaths.has(node.file_path),
+        coverage_percentage: hasFormalCoverage ? coverageByPath.get(node.file_path) : null,
+      };
+    });
+    console.log(`[indexer] Coverage: ${testFilesSet.size} test file(s), ${heuristicCoveredPaths.size} heuristic target(s), ${coverageByPath.size} formal override(s).`);
 
     // 6. bulk insert nodes
     console.time(`[indexer] Phase 3: DB writes (${repoId})`);
@@ -487,8 +517,6 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       incomingMap[edge.to_path] = (incomingMap[edge.to_path] || 0) + 1;
     });
 
-    const totalNodes = uniqueNodes.length || 1; // avoid / 0
-
     const finalNodes = uniqueNodes.map(node => {
       const outC = outgoingMap[node.file_path] || 0;
       const inC = incomingMap[node.file_path] || 0;
@@ -510,105 +538,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
 
     // 9. issue detection
     // (issues array initialized earlier to collect secret scan results)
-
-    // Circular dependency detection
-    const adjacencyList = new Map();
-    for (const edge of uniqueEdges) {
-      if (!adjacencyList.has(edge.from_path)) adjacencyList.set(edge.from_path, []);
-      adjacencyList.get(edge.from_path).push(edge.to_path);
-    }
-
-    const visited = new Set();
-    const recStack = new Set();
-    const cycles = [];
-
-    const detectCycle = (node, pathArr) => {
-      visited.add(node);
-      recStack.add(node);
-      pathArr.push(node);
-
-      const neighbors = adjacencyList.get(node) || [];
-      for (const neighbor of neighbors) {
-        if (!visited.has(neighbor)) {
-          detectCycle(neighbor, pathArr);
-        } else if (recStack.has(neighbor)) {
-          // cycle detected
-          const startIdx = pathArr.indexOf(neighbor);
-          const cyclePaths = pathArr.slice(startIdx);
-          cycles.push(cyclePaths);
-        }
-      }
-
-      pathArr.pop();
-      recStack.delete(node);
-    };
-
-    for (const node of nodeMap.keys()) {
-      if (!visited.has(node)) {
-        detectCycle(node, []);
-      }
-    }
-
-    // Issue: Circular Dependency
-    if (cycles.length > 0) {
-      // Create issue for the first few cycles to avoid massive spam
-      for (const cycle of cycles.slice(0, 10)) {
-        issues.push({
-          repo_id: repoId,
-          type: 'circular_dependency',
-          severity: 'high',
-          file_paths: cycle,
-          description: 'A circular dependency cycle was detected.'
-        });
-      }
-    }
-
-    // Issue: God file & High coupling & Dead code
-    for (const node of finalNodes) {
-      // God file
-      // A god file typically has a high cyclomatic complexity and large line count
-      const godCondition1 = node.incoming_count >= 10 && node.incoming_count > (totalNodes * 0.3);
-      const godCondition2 = node.complexity_score > 30 || (node.line_count > 500 && node.incoming_count > (totalNodes * 0.1));
-      if (godCondition1 || godCondition2) {
-        issues.push({
-          repo_id: repoId,
-          type: 'god_file',
-          severity: (godCondition1 && godCondition2) ? 'high' : 'medium',
-          file_paths: [node.file_path],
-          description: `This file is overly complex (Score: ${node.complexity_score}) or heavily imported — changes here have a wide blast radius.`
-        });
-      }
-
-      // High coupling
-      if (node.outgoing_count > 15) {
-        let severity = 'low';
-        if (node.outgoing_count >= 30) severity = 'high';
-        else if (node.outgoing_count >= 20) severity = 'medium';
-
-        issues.push({
-          repo_id: repoId,
-          type: 'high_coupling',
-          severity,
-          file_paths: [node.file_path],
-          description: `This file imports ${node.outgoing_count} other files — it may be doing too much and is difficult to test or refactor.`
-        });
-      }
-
-      // Dead code
-      if (node.incoming_count === 0 && node.language !== 'c_sharp') {
-        const lowerPath = node.file_path.toLowerCase();
-        const isEntryPoint = lowerPath.endsWith('index.js') || lowerPath.endsWith('main.py') || lowerPath.endsWith('program.cs') || lowerPath.endsWith('app.js') || lowerPath.endsWith('server.js') || lowerPath.endsWith('index.ts') || lowerPath.endsWith('app.tsx');
-        if (!isEntryPoint && !node.file_path.includes('.test.') && !node.file_path.includes('.spec.')) {
-           issues.push({
-            repo_id: repoId,
-            type: 'dead_code',
-            severity: 'low',
-            file_paths: [node.file_path],
-            description: `No other files import this file — it may be unused.`
-          });
-        }
-      }
-    }
+    issues.push(...detectIssues({ repoId, nodes: finalNodes, edges: uniqueEdges, hasCoverageFiles }));
 
     // US-045: Dependency vulnerability scanning (SCA) — best-effort, never blocks pipeline
     try {
@@ -889,7 +819,8 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       .update({
         status: 'ready',
         indexed_at: new Date().toISOString(),
-        file_count: fileCount
+        file_count: fileCount,
+        has_coverage_files: hasCoverageFiles
       })
       .eq('id', repoId);
 

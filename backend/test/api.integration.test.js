@@ -203,6 +203,7 @@ describe('Backend API integration (mocked)', () => {
     supabaseAdminMock = createSupabaseMock({
       // canAccessRepo owner path
       'repositories.select.maybeSingle': async () => ({ data: { id: 'repo-1' }, error: null }),
+      'repositories.select.single': async () => ({ data: { has_coverage_files: true }, error: null }),
       'graph_nodes.select.many': async () => ({ data: [{ id: 'n1', repo_id: 'repo-1', file_path: 'a.js' }], error: null }),
       'graph_edges.select.many': async () => ({ data: [{ id: 'e1', repo_id: 'repo-1', from_path: 'a.js', to_path: 'b.js' }], error: null }),
       'analysis_issues.select.many': async () => ({ data: [{ id: 'i1', repo_id: 'repo-1', type: 'dead_code', severity: 'low', file_paths: ['a.js'] }], error: null }),
@@ -225,6 +226,7 @@ describe('Backend API integration (mocked)', () => {
     expect(res.body.nodes.length).toBe(1);
     expect(res.body.edges.length).toBe(1);
     expect(res.body.issues.length).toBe(1);
+    expect(res.body.hasCoverageFiles).toBe(true);
   });
 
   it('GET /api/repos/:repoId/duplication returns grouped clusters', async () => {
