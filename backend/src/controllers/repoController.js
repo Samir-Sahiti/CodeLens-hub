@@ -823,4 +823,107 @@ const getDuplication = async (req, res) => {
   }
 };
 
-module.exports = { connectRepo, uploadRepo, listRepos, getStatus, reindexRepo, deleteRepo, getAnalysisData, updateRepo, generateWebhook, getFileContent, getDependencies, getChurn, getDuplication };
+/**
+ * GET /api/repos/:repoId/diff?base=<ref>&head=<ref>
+ * Computes or returns a cached architectural diff between two git refs (US-051).
+ * Only supported for GitHub-sourced repositories.
+ */
+const getDiff = async (req, res) => {
+  const { repoId } = req.params;
+  const { base, head } = req.query;
+
+  if (!base || !head) {
+    return res.status(400).json({ error: 'base and head query params are required' });
+  }
+
+  const allowed = await canAccessRepo(repoId, req.user.id);
+  if (!allowed) return res.status(404).json({ error: 'Repository not found or unauthorized' });
+
+  const { data: repo, error: repoError } = await supabaseAdmin
+    .from('repositories')
+    .select('id, name, full_name, source, default_branch')
+    .eq('id', repoId)
+    .single();
+
+  if (repoError || !repo) return res.status(404).json({ error: 'Repository not found' });
+  if (repo.source !== 'github') {
+    return res.status(400).json({ error: 'Architectural diff is only supported for GitHub repositories' });
+  }
+
+  const fullName = repo.full_name || repo.name || '';
+  const [owner, repoName] = fullName.split('/');
+  if (!owner || !repoName) {
+    return res.status(400).json({ error: 'Repository full_name is missing or invalid' });
+  }
+
+  const githubToken = await _getGithubTokenForUser(req.user.id);
+  if (!githubToken) return res.status(400).json({ error: 'GitHub token not found' });
+
+  try {
+    const octokit = new Octokit({ auth: githubToken });
+
+    // Resolve refs to commit SHAs so we can key the cache on stable SHAs
+    const [baseResult, headResult] = await Promise.allSettled([
+      octokit.rest.repos.getCommit({ owner, repo: repoName, ref: base }),
+      octokit.rest.repos.getCommit({ owner, repo: repoName, ref: head }),
+    ]);
+
+    if (baseResult.status === 'rejected') {
+      return res.status(400).json({ error: `Could not resolve base ref "${base}": ${baseResult.reason?.message}` });
+    }
+    if (headResult.status === 'rejected') {
+      return res.status(400).json({ error: `Could not resolve head ref "${head}": ${headResult.reason?.message}` });
+    }
+
+    const baseSha = baseResult.value.data.sha;
+    const headSha = headResult.value.data.sha;
+    const baseTreeSha = baseResult.value.data.commit.tree.sha;
+    const headTreeSha = headResult.value.data.commit.tree.sha;
+
+    // Cache lookup by stable SHAs
+    const { data: cached } = await supabaseAdmin
+      .from('diff_cache')
+      .select('result_json')
+      .eq('repo_id', repoId)
+      .eq('base_sha', baseSha)
+      .eq('head_sha', headSha)
+      .maybeSingle();
+
+    if (cached?.result_json) {
+      return res.json(cached.result_json);
+    }
+
+    const { computeArchDiff } = require('../services/diffService');
+    const diff = await computeArchDiff({
+      owner,
+      name: repoName,
+      token: githubToken,
+      baseRef: base,
+      headRef: head,
+      baseCommit: { sha: baseSha, treeSha: baseTreeSha },
+      headCommit: { sha: headSha, treeSha: headTreeSha },
+    });
+
+    // Persist to cache (best-effort; failure must not break the response)
+    supabaseAdmin
+      .from('diff_cache')
+      .upsert({
+        repo_id: repoId,
+        base_sha: baseSha,
+        head_sha: headSha,
+        base_ref: base,
+        head_ref: head,
+        result_json: diff,
+      }, { onConflict: 'repo_id,base_sha,head_sha' })
+      .then(({ error }) => {
+        if (error) console.warn('[getDiff] Cache write failed:', error.message);
+      });
+
+    res.json(diff);
+  } catch (err) {
+    console.error('[getDiff] Error:', err);
+    res.status(500).json({ error: err.message || 'Failed to compute architectural diff' });
+  }
+};
+
+module.exports = { connectRepo, uploadRepo, listRepos, getStatus, reindexRepo, deleteRepo, getAnalysisData, updateRepo, generateWebhook, getFileContent, getDependencies, getChurn, getDuplication, getDiff };

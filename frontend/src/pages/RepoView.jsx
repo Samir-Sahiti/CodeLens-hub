@@ -6,7 +6,8 @@ import { apiUrl }           from '../lib/api';
 import { formatDate }       from '../lib/constants';
 import { useToast }         from '../components/Toast';
 import { Badge, Banner, Button, EmptyState, Panel, Skeleton } from '../components/ui/Primitives';
-import { RefreshCw, ArrowLeft, Home } from '../components/ui/Icons';
+import { RefreshCw, ArrowLeft, Home, GitCompare } from '../components/ui/Icons';
+import ArchDiffModal        from '../components/ArchDiffModal';
 
 const DependencyGraph      = lazy(() => import('../components/DependencyGraph'));
 const SearchPanel          = lazy(() => import('../components/SearchPanel'));
@@ -114,6 +115,7 @@ export default function RepoView() {
   const [error, setError]             = useState(null);
   const [isReindexing, setIsReindexing] = useState(false);
   const [depsRefreshKey, setDepsRefreshKey] = useState(0);
+  const [isDiffModalOpen, setIsDiffModalOpen] = useState(false);
 
   const handleNodeSelect = useCallback((nodeIdOrIds, options = {}) => {
     setSelectedNodeId(nodeIdOrIds);
@@ -440,14 +442,26 @@ export default function RepoView() {
             </p>
           </div>
 
-          <Button
-            onClick={handleReindex}
-            disabled={isWorking || isReindexing}
-            icon={RefreshCw}
-            loading={isReindexing}
-          >
-            {isReindexing ? 'Starting...' : 'Re-index'}
-          </Button>
+          <div className="flex items-center gap-2">
+            {repo?.source === 'github' && (
+              <Button
+                onClick={() => setIsDiffModalOpen(true)}
+                disabled={isWorking}
+                icon={GitCompare}
+                variant="outline"
+              >
+                Compare
+              </Button>
+            )}
+            <Button
+              onClick={handleReindex}
+              disabled={isWorking || isReindexing}
+              icon={RefreshCw}
+              loading={isReindexing}
+            >
+              {isReindexing ? 'Starting...' : 'Re-index'}
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -595,6 +609,15 @@ export default function RepoView() {
           onClose={() => setChatFilePath(null)}
         />
       </Suspense>
+
+      {/* Architectural diff modal (US-051) */}
+      {isDiffModalOpen && (
+        <ArchDiffModal
+          repoId={repoId}
+          defaultBranch={repo?.default_branch || 'main'}
+          onClose={() => setIsDiffModalOpen(false)}
+        />
+      )}
     </div>
   );
 }
