@@ -50,4 +50,7 @@ router.get('/:repoId/churn', requireAuth, repoController.getChurn);
 // Fetch duplicate code clusters (US-052)
 router.get('/:repoId/duplication', requireAuth, repoController.getDuplication);
 
+// Compute or retrieve cached architectural diff between two refs (US-051)
+router.get('/:repoId/diff', requireAuth, repoController.getDiff);
+
 module.exports = router;

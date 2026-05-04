@@ -19,6 +19,7 @@ export {
   // Repo / Graph
   GitGraph,
   GitBranch,
+  GitCompare,
   GitMerge,
   GitFork,
   Network,
