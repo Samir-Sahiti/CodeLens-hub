@@ -148,30 +148,14 @@ const listRepos = async (req, res) => {
     ...Array.from(sharedById.values()),
   ];
 
-  // Enrich repos with language distribution for dashboard cards
-  const repoIds = repos.map((r) => r.id);
-  if (repoIds.length > 0) {
-    const { data: langRows } = await supabaseAdmin
-      .from('graph_nodes')
-      .select('repo_id, language')
-      .in('repo_id', repoIds)
-      .limit(10000);
+  // Language distribution is pre-computed during indexing and stored as JSONB
+  // on each repo row — zero extra queries needed at list time.
+  repos.forEach((r) => {
+    r.languages = Array.isArray(r.language_stats) ? r.language_stats : [];
+  });
 
-    if (langRows && langRows.length > 0) {
-      const langByRepo = {};
-      langRows.forEach(({ repo_id, language }) => {
-        if (!langByRepo[repo_id]) langByRepo[repo_id] = {};
-        const lang = language || 'unknown';
-        langByRepo[repo_id][lang] = (langByRepo[repo_id][lang] || 0) + 1;
-      });
-      repos.forEach((r) => {
-        r.languages = Object.entries(langByRepo[r.id] || {})
-          .map(([language, count]) => ({ language, count }))
-          .sort((a, b) => b.count - a.count);
-      });
-    }
-  }
-
+  // Short private cache — reduces hammering on tab-switch / back-nav
+  res.set('Cache-Control', 'private, max-age=5, stale-while-revalidate=10');
   res.json({ repos });
 };
 
@@ -281,35 +265,18 @@ const reindexRepo = async (req, res) => {
   res.json({ ok: true, message: 'Re-indexing started' });
 };
 
-/**
- * Checks if the current user can access a given repo — either as owner or team member.
- */
 async function canAccessRepo(repoId, userId) {
-  // Owner check
-  const { data: owned } = await supabaseAdmin
-    .from('repositories')
-    .select('id')
-    .eq('id', repoId)
-    .eq('user_id', userId)
-    .maybeSingle();
-  if (owned) return true;
+  const { data, error } = await supabaseAdmin.rpc('can_access_repo', {
+    p_repo_id: repoId,
+    p_user_id: userId,
+  });
 
-  // Team membership check
-  const { data: memberships } = await supabaseAdmin
-    .from('team_members')
-    .select('team_id')
-    .eq('user_id', userId);
-  const teamIds = (memberships || []).map((m) => m.team_id);
-  if (teamIds.length === 0) return false;
+  if (error) {
+    console.warn('[canAccessRepo] RPC failed:', error.message);
+    return false;
+  }
 
-  const { data: teamRepo } = await supabaseAdmin
-    .from('team_repositories')
-    .select('repo_id')
-    .eq('repo_id', repoId)
-    .in('team_id', teamIds)
-    .maybeSingle();
-
-  return !!teamRepo;
+  return Boolean(data);
 }
 
 /** GET /api/repos/:repoId/analysis — fetch nodes, edges, and issues in a single request */
@@ -345,6 +312,9 @@ const getAnalysisData = async (req, res) => {
 
     console.log(`[getAnalysisData] Found ${nodes.length} nodes, ${edges.length} edges, ${issues.length} issues for repo ${repoId}`);
 
+    // Cache for 30s — data is only rebuilt on reindex, so 30s is safe and eliminates
+    // repeated round-trips when the user switches tabs back to the graph.
+    res.set('Cache-Control', 'private, max-age=30, stale-while-revalidate=60');
     res.json({
       nodes: nodes || [],
       edges: edges || [],
@@ -464,6 +434,7 @@ const getFileContent = async (req, res) => {
     .maybeSingle();
 
   if (!fcErr && fc) {
+    res.set('Cache-Control', 'private, max-age=300, stale-while-revalidate=600');
     return res.json({ content: fc.content, filePath, language: node?.language || null });
   }
 
@@ -484,6 +455,7 @@ const getFileContent = async (req, res) => {
     return res.status(404).json({ error: 'No indexed content for this file' });
   }
 
+  res.set('Cache-Control', 'private, max-age=300, stale-while-revalidate=600');
   res.json({
     content: chunks.map((c) => c.content).join(''),
     filePath,
@@ -517,6 +489,9 @@ const getDependencies = async (req, res) => {
     // OSV scanning on every request, causing 5-20 s tab load times with no benefit
     // (the data is already fresh from the last index run).
     const dependencies = await getStoredDependenciesWithIssues(repoId);
+    // Dependencies only change on reindex — 60s cache is safe and eliminates
+    // the 500ms+ cold fetch every time the user opens the Dependencies tab.
+    res.set('Cache-Control', 'private, max-age=60, stale-while-revalidate=120');
     res.json({ dependencies });
   } catch (err) {
     console.error('[getDependencies] Error:', err);
@@ -805,6 +780,8 @@ const getChurn = async (req, res) => {
       };
     });
 
+    // Churn data only changes on reindex — 60s cache is safe.
+    res.set('Cache-Control', 'private, max-age=60, stale-while-revalidate=120');
     res.json({ churn });
   } catch (err) {
     console.error('[getChurn] Error:', err);
@@ -820,6 +797,8 @@ const getDuplication = async (req, res) => {
 
   try {
     const clusters = await buildDuplicationClusters(repoId);
+    // Duplication clusters are rebuilt on reindex only — 60s cache is safe.
+    res.set('Cache-Control', 'private, max-age=60, stale-while-revalidate=120');
     res.json({ clusters });
   } catch (err) {
     console.error('[getDuplication] Error:', err);

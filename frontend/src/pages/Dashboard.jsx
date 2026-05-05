@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useMemo, memo } from 'react';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { apiUrl } from '../lib/api';
@@ -184,12 +185,16 @@ export default function Dashboard() {
 
   useEffect(() => { fetchRepos(); }, [fetchRepos]);
 
+  const hasWorkingRepos = useMemo(
+    () => repos.some(r => r.status === 'pending' || r.status === 'indexing'),
+    [repos]
+  );
+
   useEffect(() => {
-    const working = repos.some(r => r.status === 'pending' || r.status === 'indexing');
-    if (!working) return;
+    if (!hasWorkingRepos) return;
     const id = setInterval(fetchRepos, 5000);
     return () => clearInterval(id);
-  }, [repos.map(r => r.status).join(','), fetchRepos]);
+  }, [hasWorkingRepos, fetchRepos]);
 
   const handleRetry = async (e, repoId) => {
     e.preventDefault(); e.stopPropagation();
@@ -229,8 +234,9 @@ export default function Dashboard() {
     }
   };
 
+  const debouncedSearch = useDebouncedValue(search, 200);
   const sortedRepos = useMemo(() => {
-    const filtered = repos.filter(r => !search || r.name.toLowerCase().includes(search.toLowerCase()));
+    const filtered = repos.filter(r => !debouncedSearch || r.name.toLowerCase().includes(debouncedSearch.toLowerCase()));
     return [...filtered].sort((a, b) => {
       if (sortBy === 'name') return a.name.localeCompare(b.name);
       if (sortBy === 'status') return (a.status ?? '').localeCompare(b.status ?? '');
@@ -238,7 +244,7 @@ export default function Dashboard() {
       const bDate = b.indexed_at ?? b.created_at;
       return new Date(bDate) - new Date(aDate);
     });
-  }, [repos, search, sortBy]);
+  }, [repos, debouncedSearch, sortBy]);
 
   const ownedRepos = sortedRepos.filter(r => !r.shared);
   const sharedRepos = sortedRepos.filter(r => r.shared);

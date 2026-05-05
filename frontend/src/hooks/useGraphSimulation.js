@@ -59,6 +59,8 @@ export function useGraphSimulation({
   const resetViewRef = useRef(() => {});
 
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
+  const [isGraphVisible, setIsGraphVisible] = useState(true);
+  const [simulation, setSimulation] = useState(null);
 
   // Track whether we have nodes - used to re-trigger observer setup
   // when the container element first appears in the DOM
@@ -108,6 +110,28 @@ export function useGraphSimulation({
 
 
 
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return undefined;
+
+    const observer = new IntersectionObserver((entries) => {
+      setIsGraphVisible(entries[0].isIntersecting);
+    });
+    observer.observe(container);
+
+    return () => observer.disconnect();
+  }, [containerRef]);
+
+  useEffect(() => {
+    if (!simulation) return;
+
+    if (isGraphVisible) {
+      simulation.alphaTarget(0.3).restart(); // resume
+    } else {
+      simulation.alphaTarget(0); // pause
+    }
+  }, [isGraphVisible, simulation]);
+
   const layoutCacheRef = useRef(null);
   const [layoutVersion, setLayoutVersion] = useState(0);
 
@@ -145,7 +169,8 @@ export function useGraphSimulation({
       .force('x', d3.forceX(width / 2).strength(0.18))
       .force('y', d3.forceY(height / 2).strength(0.18))
       .force('collide', d3.forceCollide().radius((node) => node.radius + 35).iterations(3))
-      .stop();
+      ;
+    setSimulation(simulation);
 
     for (let tick = 0; tick < pretickCount; tick += 1) {
       simulation.tick();
@@ -399,10 +424,28 @@ export function useGraphSimulation({
         context.restore();
       };
 
+      const hasCanvasFlowEdges = () => localLinks.some((link) => {
+        const isPathEdge = isAttackSurfaceActive && asPathEdgeIds.has(link.id);
+        return highlightedEdgeIds.has(link.id) || isImpactActive || isPathEdge;
+      });
+
+      // Self-cancelling loop: only runs while dash-flow edges are actually visible.
+      const hasFlowEdges = hasCanvasFlowEdges();
       const animateDraw = () => {
-        dashOffset = (dashOffset + 0.65) % 20;
-        draw();
-        animationFrame = window.requestAnimationFrame(animateDraw);
+        if (animationFrame !== null) return;
+        const animate = () => {
+          if (!hasCanvasFlowEdges()) {
+            animationFrame = null;
+            draw();
+            return;
+          }
+
+          dashOffset = (dashOffset + 0.65) % 20;
+          draw();
+          animationFrame = window.requestAnimationFrame(animate);
+        };
+
+        animationFrame = window.requestAnimationFrame(animate);
       };
 
       const zoomBehavior = d3.zoom()
@@ -444,7 +487,7 @@ export function useGraphSimulation({
         canvasSelection.call(zoomBehavior.transform, canvasTransformRef.current);
       }
 
-      if (isSelectionActive || isImpactActive || (isAttackSurfaceActive && hasPathHighlight)) {
+      if (hasFlowEdges) {
         animateDraw();
       } else {
         draw();
@@ -543,15 +586,26 @@ export function useGraphSimulation({
 
     let svgAnimationFrame = null;
     let svgDashOffset = 0;
+    const svgHasFlowEdges = () => edgeLayer.selectAll('path.graph-edge-flow').size() > 0;
     const animateSvgFlow = () => {
-      svgDashOffset = (svgDashOffset + 0.9) % 24;
-      edgeLayer
-        .selectAll('path.graph-edge-flow')
-        .attr('stroke-dashoffset', -svgDashOffset);
-      svgAnimationFrame = window.requestAnimationFrame(animateSvgFlow);
+      if (svgAnimationFrame !== null) return;
+      const animate = () => {
+        if (!svgHasFlowEdges()) {
+          svgAnimationFrame = null;
+          return;
+        }
+
+        svgDashOffset = (svgDashOffset + 0.9) % 24;
+        edgeLayer
+          .selectAll('path.graph-edge-flow')
+          .attr('stroke-dashoffset', -svgDashOffset);
+        svgAnimationFrame = window.requestAnimationFrame(animate);
+      };
+
+      svgAnimationFrame = window.requestAnimationFrame(animate);
     };
 
-    if (isSelectionActive || isImpactActive || (isAttackSurfaceActive && hasPathHighlight)) {
+    if (svgHasFlowEdges()) {
       animateSvgFlow();
     }
 

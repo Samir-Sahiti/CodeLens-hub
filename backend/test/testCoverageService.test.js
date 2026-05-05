@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -59,5 +59,53 @@ describe('testCoverageService', () => {
 
     expect(hasCoverageFiles).toBe(true);
     expect(coverageByPath.size).toBe(0);
+  });
+
+  it('parses LCOV, Istanbul JSON, and Cobertura XML with strict precedence inputs', async () => {
+    const repo = await makeTempRepo();
+    await fs.writeFile(path.join(repo, 'unit.lcov'), [
+      'TN:',
+      'SF:/app/src/lcov-zero.js',
+      'LF:4',
+      'LH:0',
+      'end_of_record',
+    ].join('\n'));
+    await fs.writeFile(path.join(repo, 'coverage.json'), JSON.stringify({
+      '/github/workspace/src/istanbul.js': {
+        statementMap: { 0: {}, 1: {}, 2: {}, 3: {} },
+        s: { 0: 1, 1: 1, 2: 0, 3: 0 },
+      },
+    }));
+    await fs.writeFile(path.join(repo, 'coverage.xml'), [
+      '<coverage>',
+      '<packages><package><classes>',
+      '<class filename="src/cobertura.js" line-rate="0.875"></class>',
+      '</classes></package></packages>',
+      '</coverage>',
+    ].join(''));
+
+    const { coverageByPath } = await parseCoverageOverrides(repo, ['src/lcov-zero.js', 'src/istanbul.js', 'src/cobertura.js']);
+
+    expect(coverageByPath.get('src/lcov-zero.js')).toBe(0);
+    expect(coverageByPath.get('src/istanbul.js')).toBe(50);
+    expect(coverageByPath.get('src/cobertura.js')).toBe(87.5);
+  });
+
+  it('does not guess when suffix matches are ambiguous', async () => {
+    const repo = await makeTempRepo();
+    await fs.writeFile(path.join(repo, 'unit.lcov'), [
+      'TN:',
+      'SF:/workspace/utils/file.js',
+      'LF:10',
+      'LH:10',
+      'end_of_record',
+    ].join('\n'));
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { coverageByPath } = await parseCoverageOverrides(repo, ['src/a/utils/file.js', 'src/b/utils/file.js']);
+
+    expect(coverageByPath.size).toBe(0);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Ambiguous coverage path'));
+    warnSpy.mockRestore();
   });
 });

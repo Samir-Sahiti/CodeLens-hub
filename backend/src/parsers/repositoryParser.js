@@ -182,13 +182,19 @@ const resolveImportPath = (importPath, sourceFile, allFiles, ext) => {
 
   if (allFiles.has(normalizedPath)) return normalizedPath;
 
-  const extensions = ['.js', '.ts', '.jsx', '.tsx'];
+  const extensions = ['.tsx', '.ts', '.jsx', '.js'];
   for (const e of extensions) {
     if (allFiles.has(normalizedPath + e)) return normalizedPath + e;
   }
 
-  for (const e of extensions) {
-    const indexPath = path.posix.join(normalizedPath, `index${e}`);
+  const INDEX_PRIORITY = [
+    "index.tsx",
+    "index.ts",
+    "index.js"
+  ];
+
+  for (const indexFile of INDEX_PRIORITY) {
+    const indexPath = path.posix.join(normalizedPath, indexFile);
     if (allFiles.has(indexPath)) return indexPath;
   }
 

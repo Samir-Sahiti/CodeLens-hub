@@ -13,7 +13,9 @@ const ADMIN_IDS   = new Set((process.env.ADMIN_USER_IDS || '').split(',').map(s 
 /** GET /api/usage/today */
 const getTodayUsage = async (req, res) => {
   const userId = req.user.id;
-  const since  = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  const since = today.toISOString();
 
   const { data, error } = await supabaseAdmin
     .from('api_usage')

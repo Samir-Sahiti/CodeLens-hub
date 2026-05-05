@@ -3,6 +3,7 @@ import * as d3 from 'd3';
 import VirtualTable from './VirtualTable';
 import { LANGUAGE_COLORS, formatLanguage } from '../lib/constants';
 import { ArrowDown, ArrowUp, Search, TrendingUp, X } from './ui/Icons';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
 
 // ── Sub-component: language distribution with optional "show all" ─────────────
 function LangDistributionCard({ langCounts }) {
@@ -217,17 +218,21 @@ export default function MetricsPanel({ nodes, selectedNode, onNodeSelect, onAnal
       .call((g) => g.selectAll('text').attr('fill', '#6b7280').attr('font-size', '10px'));
   }, [showHistogram, nodes, p90Complexity, complexityFilter]);
 
+  // Debounce the search input so the filter+sort useMemo only fires
+  // after 200ms of typing silence, not on every single keystroke.
+  const debouncedSearchQuery = useDebouncedValue(searchQuery, 200);
+
   const filteredNodes = useMemo(() => {
     let result = nodes;
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
+    if (debouncedSearchQuery) {
+      const q = debouncedSearchQuery.toLowerCase();
       result = result.filter((n) => n.file_path.toLowerCase().includes(q));
     }
     if (complexityFilter) {
       result = result.filter((n) => (n.complexity_score || 0) >= complexityFilter.x0 && (n.complexity_score || 0) < complexityFilter.x1);
     }
     return result;
-  }, [nodes, searchQuery, complexityFilter]);
+  }, [nodes, debouncedSearchQuery, complexityFilter]);
 
   // Augment nodes with churn data and sort
   const augmentedNodes = useMemo(() =>

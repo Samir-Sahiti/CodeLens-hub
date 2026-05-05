@@ -186,8 +186,9 @@ describe('IssuesPanel', () => {
       />
     );
 
-    expect(await screen.findByText(/duplication/i)).toBeInTheDocument();
-    await user.click(screen.getByText(/3 chunks/i));
+    const clusterButton = await screen.findByText(/3 chunks/i);
+    expect(clusterButton).toBeInTheDocument();
+    await user.click(clusterButton);
 
     expect(await screen.findByRole('dialog', { name: /duplicate code cluster/i })).toBeInTheDocument();
     expect(screen.getAllByText(/src\/a\.js:1-15/i).length).toBeGreaterThan(0);
