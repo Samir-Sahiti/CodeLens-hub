@@ -58,5 +58,17 @@ describe('issueDetection.detectIssues', () => {
     expect(issues.some((i) => i.type === 'untested_critical_file' && i.file_paths[0] === 'src/plain-uncovered.js')).toBe(false);
     expect(issues.some((i) => i.type === 'untested_critical_file' && i.file_paths[0] === 'src/covered.test.js')).toBe(false);
   });
+
+  it('uses inclusive p90 thresholds for untested critical files', () => {
+    const nodes = [
+      { file_path: 'src/a.js', is_test_file: false, has_test_coverage: true, coverage_percentage: null, incoming_count: 1, complexity_score: 1, language: 'javascript', line_count: 10 },
+      { file_path: 'src/b.js', is_test_file: false, has_test_coverage: true, coverage_percentage: null, incoming_count: 2, complexity_score: 2, language: 'javascript', line_count: 10 },
+      { file_path: 'src/c.js', is_test_file: false, has_test_coverage: false, coverage_percentage: null, incoming_count: 3, complexity_score: 3, language: 'javascript', line_count: 10 },
+    ];
+
+    const issues = detectIssues({ repoId: 'repo-1', nodes, edges: [] });
+
+    expect(issues.some((i) => i.type === 'untested_critical_file' && i.file_paths[0] === 'src/c.js')).toBe(true);
+  });
 });
 

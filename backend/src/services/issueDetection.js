@@ -143,7 +143,7 @@ function detectUntestedCriticalFileIssues({ repoId, nodes, hasCoverageFiles = fa
   return sourceNodes
     .filter((node) => {
       const uncovered = node.coverage_percentage === 0 || (node.coverage_percentage == null && node.has_test_coverage === false);
-      const critical = (node.complexity_score || 0) > p90Complexity || (node.incoming_count || 0) > p90Incoming;
+      const critical = (node.complexity_score || 0) >= p90Complexity || (node.incoming_count || 0) >= p90Incoming;
       return uncovered && critical;
     })
     .map((node) => ({

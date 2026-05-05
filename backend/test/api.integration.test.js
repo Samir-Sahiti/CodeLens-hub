@@ -96,6 +96,7 @@ function createSupabaseMock(handlers) {
     from: (table) => new Builder(table),
     rpc: async (fnName, args) => {
       const handler = handlers[`rpc.${fnName}`];
+      if (!handler && fnName === 'can_access_repo') return { data: true, error: null };
       if (!handler) return { data: null, error: null };
       return handler({ fnName, args });
     },

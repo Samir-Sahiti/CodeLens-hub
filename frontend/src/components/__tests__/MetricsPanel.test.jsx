@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import MetricsPanel from '../MetricsPanel';
@@ -31,8 +31,10 @@ describe('MetricsPanel', () => {
     );
 
     await user.type(screen.getByPlaceholderText(/search by file path/i), 'core.js');
-    expect(screen.getByText('src/core.js')).toBeInTheDocument();
-    expect(screen.queryByText('src/n-0.js')).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText('src/core.js')).toBeInTheDocument();
+      expect(screen.queryByText('src/n-0.js')).not.toBeInTheDocument();
+    });
 
     const row = screen.getByText('src/core.js').closest('tr');
     expect(row?.className).toMatch(/bg-red-900\/30/);
@@ -58,5 +60,29 @@ describe('MetricsPanel', () => {
 
     await user.click(screen.getByRole('button', { name: /analyse impact/i }));
     expect(onAnalyseImpact).toHaveBeenCalledWith(nodes[nodes.length - 1]);
+  });
+
+  it('counts coverage using formal data precedence and excludes test files', async () => {
+    const user = userEvent.setup();
+    const coverageNodes = [
+      { id: 'covered-import', file_path: 'src/covered-import.js', language: 'javascript', is_test_file: false, has_test_coverage: true, coverage_percentage: null, line_count: 1, incoming_count: 1, outgoing_count: 0, complexity_score: 1 },
+      { id: 'covered-formal', file_path: 'src/covered-formal.js', language: 'javascript', is_test_file: false, has_test_coverage: false, coverage_percentage: 25, line_count: 1, incoming_count: 1, outgoing_count: 0, complexity_score: 1 },
+      { id: 'formal-zero', file_path: 'src/formal-zero.js', language: 'javascript', is_test_file: false, has_test_coverage: true, coverage_percentage: 0, line_count: 1, incoming_count: 10, outgoing_count: 0, complexity_score: 10 },
+      { id: 'test-file', file_path: 'src/example.test.js', language: 'javascript', is_test_file: true, has_test_coverage: false, coverage_percentage: null, line_count: 1, incoming_count: 0, outgoing_count: 1, complexity_score: 1 },
+    ];
+
+    render(
+      <MetricsPanel
+        nodes={coverageNodes}
+        selectedNode={null}
+        onNodeSelect={vi.fn()}
+        onAnalyseImpact={vi.fn()}
+        hasCoverageFiles
+      />
+    );
+
+    expect(screen.getByText(/2 of 3 source files are covered via execution data or imports \(67% by file\)/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /show 1 coverage gap/i }));
+    expect(screen.getAllByText('src/formal-zero.js').length).toBeGreaterThan(0);
   });
 });

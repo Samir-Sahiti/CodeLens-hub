@@ -18,6 +18,8 @@ const usageRoutes    = require('./routes/usage');
 const adminRoutes    = require('./routes/admin');
 const errorHandler   = require('./middleware/errorHandler');
 
+const compression = require('compression');
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 
@@ -48,6 +50,8 @@ console.error = (...args) => originalError.apply(console, redact(args));
 console.warn = (...args) => originalWarn.apply(console, redact(args));
 
 // ── Middleware ────────────────────────────────────────────────────────────────
+// Compression must be first so all downstream responses are gzip/brotli encoded.
+app.use(compression());
 app.use(helmet());
 app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:3000' }));
 

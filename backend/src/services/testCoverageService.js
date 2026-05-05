@@ -1,5 +1,9 @@
 const fs = require('fs/promises');
 const path = require('path');
+const lcovParse = require('lcov-parse');
+const { XMLParser } = require('fast-xml-parser');
+
+const MAX_LEVENSHTEIN_CANDIDATES = 5;
 
 const TEST_FILE_REGEXES = [
   /(^|\/)(__tests__|tests|spec|test)\/.+/i,
@@ -21,8 +25,8 @@ function normalizeRepoPath(filePath) {
 function stripCoveragePrefix(filePath) {
   let normalized = normalizeRepoPath(filePath);
   normalized = normalized.replace(/^(home\/runner\/work\/[^/]+\/[^/]+\/)/i, '');
-  normalized = normalized.replace(/^(github\/workspace\/|workspace\/|build\/)/i, '');
-  normalized = normalized.replace(/\/(github\/workspace|workspace|build)\//i, '/');
+  normalized = normalized.replace(/^(github\/workspace\/|workspace\/|build\/|app\/)/i, '');
+  normalized = normalized.replace(/\/(github\/workspace|workspace|build|app)\//i, '/');
   return normalized.replace(/^\/+/, '');
 }
 
@@ -65,23 +69,19 @@ async function findCoverageFiles(rootDir) {
 }
 
 function parseLcov(content) {
-  const rows = [];
-  let current = null;
+  return new Promise((resolve, reject) => {
+    lcovParse(content, (error, parsed) => {
+      if (error) {
+        reject(error);
+        return;
+      }
 
-  for (const line of content.split(/\r?\n/)) {
-    if (line.startsWith('SF:')) {
-      current = { filePath: stripCoveragePrefix(line.slice(3).trim()), found: 0, hit: 0 };
-    } else if (current && line.startsWith('LF:')) {
-      current.found = Number(line.slice(3)) || 0;
-    } else if (current && line.startsWith('LH:')) {
-      current.hit = Number(line.slice(3)) || 0;
-    } else if (line === 'end_of_record' && current) {
-      rows.push({ filePath: current.filePath, percentage: current.found > 0 ? (current.hit / current.found) * 100 : 0 });
-      current = null;
-    }
-  }
-
-  return rows;
+      resolve((parsed || []).map((record) => ({
+        filePath: stripCoveragePrefix(record.file),
+        percentage: record.lines?.found > 0 ? (record.lines.hit / record.lines.found) * 100 : 0,
+      })));
+    });
+  });
 }
 
 function parseIstanbulJson(content) {
@@ -95,25 +95,41 @@ function parseIstanbulJson(content) {
     });
 }
 
-function parseCoberturaXml(content) {
-  if (!/<coverage[\s>]/i.test(content) || !/<class[\s>]/i.test(content)) {
-    throw new Error('coverage.xml is not Cobertura-like');
-  }
+function arrayify(value) {
+  if (value == null) return [];
+  return Array.isArray(value) ? value : [value];
+}
 
-  const rows = [];
-  const classRegex = /<class\b[^>]*>/gi;
-  let match;
-  while ((match = classRegex.exec(content)) !== null) {
-    const tag = match[0];
-    const filename = tag.match(/\bfilename=["']([^"']+)["']/i)?.[1];
-    if (!filename) continue;
-    const rawRate = tag.match(/\bline-rate=["']([^"']+)["']/i)?.[1];
-    const lineRate = rawRate == null ? null : Number(rawRate);
-    if (Number.isFinite(lineRate)) {
-      rows.push({ filePath: stripCoveragePrefix(filename), percentage: Math.max(0, Math.min(100, lineRate * 100)) });
+function collectCoberturaClasses(node, rows = []) {
+  if (!node || typeof node !== 'object') return rows;
+  if (node.class) {
+    for (const classNode of arrayify(node.class)) {
+      const filename = classNode.filename || classNode['@_filename'];
+      const lineRate = Number(classNode['line-rate'] ?? classNode['@_line-rate']);
+      if (filename && Number.isFinite(lineRate)) {
+        rows.push({ filePath: stripCoveragePrefix(filename), percentage: Math.max(0, Math.min(100, lineRate * 100)) });
+      }
     }
   }
 
+  for (const [key, value] of Object.entries(node)) {
+    if (key === 'class') continue;
+    if (value && typeof value === 'object') {
+      for (const child of arrayify(value)) collectCoberturaClasses(child, rows);
+    }
+  }
+
+  return rows;
+}
+
+function parseCoberturaXml(content) {
+  const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '' });
+  const parsed = parser.parse(content);
+  if (!parsed?.coverage) {
+    throw new Error('coverage.xml is not Cobertura-like');
+  }
+
+  const rows = collectCoberturaClasses(parsed.coverage);
   if (rows.length === 0) throw new Error('coverage.xml contained no Cobertura class line-rate entries');
   return rows;
 }
@@ -151,12 +167,26 @@ function buildCoveragePathMatcher(repoRoot, repoPaths) {
 
     const basename = normalized.split('/').pop();
     const candidates = byBasename.get(basename) || [];
-    const suffixMatches = candidates.filter((repoPath) => normalized.endsWith(normalizeRepoPath(repoPath)) || normalizeRepoPath(repoPath).endsWith(normalized));
-    if (suffixMatches.length === 1) return suffixMatches[0];
-    if (suffixMatches.length > 1) {
-      return suffixMatches
-        .map((repoPath) => ({ repoPath, distance: levenshteinCapped(normalized, normalizeRepoPath(path.resolve(repoRoot, repoPath))) }))
-        .sort((a, b) => a.distance - b.distance || a.repoPath.localeCompare(b.repoPath))[0].repoPath;
+    const segmentSuffixMatches = candidates.filter((repoPath) => {
+      const repoNormalized = normalizeRepoPath(repoPath);
+      return normalized.endsWith(`/${repoNormalized}`) || repoNormalized.endsWith(`/${normalized}`);
+    });
+
+    if (segmentSuffixMatches.length === 1) return segmentSuffixMatches[0];
+    if (segmentSuffixMatches.length > 1) {
+      const longestLength = Math.max(...segmentSuffixMatches.map((repoPath) => normalizeRepoPath(repoPath).length));
+      const longestMatches = segmentSuffixMatches.filter((repoPath) => normalizeRepoPath(repoPath).length === longestLength);
+      if (longestMatches.length === 1) return longestMatches[0];
+
+      if (longestMatches.length <= MAX_LEVENSHTEIN_CANDIDATES) {
+        const ranked = longestMatches
+          .map((repoPath) => ({ repoPath, distance: levenshteinCapped(normalized, normalizeRepoPath(path.resolve(repoRoot, repoPath))) }))
+          .sort((a, b) => a.distance - b.distance || a.repoPath.localeCompare(b.repoPath));
+        if (ranked[0].distance < ranked[1].distance) return ranked[0].repoPath;
+      }
+
+      console.warn(`[coverage] Ambiguous coverage path "${coveragePath}" matched ${longestMatches.length} files; ignoring formal override for this entry.`);
+      return null;
     }
     return null;
   };
@@ -174,7 +204,7 @@ async function parseCoverageOverrides(rootDir, repoPaths) {
       const content = await fs.readFile(file.fsPath, 'utf-8');
       const lower = file.path.toLowerCase();
       let rows = [];
-      if (lower.endsWith('.lcov')) rows = parseLcov(content);
+      if (lower.endsWith('.lcov')) rows = await parseLcov(content);
       else if (lower.endsWith('coverage.json')) rows = parseIstanbulJson(content);
       else if (lower.endsWith('coverage.xml')) rows = parseCoberturaXml(content);
 

@@ -21,9 +21,9 @@ const handleGitHubPush = async (req, res) => {
   const event = req.headers['x-github-event'];
   const rawBody = req.body; // Buffer (set by express.raw middleware on this route)
 
-  // Only process push events
-  if (event !== 'push') {
-    return res.status(200).json({ ok: true, skipped: 'not a push event' });
+  // Process push and pull_request events
+  if (event !== 'push' && event !== 'pull_request') {
+    return res.status(200).json({ ok: true, skipped: 'not a push or pull_request event' });
   }
 
   let payload;
@@ -73,13 +73,7 @@ const handleGitHubPush = async (req, res) => {
     return res.status(403).json({ error: 'Invalid webhook signature' });
   }
 
-  // Only re-index pushes to the default branch
-  const defaultRef = `refs/heads/${repo.default_branch || 'main'}`;
-  if (ref !== defaultRef) {
-    return res.status(200).json({ ok: true, skipped: 'push not to default branch' });
-  }
-
-  // Fetch the repo owner's GitHub token from Vault
+  // Fetch the repo owner's GitHub token from Vault early
   const { data: profile } = await supabaseAdmin
     .from('profiles')
     .select('github_token_secret_id')
@@ -99,11 +93,44 @@ const handleGitHubPush = async (req, res) => {
     return res.status(200).json({ ok: true, skipped: 'no GitHub token found for repo owner' });
   }
 
-  // Fire-and-forget re-index — reuses the same pipeline as the manual Re-index button
-  console.log(`[webhook] Triggering re-index for repo ${repo.id} (${fullName}) on push to ${ref}`);
-  indexer.startGitHubIndexing(repo.id, githubToken, repo.name);
+  const { queue } = require('../services/queue');
 
-  res.status(200).json({ ok: true, reindexing: true });
+  if (event === 'pull_request') {
+    const action = payload.action;
+    if (!['opened', 'synchronize'].includes(action)) {
+      return res.status(200).json({ ok: true, skipped: 'ignored PR action' });
+    }
+    
+    console.log(`[webhook] Queuing PR diff for repo ${repo.id} PR #${payload.pull_request.number}`);
+    
+    // Enqueue the PR Diff Job (US-051)
+    queue.add('pr-diff', {
+      repoId: repo.id,
+      prId: payload.pull_request.number,
+      owner: payload.repository.owner.login,
+      name: payload.repository.name,
+      baseRef: payload.pull_request.base.sha,
+      headRef: payload.pull_request.head.sha,
+      token: githubToken
+    }, { timeout: 5 * 60 * 1000 });
+    
+    return res.status(200).send("OK");
+  }
+
+  // Only re-index pushes to the default branch
+  const defaultRef = `refs/heads/${repo.default_branch || 'main'}`;
+  if (ref !== defaultRef) {
+    return res.status(200).json({ ok: true, skipped: 'push not to default branch' });
+  }
+
+  // Fire-and-forget re-index (US-028)
+  console.log(`[webhook] Triggering re-index for repo ${repo.id} (${fullName}) on push to ${ref}`);
+  
+  queue.add(async () => {
+    await indexer.startGitHubIndexing(repo.id, githubToken, repo.name);
+  });
+
+  return res.status(200).send("OK");
 };
 
 module.exports = { handleGitHubPush };

@@ -608,6 +608,12 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       console.warn(`[indexer] SCA scan failed (best-effort, non-blocking): ${scaErr.message}`);
     }
 
+    await supabaseAdmin
+      .from('analysis_issues')
+      .delete()
+      .eq('repo_id', repoId)
+      .eq('type', 'untested_critical_file');
+
     if (issues.length > 0) {
       const issueChunks = chunkArray(issues, 500);
       for (const chunk of issueChunks) {
@@ -820,7 +826,14 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
         status: 'ready',
         indexed_at: new Date().toISOString(),
         file_count: fileCount,
-        has_coverage_files: hasCoverageFiles
+        has_coverage_files: hasCoverageFiles,
+        language_stats: Object.entries(
+          finalNodes.reduce((acc, n) => {
+            const lang = n.language || 'unknown';
+            acc[lang] = (acc[lang] || 0) + 1;
+            return acc;
+          }, {})
+        ).map(([language, count]) => ({ language, count })).sort((a, b) => b.count - a.count),
       })
       .eq('id', repoId);
 

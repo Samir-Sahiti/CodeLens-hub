@@ -1,4 +1,5 @@
 import { useMemo, useState, useEffect, useCallback, memo } from 'react';
+import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { useAuth } from '../context/AuthContext';
@@ -402,30 +403,6 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
     }
   }, [issues]);
 
-  // Fallback: Fetch issues directly from the backend to ensure we don't miss them
-  useEffect(() => {
-    const fetchIssuesDirectly = async () => {
-      if (!accessToken || !repoId) return;
-      try {
-        setIsFetching(true);
-        const res = await fetch(apiUrl(`/api/analysis/${repoId}/issues`), {
-          headers: { Authorization: `Bearer ${accessToken}` },
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (data && data.length > 0) {
-            setLocalIssues(data);
-          }
-        }
-      } catch (err) {
-        console.error('Failed to fetch issues directly', err);
-      } finally {
-        setIsFetching(false);
-      }
-    };
-
-    fetchIssuesDirectly();
-  }, [repoId, accessToken]);
 
   useEffect(() => {
     const fetchDuplication = async () => {
@@ -471,15 +448,17 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
     [nodes]
   );
 
-  // Filter by file path or description text
+  // Filter by file path or description text — debounced so useMemo only
+  // fires after 200ms of typing silence, not on every single keystroke.
+  const debouncedFilterText = useDebouncedValue(filterText, 200);
   const filteredIssues = useMemo(() => {
-    if (!filterText.trim()) return localIssues;
-    const q = filterText.toLowerCase();
+    if (!debouncedFilterText.trim()) return localIssues;
+    const q = debouncedFilterText.toLowerCase();
     return localIssues.filter(issue =>
       issue.description?.toLowerCase().includes(q) ||
       issue.file_paths?.some(fp => fp.toLowerCase().includes(q))
     );
-  }, [localIssues, filterText]);
+  }, [localIssues, debouncedFilterText]);
 
   const handleIssueClick = useCallback((issue) => {
     if (issue.type === 'vulnerable_dependency') {

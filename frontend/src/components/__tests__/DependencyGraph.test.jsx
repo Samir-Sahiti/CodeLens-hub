@@ -4,10 +4,12 @@ import userEvent from '@testing-library/user-event';
 
 import DependencyGraph from '../DependencyGraph';
 
+const { resetViewMock } = vi.hoisted(() => ({ resetViewMock: vi.fn() }));
+
 vi.mock('../../hooks/useGraphSimulation', () => {
   return {
     useGraphSimulation: () => ({
-      resetView: () => {},
+      resetView: resetViewMock,
     }),
   };
 });
@@ -96,6 +98,37 @@ describe('DependencyGraph', () => {
     expect(screen.getByText('src/b.js')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /clear/i }));
     expect(onClearImpactAnalysis).toHaveBeenCalled();
+  });
+
+  it('toggles coverage mode and reset clears graph state', async () => {
+    const user = userEvent.setup();
+    const onNodeSelect = vi.fn();
+    const onClearImpactAnalysis = vi.fn();
+    resetViewMock.mockClear();
+
+    render(
+      <DependencyGraph
+        nodes={[
+          { id: 'n1', file_path: 'src/a.js', language: 'javascript', line_count: 10, outgoing_count: 0, incoming_count: 0, complexity_score: 0 },
+        ]}
+        edges={[]}
+        issues={[]}
+        selectedNodeId="n1"
+        impactAnalysis={null}
+        onNodeSelect={onNodeSelect}
+        onAnalyseImpact={() => {}}
+        onClearImpactAnalysis={onClearImpactAnalysis}
+        repoName="repo"
+      />
+    );
+
+    await user.click(screen.getByRole('button', { name: /coverage/i }));
+    expect(screen.getByText(/low coverage/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /reset view/i }));
+    expect(onNodeSelect).toHaveBeenCalledWith(null);
+    expect(onClearImpactAnalysis).toHaveBeenCalled();
+    expect(resetViewMock).toHaveBeenCalled();
   });
 });
 
