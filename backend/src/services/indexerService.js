@@ -27,6 +27,25 @@ function sha256(content) {
   return crypto.createHash('sha256').update(content).digest('hex');
 }
 
+async function markRepoReady({ repoId, fileCount, hasCoverageFiles, finalNodes }) {
+  await supabaseAdmin
+    .from('repositories')
+    .update({
+      status: 'ready',
+      indexed_at: new Date().toISOString(),
+      file_count: fileCount,
+      has_coverage_files: hasCoverageFiles,
+      language_stats: Object.entries(
+        finalNodes.reduce((acc, n) => {
+          const lang = n.language || 'unknown';
+          acc[lang] = (acc[lang] || 0) + 1;
+          return acc;
+        }, {})
+      ).map(([language, count]) => ({ language, count })).sort((a, b) => b.count - a.count),
+    })
+    .eq('id', repoId);
+}
+
 const VALID_EXTENSIONS = new Set(['.js', '.jsx', '.ts', '.tsx', '.py', '.cs', '.go', '.java', '.rs', '.rb']);
 
 function chunkArray(arr, size) {
@@ -35,6 +54,17 @@ function chunkArray(arr, size) {
     chunks.push(arr.slice(i, i + size));
   }
   return chunks;
+}
+
+function toAnalysisIssueInsert(issue, repoId) {
+  return {
+    id: crypto.randomUUID(),
+    repo_id: issue.repo_id || repoId,
+    type: issue.type,
+    severity: issue.severity,
+    file_paths: Array.isArray(issue.file_paths) ? issue.file_paths : [],
+    description: issue.description || null,
+  };
 }
 
 async function fetchGithubZipAndExtract(owner, name, token, destDir) {
@@ -615,12 +645,20 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       .eq('type', 'untested_critical_file');
 
     if (issues.length > 0) {
-      const issueChunks = chunkArray(issues, 500);
+      const issueRows = issues
+        .filter(issue => issue?.type && Array.isArray(issue.file_paths) && issue.file_paths.length > 0)
+        .map(issue => toAnalysisIssueInsert(issue, repoId));
+      const issueChunks = chunkArray(issueRows, 500);
       for (const chunk of issueChunks) {
         const { error } = await supabaseAdmin.from('analysis_issues').insert(chunk);
         if (error) console.error(`[indexer] Database error inserting issues: ${error.message}`);
       }
     }
+
+    // Core analysis is now usable. Mark the repo ready before slower best-effort
+    // enrichment so the UI does not stay on the loading skeleton while optional
+    // chunking, duplicate detection, or churn work finishes.
+    await markRepoReady({ repoId, fileCount, hasCoverageFiles, finalNodes });
 
     // 10. Store full file contents (US-043) — only for changed/new files
     // Unchanged files already have their content rows in the DB.
@@ -669,16 +707,22 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
             })));
           }
 
+          let insertedFallbackChunks = 0;
           if (fallbackChunks.length > 0) {
             const insertBatches = chunkArray(fallbackChunks, 500);
             for (const insBatch of insertBatches) {
               const { error: insErr } = await supabaseAdmin.from('code_chunks').insert(insBatch);
               if (insErr) console.error(`[indexer] DB insert err for fallback chunks: ${insErr.message}`);
+              else insertedFallbackChunks += insBatch.length;
             }
           }
 
-          const result = await detectDuplicateCandidates(repoId, { allowTextFallback: true });
-          console.log(`[indexer] Demo fallback duplication scan saved ${result.inserted || 0} candidate pair(s).`);
+          if (insertedFallbackChunks > 0) {
+            const result = await detectDuplicateCandidates(repoId, { allowTextFallback: true });
+            console.log(`[indexer] Demo fallback duplication scan saved ${result.inserted || 0} candidate pair(s).`);
+          } else {
+            console.log('[indexer] Demo fallback duplication scan skipped; no changed/new text chunks were stored.');
+          }
         } catch (fallbackErr) {
           console.warn(`[indexer] Demo fallback duplication scan failed: ${fallbackErr.message}`);
         }
@@ -818,24 +862,6 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
         console.warn(`[indexer] Churn analysis failed (best-effort, non-blocking): ${churnErr.message}`);
       }
     }
-
-    // 11. update repo (ready)
-    await supabaseAdmin
-      .from('repositories')
-      .update({
-        status: 'ready',
-        indexed_at: new Date().toISOString(),
-        file_count: fileCount,
-        has_coverage_files: hasCoverageFiles,
-        language_stats: Object.entries(
-          finalNodes.reduce((acc, n) => {
-            const lang = n.language || 'unknown';
-            acc[lang] = (acc[lang] || 0) + 1;
-            return acc;
-          }, {})
-        ).map(([language, count]) => ({ language, count })).sort((a, b) => b.count - a.count),
-      })
-      .eq('id', repoId);
 
     console.timeEnd(`[indexer] Total pipeline (${repoId})`);
     console.log(`[indexer] Successfully finished indexing for repoId: ${repoId}`);
