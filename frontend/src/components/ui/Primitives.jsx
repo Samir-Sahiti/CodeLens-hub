@@ -6,6 +6,7 @@ import {
   Search,
   XCircle,
 } from './Icons';
+import { forwardRef } from 'react';
 
 const toneMap = {
   default: 'border-surface-700 bg-surface-900/80 text-surface-100',
@@ -86,13 +87,14 @@ export function FieldLabel({ children, htmlFor, className = '' }) {
   );
 }
 
-export function Input({ icon: Icon, label, id, className = '', inputClassName = '', ...props }) {
+export const Input = forwardRef(function Input({ icon: Icon, label, id, className = '', inputClassName = '', ...props }, ref) {
   return (
     <div className={className}>
       <FieldLabel htmlFor={id}>{label}</FieldLabel>
       <div className="relative">
         {Icon && <Icon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-surface-500" />}
         <input
+          ref={ref}
           id={id}
           className={cx(
             'h-9 w-full rounded-lg border border-surface-700 bg-surface-950 px-3 text-sm text-surface-100',
@@ -106,7 +108,7 @@ export function Input({ icon: Icon, label, id, className = '', inputClassName = 
       </div>
     </div>
   );
-}
+});
 
 export function SearchInput(props) {
   return <Input icon={Search} {...props} />;

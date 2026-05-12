@@ -19,6 +19,7 @@ const MetricsPanel         = lazy(() => import('../components/MetricsPanel'));
 const IssuesPanel          = lazy(() => import('../components/IssuesPanel'));
 const SettingsPanel        = lazy(() => import('../components/SettingsPanel'));
 const TourViewer           = lazy(() => import('../components/TourViewer'));
+const ToursPanel           = lazy(() => import('../components/ToursPanel'));
 
 const STAGE_COPY = {
   discovery: 'Scanning repository files...',
@@ -665,6 +666,10 @@ export default function RepoView() {
 
               <div className={activeTab === 'search' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
                 <SearchPanel repoId={repoId} />
+              </div>
+
+              <div className={activeTab === 'tours' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
+                <ToursPanel repoId={repoId} onStartTour={handleOpenTour} />
               </div>
 
               {/* Review tab — CodeReviewPanel */}
