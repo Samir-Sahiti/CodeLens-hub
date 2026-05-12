@@ -16,6 +16,7 @@ const teamRoutes     = require('./routes/teams');
 const fileChatRoutes = require('./routes/fileChat');
 const usageRoutes    = require('./routes/usage');
 const adminRoutes    = require('./routes/admin');
+const toursRoutes    = require('./routes/tours');
 const errorHandler   = require('./middleware/errorHandler');
 
 const compression = require('compression');
@@ -73,6 +74,7 @@ app.use('/api/teams',     teamRoutes);
 app.use('/api/file-chat', fileChatRoutes);
 app.use('/api/usage',     usageRoutes);
 app.use('/api/admin',     adminRoutes);
+app.use('/api/repos',    toursRoutes);
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
