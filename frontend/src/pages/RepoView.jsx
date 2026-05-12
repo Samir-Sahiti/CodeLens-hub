@@ -142,9 +142,13 @@ export default function RepoView() {
   const [activeTour, setActiveTour] = useState(null);
   const [isTourViewerOpen, setIsTourViewerOpen] = useState(false);
   const [tourProgressById, setTourProgressById] = useState({});
+  const [attackSurfaceGraphMode, setAttackSurfaceGraphMode] = useState({ isActive: false, sourceId: null });
+  const [pausedGraphMode, setPausedGraphMode] = useState(null);
+  const [restoreAttackSurfaceRequest, setRestoreAttackSurfaceRequest] = useState(null);
 
   const activeTourKey = useMemo(() => getTourKey(activeTour), [activeTour]);
   const activeTourStepIndex = activeTourKey ? tourProgressById[activeTourKey] || 0 : 0;
+  const isTourModeActive = Boolean(activeTour && isTourViewerOpen);
 
   const handleNodeSelect = useCallback((nodeIdOrIds, options = {}) => {
     setSelectedNodeId(nodeIdOrIds);
@@ -163,6 +167,28 @@ export default function RepoView() {
     [analysisData.edges, analysisData.nodes, impactSourcePath]
   );
 
+  const tourMode = useMemo(() => {
+    const steps = (activeTour?.steps || []).map((step, stepIndex) => ({
+      ...step,
+      stepIndex,
+      stepOrder: step.step_order,
+      filePath: step.file_path,
+    }));
+
+    return {
+      isActive: isTourModeActive,
+      activeStepIndex: activeTourStepIndex,
+      steps,
+    };
+  }, [activeTour?.steps, activeTourStepIndex, isTourModeActive]);
+
+  const closeTourForGraphModeSwap = useCallback((modeLabel) => {
+    if (!isTourModeActive) return;
+    setIsTourViewerOpen(false);
+    setPausedGraphMode(null);
+    toast.info(`Tour closed so ${modeLabel} can start.`);
+  }, [isTourModeActive, toast]);
+
   const handleStartImpactAnalysis = useCallback((nodeOrPath) => {
     const sourcePath = typeof nodeOrPath === 'string' ? nodeOrPath : nodeOrPath?.file_path;
     if (!sourcePath) return;
@@ -170,10 +196,11 @@ export default function RepoView() {
     const sourceNode = analysisData.nodes.find((node) => node.file_path === sourcePath);
     if (!sourceNode) return;
 
+    closeTourForGraphModeSwap('impact analysis');
     setImpactSourcePath(sourcePath);
     setSelectedNodeId(sourceNode.id || sourceNode.file_path);
     setSearchParams({ tab: 'graph' }, { replace: true });
-  }, [analysisData.nodes, setSearchParams]);
+  }, [analysisData.nodes, closeTourForGraphModeSwap, setSearchParams]);
 
   const handleClearImpactAnalysis = useCallback(() => {
     setImpactSourcePath(null);
@@ -186,23 +213,52 @@ export default function RepoView() {
       return;
     }
 
+    const snapshot = impactSourcePath
+      ? { type: 'impact', sourcePath: impactSourcePath }
+      : attackSurfaceGraphMode.isActive
+        ? { type: 'attackSurface', sourceId: attackSurfaceGraphMode.sourceId }
+        : { type: 'default' };
+
+    setPausedGraphMode(snapshot);
+    if (snapshot.type === 'impact') {
+      setImpactSourcePath(null);
+      toast.info('Tour mode paused impact analysis. It will restore when the tour closes.');
+    } else if (snapshot.type === 'attackSurface') {
+      toast.info('Tour mode paused attack surface. It will restore when the tour closes.');
+    }
+
     setActiveTour(normalizedTour);
     setIsTourViewerOpen(true);
     setSearchParams({ tab: 'graph' }, { replace: true });
-  }, [setSearchParams, toast]);
+  }, [attackSurfaceGraphMode.isActive, attackSurfaceGraphMode.sourceId, impactSourcePath, setSearchParams, toast]);
 
   const handleTourStepChange = useCallback((nextStepIndex) => {
     if (!activeTourKey) return;
     setTourProgressById((prev) => ({ ...prev, [activeTourKey]: nextStepIndex }));
   }, [activeTourKey]);
 
+  const restorePausedGraphMode = useCallback(() => {
+    if (!pausedGraphMode) return;
+    if (pausedGraphMode.type === 'impact') {
+      setImpactSourcePath(pausedGraphMode.sourcePath);
+    } else if (pausedGraphMode.type === 'attackSurface') {
+      setRestoreAttackSurfaceRequest({
+        sourceId: pausedGraphMode.sourceId,
+        restoreKey: Date.now(),
+      });
+    }
+    setPausedGraphMode(null);
+  }, [pausedGraphMode]);
+
   const handleCloseTour = useCallback(() => {
     setIsTourViewerOpen(false);
-  }, []);
+    restorePausedGraphMode();
+  }, [restorePausedGraphMode]);
 
   const handleFinishTour = useCallback(() => {
     setIsTourViewerOpen(false);
-  }, []);
+    restorePausedGraphMode();
+  }, [restorePausedGraphMode]);
 
   useEffect(() => {
     const handleStartTourEvent = (event) => {
@@ -629,10 +685,15 @@ export default function RepoView() {
                   issues={analysisData.issues}
                   selectedNodeId={selectedNodeId}
                   impactAnalysis={impactAnalysis}
+                  tourMode={tourMode}
                   churnData={churnData}
                   onNodeSelect={handleNodeSelect}
                   onAnalyseImpact={handleStartImpactAnalysis}
                   onClearImpactAnalysis={handleClearImpactAnalysis}
+                  onTourStepSelect={handleTourStepChange}
+                  onCloseTourForGraphMode={closeTourForGraphModeSwap}
+                  onAttackSurfaceModeChange={setAttackSurfaceGraphMode}
+                  restoreAttackSurfaceRequest={restoreAttackSurfaceRequest}
                   onChatWithFile={(filePath) => setChatFilePath(filePath)}
                   onAuditFile={handleAuditFile}
                   repoName={repo?.name}

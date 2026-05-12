@@ -9,6 +9,14 @@ if (!globalThis.ResizeObserver) {
   };
 }
 
+if (!globalThis.IntersectionObserver) {
+  globalThis.IntersectionObserver = class IntersectionObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}
+
 if (!HTMLCanvasElement.prototype.getContext) {
   // Minimal mock to prevent d3/canvas code from crashing during render.
   // Individual tests can override as needed.

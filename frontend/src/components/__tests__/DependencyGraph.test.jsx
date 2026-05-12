@@ -4,13 +4,19 @@ import userEvent from '@testing-library/user-event';
 
 import DependencyGraph from '../DependencyGraph';
 
-const { resetViewMock } = vi.hoisted(() => ({ resetViewMock: vi.fn() }));
+const { resetViewMock, simulationArgs } = vi.hoisted(() => ({
+  resetViewMock: vi.fn(),
+  simulationArgs: { current: null },
+}));
 
 vi.mock('../../hooks/useGraphSimulation', () => {
   return {
-    useGraphSimulation: () => ({
+    useGraphSimulation: (args) => {
+      simulationArgs.current = args;
+      return {
       resetView: resetViewMock,
-    }),
+      };
+    },
   };
 });
 
@@ -129,6 +135,138 @@ describe('DependencyGraph', () => {
     expect(onNodeSelect).toHaveBeenCalledWith(null);
     expect(onClearImpactAnalysis).toHaveBeenCalled();
     expect(resetViewMock).toHaveBeenCalled();
+  });
+
+  it('passes tour data into useGraphSimulation when a tour is active', () => {
+    render(
+      <DependencyGraph
+        nodes={[
+          { id: 'n1', file_path: 'src/a.js', language: 'javascript', line_count: 10, outgoing_count: 0, incoming_count: 0, complexity_score: 0 },
+          { id: 'n2', file_path: 'src/b.js', language: 'javascript', line_count: 12, outgoing_count: 1, incoming_count: 0, complexity_score: 0 },
+        ]}
+        edges={[]}
+        issues={[]}
+        selectedNodeId={null}
+        impactAnalysis={null}
+        tourMode={{
+          isActive: true,
+          activeStepIndex: 1,
+          steps: [
+            { stepIndex: 0, stepOrder: 1, filePath: 'src/a.js' },
+            { stepIndex: 1, stepOrder: 2, filePath: 'src/b.js' },
+            { stepIndex: 2, stepOrder: 3, filePath: 'src/missing.js' },
+          ],
+        }}
+        onNodeSelect={() => {}}
+        onAnalyseImpact={() => {}}
+        onClearImpactAnalysis={() => {}}
+        repoName="repo"
+      />
+    );
+
+    expect(simulationArgs.current.tour.isActive).toBe(true);
+    expect(simulationArgs.current.tour.activeStepIndex).toBe(1);
+    expect([...simulationArgs.current.tour.stepNodeIds]).toEqual(['n1', 'n2']);
+    expect(simulationArgs.current.tour.stepsByNodeId.get('n2')[0].stepIndex).toBe(1);
+  });
+
+  it('clicking a tour node calls onTourStepSelect with the earliest step for that file', () => {
+    const onTourStepSelect = vi.fn();
+    const onNodeSelect = vi.fn();
+
+    render(
+      <DependencyGraph
+        nodes={[
+          { id: 'n1', file_path: 'src/a.js', language: 'javascript', line_count: 10, outgoing_count: 0, incoming_count: 0, complexity_score: 0 },
+        ]}
+        edges={[]}
+        issues={[]}
+        selectedNodeId={null}
+        impactAnalysis={null}
+        tourMode={{
+          isActive: true,
+          activeStepIndex: 2,
+          steps: [
+            { stepIndex: 2, stepOrder: 3, filePath: 'src/a.js' },
+            { stepIndex: 0, stepOrder: 1, filePath: 'src/a.js' },
+          ],
+        }}
+        onNodeSelect={onNodeSelect}
+        onAnalyseImpact={() => {}}
+        onClearImpactAnalysis={() => {}}
+        onTourStepSelect={onTourStepSelect}
+        repoName="repo"
+      />
+    );
+
+    simulationArgs.current.onNodeClick({ graphId: 'n1', file_path: 'src/a.js' });
+    expect(onTourStepSelect).toHaveBeenCalledWith(0);
+    expect(onNodeSelect).not.toHaveBeenCalled();
+  });
+
+  it('tour mode disables clustering for large graphs', () => {
+    const nodes = Array.from({ length: 301 }, (_, index) => ({
+      id: `n${index}`,
+      file_path: `src/file-${index}.js`,
+      language: 'javascript',
+      line_count: 10,
+      outgoing_count: 0,
+      incoming_count: 0,
+      complexity_score: 0,
+    }));
+
+    render(
+      <DependencyGraph
+        nodes={nodes}
+        edges={[]}
+        issues={[]}
+        selectedNodeId={null}
+        impactAnalysis={null}
+        tourMode={{
+          isActive: true,
+          activeStepIndex: 0,
+          steps: [{ stepIndex: 0, stepOrder: 1, filePath: 'src/file-0.js' }],
+        }}
+        onNodeSelect={() => {}}
+        onAnalyseImpact={() => {}}
+        onClearImpactAnalysis={() => {}}
+        repoName="repo"
+      />
+    );
+
+    expect(simulationArgs.current.renderMode).toBe('canvas');
+    expect(simulationArgs.current.nodes).toHaveLength(301);
+    expect(simulationArgs.current.nodes.some((node) => node.isCluster)).toBe(false);
+  });
+
+  it('starting attack surface while tour mode is active calls tour close swap behavior', async () => {
+    const user = userEvent.setup();
+    const onCloseTourForGraphMode = vi.fn();
+
+    render(
+      <DependencyGraph
+        nodes={[
+          { id: 'n1', file_path: 'src/a.js', language: 'javascript', line_count: 10, outgoing_count: 0, incoming_count: 0, complexity_score: 0 },
+        ]}
+        edges={[]}
+        issues={[]}
+        selectedNodeId={null}
+        impactAnalysis={null}
+        tourMode={{
+          isActive: true,
+          activeStepIndex: 0,
+          steps: [{ stepIndex: 0, stepOrder: 1, filePath: 'src/a.js' }],
+        }}
+        onNodeSelect={() => {}}
+        onAnalyseImpact={() => {}}
+        onClearImpactAnalysis={() => {}}
+        onCloseTourForGraphMode={onCloseTourForGraphMode}
+        repoName="repo"
+      />
+    );
+
+    await user.click(screen.getByRole('button', { name: /attack surface/i }));
+    expect(onCloseTourForGraphMode).toHaveBeenCalledWith('attack surface');
   });
 });
 
