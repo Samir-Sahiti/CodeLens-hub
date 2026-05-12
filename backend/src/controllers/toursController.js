@@ -20,21 +20,22 @@ function _proxy(real, key) {
 const openai    = _proxy(_openai,    '__CODELENS_OPENAI__');
 const anthropic = _proxy(_anthropic, '__CODELENS_ANTHROPIC__');
 
-async function canAccessRepo(repoId, userId) {
+async function getRepoAccess(repoId, userId) {
   const { data: owned } = await supabaseAdmin
     .from('repositories')
     .select('id')
     .eq('id', repoId)
     .eq('user_id', userId)
     .maybeSingle();
-  if (owned) return true;
 
   const { data: memberships } = await supabaseAdmin
     .from('team_members')
     .select('team_id')
     .eq('user_id', userId);
   const teamIds = (memberships || []).map((m) => m.team_id);
-  if (teamIds.length === 0) return false;
+  if (teamIds.length === 0) {
+    return { isOwner: !!owned, hasTeamAccess: false };
+  }
 
   const { data: teamRepo } = await supabaseAdmin
     .from('team_repositories')
@@ -43,7 +44,12 @@ async function canAccessRepo(repoId, userId) {
     .in('team_id', teamIds)
     .maybeSingle();
 
-  return !!teamRepo;
+  return { isOwner: !!owned, hasTeamAccess: !!teamRepo };
+}
+
+async function canAccessRepo(repoId, userId) {
+  const access = await getRepoAccess(repoId, userId);
+  return access.isOwner || access.hasTeamAccess;
 }
 
 async function dailyTokensUsed(userId) {
@@ -283,4 +289,152 @@ const generateTour = async (req, res) => {
   return res.json({ steps });
 };
 
-module.exports = { generateTour };
+function getCreatorName(user) {
+  const metadata = user?.user_metadata || {};
+  const emailName = user?.email ? user.email.split('@')[0] : null;
+  return metadata.name
+    || metadata.full_name
+    || metadata.user_name
+    || metadata.preferred_username
+    || emailName
+    || user?.id
+    || 'Unknown user';
+}
+
+function getCreatorAvatar(user) {
+  const metadata = user?.user_metadata || {};
+  return metadata.avatar_url || metadata.picture || '';
+}
+
+async function getCreatorMap(userIds) {
+  const creators = new Map();
+
+  await Promise.all(userIds.map(async (userId) => {
+    try {
+      const { data, error } = await supabaseAdmin.auth.admin.getUserById(userId);
+      if (error) throw error;
+      const user = data?.user || {};
+      creators.set(userId, {
+        id: userId,
+        name: getCreatorName(user),
+        avatar_url: getCreatorAvatar(user),
+      });
+    } catch (err) {
+      creators.set(userId, {
+        id: userId,
+        name: userId,
+        avatar_url: '',
+      });
+    }
+  }));
+
+  return creators;
+}
+
+const listTours = async (req, res) => {
+  const { repoId } = req.params;
+  const userId = req.user.id;
+  const access = await getRepoAccess(repoId, userId);
+
+  if (!access.isOwner && !access.hasTeamAccess) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  const { data: tourRows, error: toursErr } = await supabaseAdmin
+    .from('tours')
+    .select('id, repo_id, created_by, title, description, original_query, is_auto_generated, is_team_shared, created_at, updated_at')
+    .eq('repo_id', repoId)
+    .order('updated_at', { ascending: false });
+
+  if (toursErr) {
+    console.error('[listTours] Failed to fetch tours:', toursErr.message);
+    return res.status(500).json({ error: 'Failed to fetch tours' });
+  }
+
+  const visibleTours = (tourRows || []).filter((tour) => (
+    tour.created_by === userId || (tour.is_team_shared && access.hasTeamAccess)
+  ));
+
+  if (visibleTours.length === 0) {
+    return res.json({ tours: [] });
+  }
+
+  const tourIds = visibleTours.map((tour) => tour.id);
+  const { data: stepRows, error: stepsErr } = await supabaseAdmin
+    .from('tour_steps')
+    .select('id, tour_id, step_order, file_path, start_line, end_line, explanation')
+    .in('tour_id', tourIds)
+    .order('step_order', { ascending: true });
+
+  if (stepsErr) {
+    console.error('[listTours] Failed to fetch tour steps:', stepsErr.message);
+    return res.status(500).json({ error: 'Failed to fetch tour steps' });
+  }
+
+  const stepsByTour = new Map();
+  for (const step of stepRows || []) {
+    if (!stepsByTour.has(step.tour_id)) stepsByTour.set(step.tour_id, []);
+    stepsByTour.get(step.tour_id).push(step);
+  }
+
+  const creatorIds = [...new Set(visibleTours.map((tour) => tour.created_by).filter(Boolean))];
+  const creators = await getCreatorMap(creatorIds);
+
+  const tours = visibleTours.map((tour) => {
+    const steps = stepsByTour.get(tour.id) || [];
+    return {
+      ...tour,
+      step_count: steps.length,
+      can_delete: tour.created_by === userId,
+      creator: creators.get(tour.created_by) || { id: tour.created_by, name: tour.created_by, avatar_url: '' },
+      steps,
+    };
+  });
+
+  res.json({ tours });
+};
+
+const deleteTour = async (req, res) => {
+  const { repoId, tourId } = req.params;
+  const userId = req.user.id;
+
+  if (!(await canAccessRepo(repoId, userId))) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  const { data: tour, error: tourErr } = await supabaseAdmin
+    .from('tours')
+    .select('id, created_by')
+    .eq('id', tourId)
+    .eq('repo_id', repoId)
+    .maybeSingle();
+
+  if (tourErr) {
+    console.error('[deleteTour] Failed to fetch tour:', tourErr.message);
+    return res.status(500).json({ error: 'Failed to delete tour' });
+  }
+
+  if (!tour) {
+    return res.status(404).json({ error: 'Tour not found' });
+  }
+
+  if (tour.created_by !== userId) {
+    return res.status(403).json({ error: 'Only the tour creator can delete this tour' });
+  }
+
+  const { error: deleteErr } = await supabaseAdmin
+    .from('tours')
+    .delete()
+    .eq('id', tourId)
+    .eq('repo_id', repoId)
+    .eq('created_by', userId);
+
+  if (deleteErr) {
+    console.error('[deleteTour] Failed to delete tour:', deleteErr.message);
+    return res.status(500).json({ error: 'Failed to delete tour' });
+  }
+
+  res.json({ ok: true });
+};
+
+module.exports = { generateTour, listTours, deleteTour, _private: { getCreatorName, getCreatorAvatar } };
