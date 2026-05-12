@@ -7,6 +7,7 @@
  * Exports:
  *   - CopyIcon, ChevronDownIcon, ChevronUpIcon  (legacy — still used in other panels)
  *   - getLanguageClass
+ *   - HighlightedCodeBlock
  *   - AnswerBlock  (uses react-markdown + remark-gfm + syntax highlighting)
  *   - SourceCard
  */
@@ -62,54 +63,78 @@ export function getLanguageClass(filePath) {
 }
 
 // ---------------------------------------------------------------------------
-// CodeBlock — syntax-highlighted code block with copy button
+// HighlightedCodeBlock — shared syntax-highlighted code block
 // ---------------------------------------------------------------------------
 
-function CodeBlock({ children, className, ...props }) {
+export function HighlightedCodeBlock({
+  code,
+  language = 'text',
+  className = '',
+  showCopy = true,
+  showLineNumbers = false,
+  wrapLines = false,
+  customStyle = {},
+  ...props
+}) {
   const [copied, setCopied] = useState(false);
-  const lang    = /language-(\w+)/.exec(className || '')?.[1] ?? 'text';
-  const code    = String(children).replace(/\n$/, '');
+  const sourceCode = String(code ?? '').replace(/\n$/, '');
 
   const handleCopy = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(code);
+      await navigator.clipboard.writeText(sourceCode);
       setCopied(true);
       setTimeout(() => setCopied(false), 1800);
     } catch {}
-  }, [code]);
+  }, [sourceCode]);
 
   return (
-    <div className="group relative my-4 overflow-hidden rounded-lg border border-surface-700 bg-surface-950">
-      {/* Header bar */}
+    <div className={`group relative overflow-hidden rounded-lg border border-surface-700 bg-surface-950 ${className}`}>
       <div className="flex items-center justify-between border-b border-surface-800 bg-surface-900 px-4 py-1.5">
-        <span className="font-mono text-xs text-surface-400">{lang}</span>
-        <button
-          onClick={handleCopy}
-          className="flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs text-surface-400 transition hover:bg-surface-800 hover:text-white"
-          title="Copy code"
-        >
-          {copied
-            ? <><Check className="h-3 w-3 text-emerald-400" /> Copied!</>
-            : <><Copy className="h-3 w-3" /> Copy</>
-          }
-        </button>
+        <span className="font-mono text-xs text-surface-400">{language}</span>
+        {showCopy && (
+          <button
+            onClick={handleCopy}
+            className="flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs text-surface-400 transition hover:bg-surface-800 hover:text-white"
+            title="Copy code"
+          >
+            {copied
+              ? <><Check className="h-3 w-3 text-emerald-400" /> Copied!</>
+              : <><Copy className="h-3 w-3" /> Copy</>
+            }
+          </button>
+        )}
       </div>
       <SyntaxHighlighter
-        language={lang}
+        language={language}
         style={vscDarkPlus}
+        showLineNumbers={showLineNumbers}
+        wrapLines={wrapLines}
         customStyle={{
           margin: 0,
           padding: '1rem',
           background: 'rgba(9,10,15,0.96)',
           fontSize: '0.75rem',
           lineHeight: '1.6',
+          ...customStyle,
         }}
         PreTag="div"
         {...props}
       >
-        {code}
+        {sourceCode}
       </SyntaxHighlighter>
     </div>
+  );
+}
+
+function CodeBlock({ children, className, ...props }) {
+  const lang = /language-(\w+)/.exec(className || '')?.[1] ?? 'text';
+  return (
+    <HighlightedCodeBlock
+      code={children}
+      language={lang}
+      className="my-4"
+      {...props}
+    />
   );
 }
 

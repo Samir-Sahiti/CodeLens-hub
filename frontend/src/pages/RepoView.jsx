@@ -18,6 +18,7 @@ const DependenciesPanel    = lazy(() => import('../components/DependenciesPanel'
 const MetricsPanel         = lazy(() => import('../components/MetricsPanel'));
 const IssuesPanel          = lazy(() => import('../components/IssuesPanel'));
 const SettingsPanel        = lazy(() => import('../components/SettingsPanel'));
+const TourViewer           = lazy(() => import('../components/TourViewer'));
 
 const STAGE_COPY = {
   discovery: 'Scanning repository files...',
@@ -38,6 +39,26 @@ function getFileBasename(filePath) {
   const normalizedPath = filePath.replace(/\\/g, '/');
   const parts = normalizedPath.split('/');
   return parts[parts.length - 1] || filePath;
+}
+
+function normalizeTour(tourLike) {
+  if (!tourLike) return null;
+  const baseTour = tourLike.tour && typeof tourLike.tour === 'object' ? tourLike.tour : tourLike;
+  const steps = Array.isArray(baseTour.steps)
+    ? baseTour.steps
+    : Array.isArray(tourLike.steps)
+      ? tourLike.steps
+      : [];
+  return { ...baseTour, steps };
+}
+
+function getTourKey(tour) {
+  if (tour?.id) return String(tour.id);
+  const title = tour?.title || tour?.original_query || 'unsaved-tour';
+  const stepKey = (tour?.steps || [])
+    .map((step) => `${step.file_path || ''}:${step.start_line || ''}-${step.end_line || ''}`)
+    .join('|');
+  return `${title}:${stepKey}`;
 }
 
 function buildImpactAnalysis(sourcePath, nodes, edges) {
@@ -117,6 +138,12 @@ export default function RepoView() {
   const [isReindexing, setIsReindexing] = useState(false);
   const [depsRefreshKey, setDepsRefreshKey] = useState(0);
   const [isDiffModalOpen, setIsDiffModalOpen] = useState(false);
+  const [activeTour, setActiveTour] = useState(null);
+  const [isTourViewerOpen, setIsTourViewerOpen] = useState(false);
+  const [tourProgressById, setTourProgressById] = useState({});
+
+  const activeTourKey = useMemo(() => getTourKey(activeTour), [activeTour]);
+  const activeTourStepIndex = activeTourKey ? tourProgressById[activeTourKey] || 0 : 0;
 
   const handleNodeSelect = useCallback((nodeIdOrIds, options = {}) => {
     setSelectedNodeId(nodeIdOrIds);
@@ -150,6 +177,40 @@ export default function RepoView() {
   const handleClearImpactAnalysis = useCallback(() => {
     setImpactSourcePath(null);
   }, []);
+
+  const handleOpenTour = useCallback((tourLike) => {
+    const normalizedTour = normalizeTour(tourLike);
+    if (!normalizedTour?.steps?.length) {
+      toast.warning('This tour has no steps to show.');
+      return;
+    }
+
+    setActiveTour(normalizedTour);
+    setIsTourViewerOpen(true);
+    setSearchParams({ tab: 'graph' }, { replace: true });
+  }, [setSearchParams, toast]);
+
+  const handleTourStepChange = useCallback((nextStepIndex) => {
+    if (!activeTourKey) return;
+    setTourProgressById((prev) => ({ ...prev, [activeTourKey]: nextStepIndex }));
+  }, [activeTourKey]);
+
+  const handleCloseTour = useCallback(() => {
+    setIsTourViewerOpen(false);
+  }, []);
+
+  const handleFinishTour = useCallback(() => {
+    setIsTourViewerOpen(false);
+  }, []);
+
+  useEffect(() => {
+    const handleStartTourEvent = (event) => {
+      handleOpenTour(event.detail);
+    };
+
+    window.addEventListener('codelens:start-tour', handleStartTourEvent);
+    return () => window.removeEventListener('codelens:start-tour', handleStartTourEvent);
+  }, [handleOpenTour]);
 
   const fetchAnalysisData = useCallback(async (force = false) => {
     if ((hasFetchedData && !force) || !session?.access_token) return;
@@ -633,6 +694,19 @@ export default function RepoView() {
           </Suspense>
         )}
       </div>
+
+      {/* Tour viewer — non-modal overlay that coexists with the graph */}
+      <Suspense fallback={null}>
+        <TourViewer
+          repoId={repoId}
+          tour={activeTour}
+          open={isTourViewerOpen}
+          stepIndex={activeTourStepIndex}
+          onStepChange={handleTourStepChange}
+          onClose={handleCloseTour}
+          onFinish={handleFinishTour}
+        />
+      </Suspense>
 
       {/* File chat panel — slides in from right, scoped to selected file */}
       <Suspense fallback={null}>
