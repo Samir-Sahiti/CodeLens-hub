@@ -110,6 +110,7 @@ export default function RepoView() {
   const [hasFetchedData, setHasFetchedData] = useState(false);
   const [analysisError, setAnalysisError] = useState(null);
   const [churnData, setChurnData] = useState([]);
+  const [churnPollCount, setChurnPollCount] = useState(0);
 
   const [isLoading, setIsLoading]     = useState(true);
   const [error, setError]             = useState(null);
@@ -230,6 +231,19 @@ export default function RepoView() {
     }
   }, [repoId, session?.access_token]);
 
+  const fetchChurnData = useCallback(async () => {
+    if (!session?.access_token || !repoId) return false;
+    const res = await fetch(apiUrl(`/api/repos/${repoId}/churn`), {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    if (!res.ok) return false;
+
+    const churnJson = await res.json();
+    const churn = churnJson.churn || [];
+    setChurnData(churn);
+    return churn.length > 0;
+  }, [repoId, session?.access_token]);
+
   useEffect(() => {
     fetchRepo();
     fetchRepoStatus();
@@ -248,6 +262,21 @@ export default function RepoView() {
     if (!statusDetails?.latest_job?.core_ready && repo?.status !== 'ready') return;
     fetchAnalysisData(true);
   }, [statusDetails?.latest_job?.core_ready, repo?.status, fetchAnalysisData]);
+
+  useEffect(() => {
+    const shouldPollChurn = repo?.source === 'github'
+      && repo?.status === 'ready'
+      && churnData.length === 0
+      && churnPollCount < 20;
+    if (!shouldPollChurn) return undefined;
+
+    const id = setTimeout(async () => {
+      const foundChurn = await fetchChurnData();
+      setChurnPollCount((count) => foundChurn ? count : count + 1);
+    }, 3000);
+
+    return () => clearTimeout(id);
+  }, [churnData.length, churnPollCount, fetchChurnData, repo?.source, repo?.status]);
 
   useEffect(() => {
     return () => {
@@ -300,6 +329,8 @@ export default function RepoView() {
       // jumps straight to the "Indexing…" screen without flashing stale data
       setHasFetchedData(false);
       setAnalysisData({ nodes: [], edges: [], issues: [], hasCoverageFiles: false });
+      setChurnData([]);
+      setChurnPollCount(0);
       setDepsRefreshKey(k => k + 1);
       setImpactSourcePath(null);
       setRepo(prev => prev ? { ...prev, status: 'pending', file_count: 0, indexed_at: null } : prev);
@@ -543,6 +574,7 @@ export default function RepoView() {
                   onChatWithFile={(filePath) => setChatFilePath(filePath)}
                   onAuditFile={handleAuditFile}
                   repoName={repo?.name}
+                  repoSource={repo?.source}
                 />
               </div>
 

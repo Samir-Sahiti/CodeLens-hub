@@ -569,6 +569,7 @@ export default function DependencyGraph({
   onChatWithFile,
   onAuditFile,
   repoName,
+  repoSource,
 }) {
   const containerRef = useRef(null);
   const svgRef = useRef(null);
@@ -594,6 +595,8 @@ export default function DependencyGraph({
   const [searchCurrent, setSearchCurrent] = useState(0);
 
   const exportFilename = repoName ? repoName.replace(/[^\w.-]/g, '_') : 'graph';
+  const canShowHotspotControl = repoSource === 'github' || churnData.length > 0;
+  const hasHotspotData = churnData.length > 0;
 
   // Ctrl+F / Cmd+F opens search
   useEffect(() => {
@@ -1109,17 +1112,25 @@ export default function DependencyGraph({
             >
               <CirclePercent className="mr-1.5 inline h-3.5 w-3.5" /> Coverage
             </button>
-            {churnData.length > 0 && (
+            {canShowHotspotControl && (
               <button
-                onClick={() => setHotspotGraphMode(v => !v)}
+                onClick={() => {
+                  if (!hasHotspotData) return;
+                  setHotspotGraphMode(v => !v);
+                }}
+                disabled={!hasHotspotData}
                 className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
-                  hotspotGraphMode
+                  !hasHotspotData
+                    ? 'cursor-not-allowed border-gray-800 bg-gray-950/60 text-gray-600'
+                    : hotspotGraphMode
                     ? 'border-orange-500/50 bg-orange-500/15 text-orange-300 hover:bg-orange-500/25'
                     : 'border-gray-700 bg-gray-950/80 text-gray-400 hover:border-gray-500 hover:text-gray-200'
                 }`}
-                title="Hotspot colour mode: green → yellow → red by churn × complexity"
+                title={hasHotspotData
+                  ? 'Hotspots colour mode: green -> yellow -> red by churn x complexity'
+                  : 'Hotspots data is still being computed from Git history'}
               >
-                <TrendingUp className="mr-1.5 inline h-3.5 w-3.5" /> Hotspot
+                <TrendingUp className="mr-1.5 inline h-3.5 w-3.5" /> Hotspots
               </button>
             )}
             <button
