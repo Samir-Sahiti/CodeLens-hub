@@ -5,6 +5,8 @@ const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 4;
 const PRETICK_FULL = 300;
 const PRETICK_CLUSTERED = 150;
+const TOUR_VIOLET = '#a78bfa';
+const TOUR_VIOLET_RGBA = 'rgba(167, 139, 250, 0.95)';
 
 function getNodeAtPoint(nodes, point) {
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
@@ -46,6 +48,7 @@ export function useGraphSimulation({
   selection,
   impactAnalysis,
   attackSurface,
+  tour,
   hotspotMode,
   coverageMode,
   focusNodeId,
@@ -57,6 +60,7 @@ export function useGraphSimulation({
   const zoomBehaviorRef = useRef(null);
   const canvasTransformRef = useRef(d3.zoomIdentity);
   const resetViewRef = useRef(() => {});
+  const tourPulseRef = useRef({ activeStepIndex: null, startedAt: 0 });
 
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [isGraphVisible, setIsGraphVisible] = useState(true);
@@ -212,6 +216,23 @@ export function useGraphSimulation({
     const hotspotScores   = hotspotMode?.scores || new Map();
     const isCoverageActive = Boolean(coverageMode?.isActive);
 
+    const isTourActive = Boolean(tour?.isActive);
+    const tourStepNodeIds = tour?.stepNodeIds || new Set();
+    const tourStepsByNodeId = tour?.stepsByNodeId || new Map();
+    const tourOrderedStepNodeIds = tour?.orderedStepNodeIds || [];
+    const activeTourStepIndex = tour?.activeStepIndex ?? null;
+    const activeTourNodeId = (() => {
+      if (!isTourActive) return null;
+      for (const steps of tourStepsByNodeId.values()) {
+        const activeStep = steps.find((step) => step.stepIndex === activeTourStepIndex);
+        if (activeStep) return activeStep.nodeId;
+      }
+      return null;
+    })();
+    if (isTourActive && tourPulseRef.current.activeStepIndex !== activeTourStepIndex) {
+      tourPulseRef.current = { activeStepIndex: activeTourStepIndex, startedAt: Date.now() };
+    }
+
     const isAttackSurfaceActive = Boolean(attackSurface?.isActive);
     const asSourceIds   = attackSurface?.sourceIds   || new Set();
     const asSinkIds     = attackSurface?.sinkIds     || new Set();
@@ -220,7 +241,38 @@ export function useGraphSimulation({
     const asPathEdgeIds = attackSurface?.pathEdgeIds || new Set();
     const hasPathHighlight = asPathNodeIds.size > 0;
 
+    const tourOverlayEdges = [];
+    for (let index = 0; index < tourOrderedStepNodeIds.length - 1; index += 1) {
+      const source = localNodes.find((node) => node.graphId === tourOrderedStepNodeIds[index]);
+      const target = localNodes.find((node) => node.graphId === tourOrderedStepNodeIds[index + 1]);
+      if (!source || !target || source.graphId === target.graphId) continue;
+      tourOverlayEdges.push({
+        id: `tour-${index}-${source.graphId}->${target.graphId}`,
+        source,
+        target,
+      });
+    }
+
+    const getTourStepBadge = (nodeId) => {
+      const steps = tourStepsByNodeId.get(nodeId);
+      if (!steps?.length) return null;
+      const activeStep = steps.find((step) => step.stepIndex === activeTourStepIndex);
+      const step = activeStep || steps[0];
+      const stepOrder = Number.isFinite(step.stepOrder) ? step.stepOrder : step.step_order;
+      return Number.isFinite(stepOrder) ? stepOrder : step.stepIndex + 1;
+    };
+
+    const getTourNodeRadius = (node) => {
+      if (!isTourActive || !tourStepNodeIds.has(node.graphId)) return node.radius;
+      return node.radius + (node.graphId === activeTourNodeId ? 4 : 2);
+    };
+
+    const isTourPulseActive = () => isTourActive && Date.now() - tourPulseRef.current.startedAt < 1000;
+
     const getNodeOpacity = (nodeId) => {
+      if (isTourActive) {
+        return tourStepNodeIds.has(nodeId) ? 1 : 0.12;
+      }
       if (isCoverageActive) {
         const node = localNodes.find((n) => n.graphId === nodeId);
         return node?.is_test_file ? 0.3 : 1;
@@ -238,6 +290,7 @@ export function useGraphSimulation({
     };
 
     const getEdgeOpacity = (edge) => {
+      if (isTourActive) return 0.08;
       if (isAttackSurfaceActive) {
         if (hasPathHighlight) {
           return asPathEdgeIds.has(edge.id) ? 0.9 : 0.06;
@@ -253,6 +306,7 @@ export function useGraphSimulation({
     };
 
     const getNodeFill = (node) => {
+      if (isTourActive && tourStepNodeIds.has(node.graphId)) return node.fill;
       if (isCoverageActive) {
         if (node.is_test_file) return '#9ca3af';
         if (node.coverage_percentage != null) {
@@ -281,6 +335,7 @@ export function useGraphSimulation({
     };
 
     const getNodeStroke = (node) => {
+      if (isTourActive && tourStepNodeIds.has(node.graphId)) return TOUR_VIOLET;
       if (isAttackSurfaceActive) {
         const id = node.graphId;
         if (asBothIds.has(id))     return '#fde047'; // yellow-300
@@ -299,6 +354,7 @@ export function useGraphSimulation({
     };
 
     const getNodeStrokeWidth = (node) => {
+      if (isTourActive && tourStepNodeIds.has(node.graphId)) return node.graphId === activeTourNodeId ? 4 : 3;
       if (isAttackSurfaceActive) {
         const id = node.graphId;
         if (asSourceIds.has(id) || asSinkIds.has(id) || asBothIds.has(id)) return 3.5;
@@ -376,6 +432,30 @@ export function useGraphSimulation({
           context.setLineDash([]);
         });
 
+        if (isTourActive) {
+          tourOverlayEdges.forEach((link) => {
+            const dx = link.target.x - link.source.x;
+            const dy = link.target.y - link.source.y;
+            const angle = Math.atan2(dy, dx);
+            const startRadius = getTourNodeRadius(link.source);
+            const targetRadius = getTourNodeRadius(link.target);
+            const startX = link.source.x + (startRadius * Math.cos(angle));
+            const startY = link.source.y + (startRadius * Math.sin(angle));
+            const endX = link.target.x - ((targetRadius + 2) * Math.cos(angle));
+            const endY = link.target.y - ((targetRadius + 2) * Math.sin(angle));
+
+            context.strokeStyle = TOUR_VIOLET_RGBA;
+            context.lineWidth = 3;
+            context.setLineDash([6, 4]);
+            context.lineDashOffset = -dashOffset;
+            context.beginPath();
+            context.moveTo(startX, startY);
+            context.lineTo(endX, endY);
+            context.stroke();
+            context.setLineDash([]);
+          });
+        }
+
         localNodes.forEach((node) => {
           context.globalAlpha = getNodeOpacity(node.graphId);
 
@@ -410,31 +490,63 @@ export function useGraphSimulation({
             context.shadowBlur = glowIntensity;
             context.fillStyle = nodeFill;
             context.beginPath();
-            context.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
+            context.arc(node.x, node.y, getTourNodeRadius(node), 0, Math.PI * 2);
             context.fill();
             context.shadowBlur = 0;
 
             context.strokeStyle = getNodeStroke(node);
             context.lineWidth = getNodeStrokeWidth(node);
             context.stroke();
+
+            if (isTourActive && node.graphId === activeTourNodeId && isTourPulseActive()) {
+              const pulseAge = Math.min(1, (Date.now() - tourPulseRef.current.startedAt) / 1000);
+              context.globalAlpha = 0.55 * (1 - pulseAge);
+              context.strokeStyle = TOUR_VIOLET;
+              context.lineWidth = 2;
+              context.beginPath();
+              context.arc(node.x, node.y, getTourNodeRadius(node) + 8 + (pulseAge * 10), 0, Math.PI * 2);
+              context.stroke();
+            }
           }
         });
+
+        if (isTourActive) {
+          localNodes.forEach((node) => {
+            const badgeNumber = getTourStepBadge(node.graphId);
+            if (badgeNumber == null) return;
+            const nodeOpacity = getNodeOpacity(node.graphId);
+            context.globalAlpha = nodeOpacity;
+            const y = node.y - getTourNodeRadius(node) - 10;
+            context.fillStyle = '#ffffff';
+            context.beginPath();
+            context.arc(node.x, y, 8, 0, Math.PI * 2);
+            context.fill();
+            context.fillStyle = '#111827';
+            context.font = 'bold 10px ui-sans-serif, system-ui, sans-serif';
+            context.textAlign = 'center';
+            context.textBaseline = 'middle';
+            context.fillText(String(badgeNumber), node.x, y + 0.5);
+          });
+        }
 
         context.globalAlpha = 1;
         context.restore();
       };
 
-      const hasCanvasFlowEdges = () => localLinks.some((link) => {
-        const isPathEdge = isAttackSurfaceActive && asPathEdgeIds.has(link.id);
-        return highlightedEdgeIds.has(link.id) || isImpactActive || isPathEdge;
-      });
+      const hasCanvasFlowEdges = () => {
+        if (isTourActive && tourOverlayEdges.length > 0) return true;
+        return localLinks.some((link) => {
+          const isPathEdge = isAttackSurfaceActive && asPathEdgeIds.has(link.id);
+          return highlightedEdgeIds.has(link.id) || isImpactActive || isPathEdge;
+        });
+      };
 
       // Self-cancelling loop: only runs while dash-flow edges are actually visible.
       const hasFlowEdges = hasCanvasFlowEdges();
       const animateDraw = () => {
         if (animationFrame !== null) return;
         const animate = () => {
-          if (!hasCanvasFlowEdges()) {
+          if (!hasCanvasFlowEdges() && !isTourPulseActive()) {
             animationFrame = null;
             draw();
             return;
@@ -463,10 +575,14 @@ export function useGraphSimulation({
       };
 
       if (focusNode) {
+        const currentTransform = canvasTransformRef.current || d3.zoomIdentity;
+        const scale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, currentTransform.k || 1));
         const nextTransform = d3.zoomIdentity
-          .translate((width / 2) - focusNode.x, (height / 2) - focusNode.y)
-          .scale(1);
-        canvasSelection.call(zoomBehavior.transform, nextTransform);
+          .translate(width / 2, height / 2)
+          .scale(scale)
+          .translate(-focusNode.x, -focusNode.y);
+        const target = isTourActive ? canvasSelection.transition().duration(600) : canvasSelection;
+        target.call(zoomBehavior.transform, nextTransform);
       } else if (!canvasTransformRef.current || canvasTransformRef.current === d3.zoomIdentity) {
         const xs = localNodes.map((n) => n.x);
         const ys = localNodes.map((n) => n.y);
@@ -487,7 +603,7 @@ export function useGraphSimulation({
         canvasSelection.call(zoomBehavior.transform, canvasTransformRef.current);
       }
 
-      if (hasFlowEdges) {
+      if (hasFlowEdges || isTourPulseActive()) {
         animateDraw();
       } else {
         draw();
@@ -605,6 +721,19 @@ export function useGraphSimulation({
       svgAnimationFrame = window.requestAnimationFrame(animate);
     };
 
+    if (isTourActive) {
+      edgeLayer
+        .selectAll('path.graph-tour-edge')
+        .data(tourOverlayEdges, (edge) => edge.id)
+        .join('path')
+        .attr('class', 'graph-tour-edge graph-edge-flow')
+        .attr('d', (edge) => `M${edge.source.x},${edge.source.y}L${edge.target.x},${edge.target.y}`)
+        .attr('fill', 'none')
+        .attr('stroke', TOUR_VIOLET)
+        .attr('stroke-opacity', 0.95)
+        .attr('stroke-width', 3);
+    }
+
     if (svgHasFlowEdges()) {
       animateSvgFlow();
     }
@@ -619,7 +748,7 @@ export function useGraphSimulation({
       .style('cursor', 'pointer');
 
     nodeGroups.append('circle')
-      .attr('r', (node) => node.radius)
+      .attr('r', (node) => getTourNodeRadius(node))
       .attr('fill', (node) => {
         if (node.isCluster) {
           return getNodeFill(node);
@@ -634,6 +763,46 @@ export function useGraphSimulation({
       .attr('stroke-width', (node) => (node.isCluster ? 2 : getNodeStrokeWidth(node)))
       .attr('stroke-dasharray', (node) => (node.isCluster ? '5,3' : 'none'))
       .attr('filter', (node) => (node.isCluster ? 'none' : 'url(#node-glow)'));
+
+    if (isTourActive && activeTourNodeId) {
+      nodeGroups
+        .filter((node) => node.graphId === activeTourNodeId)
+        .append('circle')
+        .attr('class', 'graph-tour-pulse')
+        .attr('r', (node) => getTourNodeRadius(node) + 8)
+        .attr('fill', 'none')
+        .attr('stroke', TOUR_VIOLET)
+        .attr('stroke-width', 2)
+        .attr('stroke-opacity', 0.55)
+        .transition()
+        .duration(1000)
+        .attr('r', (node) => getTourNodeRadius(node) + 18)
+        .attr('stroke-opacity', 0);
+    }
+
+    if (isTourActive) {
+      const badgeGroups = nodeGroups
+        .filter((node) => getTourStepBadge(node.graphId) != null)
+        .append('g')
+        .attr('class', 'graph-tour-badge')
+        .attr('transform', (node) => `translate(0, ${-getTourNodeRadius(node) - 10})`)
+        .attr('pointer-events', 'none');
+
+      badgeGroups.append('circle')
+        .attr('r', 8)
+        .attr('fill', '#ffffff');
+
+      badgeGroups.append('text')
+        .text((node) => getTourStepBadge(node.graphId))
+        .attr('x', 0)
+        .attr('y', 0.5)
+        .attr('text-anchor', 'middle')
+        .attr('dominant-baseline', 'central')
+        .attr('fill', '#111827')
+        .attr('font-size', '10px')
+        .attr('font-weight', '700')
+        .attr('font-family', 'ui-sans-serif, system-ui, sans-serif');
+    }
 
     nodeGroups.filter((node) => node.isCluster)
       .append('text')
@@ -708,10 +877,14 @@ export function useGraphSimulation({
     };
 
     if (focusNode) {
+      const currentTransform = d3.zoomTransform(svg.node()) || d3.zoomIdentity;
+      const scale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, currentTransform.k || 1));
       const nextTransform = d3.zoomIdentity
-        .translate((width / 2) - focusNode.x, (height / 2) - focusNode.y)
-        .scale(1);
-      svg.call(zoomBehavior.transform, nextTransform);
+        .translate(width / 2, height / 2)
+        .scale(scale)
+        .translate(-focusNode.x, -focusNode.y);
+      const target = isTourActive ? svg.transition().duration(600) : svg;
+      target.call(zoomBehavior.transform, nextTransform);
     } else {
       const xs = localNodes.map((n) => n.x);
       const ys = localNodes.map((n) => n.y);
@@ -750,6 +923,7 @@ export function useGraphSimulation({
     selection,
     impactAnalysis,
     attackSurface,
+    tour,
     hotspotMode,
     coverageMode,
     focusNodeId,

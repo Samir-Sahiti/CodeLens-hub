@@ -118,10 +118,13 @@ describe('ToursPanel', () => {
     vi.clearAllMocks();
   });
 
-  it('adds Tours to the repo sidebar between Search and Code Review', () => {
+  it('adds Tours to the repo sidebar between Search and Code Review', async () => {
     globalThis.fetch = vi.fn(async () => jsonResponse({ used: 0, limit: 1000 }));
     render(
-      <MemoryRouter initialEntries={['/repo/repo-1?tab=tours']}>
+      <MemoryRouter
+        initialEntries={['/repo/repo-1?tab=tours']}
+        future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
+      >
         <Routes>
           <Route path="/repo/:repoId" element={<Layout />}>
             <Route index element={<div />} />
@@ -130,6 +133,7 @@ describe('ToursPanel', () => {
       </MemoryRouter>
     );
 
+    await screen.findByText('Tokens today');
     const nav = screen.getByRole('navigation');
     const labels = within(nav).getAllByRole('link').map((link) => link.textContent);
     expect(labels.indexOf('Search')).toBeLessThan(labels.indexOf('Tours'));

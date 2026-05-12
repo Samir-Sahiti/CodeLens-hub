@@ -185,8 +185,8 @@ describe('TourViewer', () => {
     expect(onStepChange).toHaveBeenCalledWith(1);
   });
 
-  it('uses non-modal responsive right-panel and bottom-sheet classes', () => {
-    renderViewer();
+  it('uses non-modal responsive right-panel and bottom-sheet classes', async () => {
+    const { container } = renderViewer();
     const viewer = screen.getByTestId('tour-viewer');
 
     expect(viewer.className).toContain('bottom-0');
@@ -195,5 +195,6 @@ describe('TourViewer', () => {
     expect(viewer.className).toContain('lg:top-0');
     expect(viewer.className).toContain('lg:max-w-2xl');
     expect(viewer.className).not.toContain('backdrop');
+    await waitFor(() => expect(container.textContent).toContain('line-two'));
   });
 });

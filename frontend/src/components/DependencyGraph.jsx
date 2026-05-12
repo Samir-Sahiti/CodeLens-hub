@@ -562,10 +562,15 @@ export default function DependencyGraph({
   issues,
   selectedNodeId,
   impactAnalysis,
+  tourMode,
   churnData = [],
   onNodeSelect,
   onAnalyseImpact,
   onClearImpactAnalysis,
+  onTourStepSelect,
+  onCloseTourForGraphMode,
+  onAttackSurfaceModeChange,
+  restoreAttackSurfaceRequest,
   onChatWithFile,
   onAuditFile,
   repoName,
@@ -699,8 +704,57 @@ export default function DependencyGraph({
     });
   }, [edges, graphNodeByPath]);
 
+  const tourGraphData = useMemo(() => {
+    if (!tourMode?.isActive) {
+      return { isActive: false, activeStepIndex: 0, stepNodeIds: new Set(), stepsByNodeId: new Map(), orderedStepNodeIds: [] };
+    }
+
+    const stepsByNodeId = new Map();
+    const stepNodeIds = new Set();
+    const orderedStepNodeIds = [];
+
+    (tourMode.steps || []).forEach((step, fallbackIndex) => {
+      const filePath = step.filePath || step.file_path;
+      const graphNode = graphNodeByPath.get(filePath);
+      if (!graphNode) return;
+
+      const stepIndex = Number.isFinite(step.stepIndex) ? step.stepIndex : fallbackIndex;
+      const normalizedStep = {
+        ...step,
+        stepIndex,
+        stepOrder: step.stepOrder ?? step.step_order,
+        filePath,
+        nodeId: graphNode.graphId,
+      };
+
+      stepNodeIds.add(graphNode.graphId);
+      orderedStepNodeIds.push(graphNode.graphId);
+
+      const existingSteps = stepsByNodeId.get(graphNode.graphId) || [];
+      stepsByNodeId.set(graphNode.graphId, [...existingSteps, normalizedStep].sort((a, b) => a.stepIndex - b.stepIndex));
+    });
+
+    return {
+      isActive: true,
+      activeStepIndex: tourMode.activeStepIndex || 0,
+      stepNodeIds,
+      stepsByNodeId,
+      orderedStepNodeIds,
+    };
+  }, [graphNodeByPath, tourMode?.activeStepIndex, tourMode?.isActive, tourMode?.steps]);
+
+  const activeTourNodeId = useMemo(() => {
+    if (!tourGraphData.isActive) return null;
+    for (const steps of tourGraphData.stepsByNodeId.values()) {
+      if (steps.some((step) => step.stepIndex === tourGraphData.activeStepIndex)) {
+        return steps.find((step) => step.stepIndex === tourGraphData.activeStepIndex)?.nodeId || null;
+      }
+    }
+    return null;
+  }, [tourGraphData]);
+
   // Compute clustered data when clustering is enabled and there are many nodes
-  const shouldCluster = clusteringEnabled && graphNodes.length > 300 && !coverageGraphMode;
+  const shouldCluster = clusteringEnabled && graphNodes.length > 300 && !coverageGraphMode && !tourGraphData.isActive;
 
   const clusteredData = useMemo(() => {
     if (!shouldCluster) return null;
@@ -839,6 +893,24 @@ export default function DependencyGraph({
     return { isActive: true, sourceIds: asSourceIds, sinkIds: asSinkIds, bothIds: asBothIds, pathNodeIds, pathEdgeIds };
   }, [attackSurfaceMode, asSourceIds, asSinkIds, asBothIds, attackSurfaceSource, currentSourcePaths]);
 
+  useEffect(() => {
+    onAttackSurfaceModeChange?.({ isActive: attackSurfaceMode, sourceId: attackSurfaceSource });
+  }, [attackSurfaceMode, attackSurfaceSource, onAttackSurfaceModeChange]);
+
+  useEffect(() => {
+    if (!tourGraphData.isActive) return;
+    setAttackSurfaceMode(false);
+    setAttackSurfaceSource(null);
+  }, [tourGraphData.isActive]);
+
+  useEffect(() => {
+    if (!restoreAttackSurfaceRequest) return;
+    setAttackSurfaceMode(true);
+    setAttackSurfaceSource(restoreAttackSurfaceRequest.sourceId || null);
+    setClusteringEnabled(false);
+    setExpandedClusters(new Set());
+  }, [restoreAttackSurfaceRequest]);
+
   // US-050: hotspot scores mapped to graphIds
   const hotspotModeData = useMemo(() => {
     if (!hotspotGraphMode || churnData.length === 0) return null;
@@ -903,8 +975,15 @@ export default function DependencyGraph({
 
   const handleNodeClick = useCallback((node) => {
     if (node.isCluster && handleClusterClick(node)) return;
+    if (tourGraphData.isActive && tourGraphData.stepsByNodeId.has(node.graphId)) {
+      const earliestStep = tourGraphData.stepsByNodeId.get(node.graphId)?.[0];
+      if (earliestStep) {
+        onTourStepSelect?.(earliestStep.stepIndex);
+        return;
+      }
+    }
     onNodeSelect(node.graphId);
-  }, [handleClusterClick, onNodeSelect]);
+  }, [handleClusterClick, onNodeSelect, onTourStepSelect, tourGraphData]);
 
   const handleNodeContextMenu = useCallback((node, event) => {
     if (node.isCluster) return;
@@ -939,9 +1018,10 @@ export default function DependencyGraph({
     selection: effectiveSelection,
     impactAnalysis,
     attackSurface: attackSurfaceData,
+    tour: tourGraphData,
     hotspotMode: hotspotModeData,
     coverageMode: coverageModeData,
-    focusNodeId: searchCurrentNode?.graphId || selection.primaryId,
+    focusNodeId: activeTourNodeId || searchCurrentNode?.graphId || selection.primaryId,
     onNodeClick: handleNodeClick,
     onNodeContextMenu: handleNodeContextMenu,
     onNodeDoubleClick: handleNodeDoubleClick,
@@ -1072,6 +1152,9 @@ export default function DependencyGraph({
             </button>
             <button
               onClick={() => {
+                if (tourGraphData.isActive) {
+                  onCloseTourForGraphMode?.('attack surface');
+                }
                 const next = !attackSurfaceMode;
                 setAttackSurfaceMode(next);
                 setAttackSurfaceSource(null);
@@ -1228,7 +1311,7 @@ export default function DependencyGraph({
 
       {impactAnalysis ? (
         <ImpactAnalysisPanel impactAnalysis={impactAnalysis} onClearImpactAnalysis={onClearImpactAnalysis} />
-      ) : attackSurfaceMode ? (
+      ) : attackSurfaceMode && !tourGraphData.isActive ? (
         <AttackSurfacePanel
           graphNodes={graphNodes}
           sourceIds={asSourceIds}
