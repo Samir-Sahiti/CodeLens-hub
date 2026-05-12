@@ -758,5 +758,89 @@ $$;
 GRANT EXECUTE ON FUNCTION clear_repo_derived_data(UUID) TO service_role;
 
 -- =============================================================================
+-- TOURS (US-054)
+-- Persists guided code walkthroughs and their ordered steps.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS tours (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  repo_id           UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+  created_by        UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  title             TEXT NOT NULL,
+  description       TEXT,
+  original_query    TEXT,
+  is_auto_generated BOOLEAN NOT NULL DEFAULT false,
+  is_team_shared    BOOLEAN NOT NULL DEFAULT false,
+  forked_from       UUID REFERENCES tours(id) ON DELETE SET NULL,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS tours_repo_id_shared_idx ON tours (repo_id, is_team_shared);
+
+ALTER TABLE tours ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can read own or team-shared tours" ON tours;
+CREATE POLICY "Users can read own or team-shared tours" ON tours FOR SELECT
+  USING (
+    created_by = auth.uid()
+    OR (
+      is_team_shared = true
+      AND repo_id IN (
+        SELECT repo_id FROM team_repositories
+        WHERE team_id IN (SELECT team_id FROM team_members WHERE user_id = auth.uid())
+      )
+    )
+  );
+
+DROP POLICY IF EXISTS "Users can manage own tours" ON tours;
+CREATE POLICY "Users can manage own tours" ON tours
+  FOR ALL USING (created_by = auth.uid()) WITH CHECK (created_by = auth.uid());
+
+-- tour_steps: ordered steps within a tour
+
+CREATE TABLE IF NOT EXISTS tour_steps (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tour_id     UUID NOT NULL REFERENCES tours(id) ON DELETE CASCADE,
+  step_order  INT NOT NULL,
+  file_path   TEXT NOT NULL,
+  start_line  INT,
+  end_line    INT,
+  explanation TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (tour_id, step_order)
+);
+
+CREATE INDEX IF NOT EXISTS tour_steps_tour_id_order_idx ON tour_steps (tour_id, step_order);
+
+ALTER TABLE tour_steps ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can access steps of accessible tours" ON tour_steps;
+CREATE POLICY "Users can access steps of accessible tours" ON tour_steps FOR ALL
+  USING (
+    tour_id IN (
+      SELECT id FROM tours
+      WHERE created_by = auth.uid()
+        OR (
+          is_team_shared = true
+          AND repo_id IN (
+            SELECT repo_id FROM team_repositories
+            WHERE team_id IN (SELECT team_id FROM team_members WHERE user_id = auth.uid())
+          )
+        )
+    )
+  );
+
+-- updated_at trigger for tours
+
+CREATE OR REPLACE FUNCTION set_updated_at() RETURNS TRIGGER AS $$
+BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS tours_set_updated_at ON tours;
+CREATE TRIGGER tours_set_updated_at BEFORE UPDATE ON tours
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- =============================================================================
 -- END OF SCHEMA
 -- =============================================================================
