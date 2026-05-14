@@ -135,11 +135,12 @@ export default function TourViewer({
       return;
     }
 
-    let cancelled = false;
+    const controller = new AbortController();
     setFileState({ status: 'loading', content: '', language: null, error: null });
 
     fetch(apiUrl(`/api/repos/${repoId}/file?path=${encodeURIComponent(step.file_path)}`), {
       headers: { Authorization: `Bearer ${session.access_token}` },
+      signal: controller.signal,
     })
       .then(async (res) => {
         if (res.status === 404) {
@@ -152,7 +153,6 @@ export default function TourViewer({
         return res.json();
       })
       .then((data) => {
-        if (cancelled) return;
         if (data.missing) {
           setFileState({ status: 'missing', content: '', language: null, error: MISSING_FILE_MESSAGE });
           return;
@@ -162,13 +162,11 @@ export default function TourViewer({
         setFileState({ status: 'ready', content: next.content, language: next.language, error: null });
       })
       .catch((err) => {
-        if (cancelled) return;
+        if (err?.name === 'AbortError') return;
         setFileState({ status: 'error', content: '', language: null, error: err.message || 'Failed to fetch file content' });
       });
 
-    return () => {
-      cancelled = true;
-    };
+    return () => controller.abort();
   }, [open, repoId, session?.access_token, step?.file_path]);
 
   useEffect(() => {

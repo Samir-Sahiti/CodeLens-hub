@@ -815,8 +815,10 @@ CREATE INDEX IF NOT EXISTS tour_steps_tour_id_order_idx ON tour_steps (tour_id, 
 
 ALTER TABLE tour_steps ENABLE ROW LEVEL SECURITY;
 
+-- Read steps of any tour the user can see (own + team-shared)
 DROP POLICY IF EXISTS "Users can access steps of accessible tours" ON tour_steps;
-CREATE POLICY "Users can access steps of accessible tours" ON tour_steps FOR ALL
+DROP POLICY IF EXISTS "Users can read steps of accessible tours" ON tour_steps;
+CREATE POLICY "Users can read steps of accessible tours" ON tour_steps FOR SELECT
   USING (
     tour_id IN (
       SELECT id FROM tours
@@ -830,6 +832,13 @@ CREATE POLICY "Users can access steps of accessible tours" ON tour_steps FOR ALL
         )
     )
   );
+
+-- Write (INSERT / UPDATE / DELETE) steps only for tours the user owns
+DROP POLICY IF EXISTS "Users can write steps of own tours" ON tour_steps;
+CREATE POLICY "Users can write steps of own tours" ON tour_steps
+  FOR ALL
+  USING  (tour_id IN (SELECT id FROM tours WHERE created_by = auth.uid()))
+  WITH CHECK (tour_id IN (SELECT id FROM tours WHERE created_by = auth.uid()));
 
 -- updated_at trigger for tours
 

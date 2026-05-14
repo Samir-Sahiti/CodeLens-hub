@@ -5,7 +5,7 @@ const { scanFileForSecrets } = require('./secretScanner');
 const { scanFileForInsecurePatterns } = require('./sastEngine'); // US-046
 const { scanFileForMissingAuth } = require('./authCoverageScanner'); // US-049
 const { classifyFile } = require('./attackSurfaceClassifier'); // US-047
-const { fetchRepoChurn } = require('./churnService'); // US-050
+const { fetchRepoChurn, applyIncrementalChurn, readChurnFromDb } = require('./churnService'); // US-050
 const { detectDuplicateCandidates } = require('./duplicationScanner'); // US-052
 const { isTestFilePath, parseCoverageOverrides } = require('./testCoverageService'); // US-053
 const { recordUsage } = require('./usageTracker'); // US-042
@@ -121,7 +121,7 @@ async function fetchLocalFiles(dir, baseDir = dir, results = []) {
  * @param {string} [params.extractPath] - Path to extracted local zip
  * @param {string} params.source - 'github' or 'upload'
  */
-const indexRepository = async ({ repoId, owner, name, token, extractPath, source }) => {
+const indexRepository = async ({ repoId, owner, name, token, extractPath, source, incrementalChurnCommits }) => {
   let zipTempDir = null;
   try {
     console.log(`[indexer] Starting indexing for repoId: ${repoId} (source: ${source})`);
@@ -264,7 +264,11 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     await supabaseAdmin.from('analysis_issues').delete().eq('repo_id', repoId);
     await supabaseAdmin.from('dependency_manifests').delete().eq('repo_id', repoId);
     await supabaseAdmin.from('graph_edges').delete().eq('repo_id', repoId);
-    await supabaseAdmin.from('file_churn').delete().eq('repo_id', repoId); // US-050
+    // US-050: full-recompute path wipes churn; incremental webhook path preserves
+    // existing rows so applyIncrementalChurn can add deltas onto them.
+    if (!Array.isArray(incrementalChurnCommits) || incrementalChurnCommits.length === 0) {
+      await supabaseAdmin.from('file_churn').delete().eq('repo_id', repoId);
+    }
     await supabaseAdmin.from('duplication_candidates').delete().eq('repo_id', repoId); // US-052
     await supabaseAdmin
       .from('graph_nodes')
@@ -829,7 +833,18 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     if (source === 'github' && token) {
       try {
         console.time(`[indexer] Phase Churn (${repoId})`);
-        const churnMap = await fetchRepoChurn(owner, name, token, repoId);
+
+        const isIncremental = Array.isArray(incrementalChurnCommits) && incrementalChurnCommits.length > 0;
+        if (isIncremental) {
+          await applyIncrementalChurn(owner, name, token, repoId, incrementalChurnCommits);
+        } else {
+          await fetchRepoChurn(owner, name, token, repoId);
+        }
+
+        // Read persisted churn back so refactoring_candidate issues are recomputed
+        // from the canonical rows on both the full-recompute and the incremental
+        // path. analysis_issues is wiped earlier in the pipeline.
+        const churnMap = await readChurnFromDb(repoId);
 
         if (churnMap.size > 0) {
           const complexityMap = new Map(finalNodes.map(n => [n.file_path, n.complexity_score || 0]));

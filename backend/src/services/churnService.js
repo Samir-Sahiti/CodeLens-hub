@@ -157,4 +157,127 @@ async function fetchRepoChurn(owner, repoName, token, repoId) {
   return churnMap;
 }
 
-module.exports = { fetchRepoChurn };
+/**
+ * Incremental update of file_churn for a small set of new commit SHAs
+ * (typically from a GitHub push webhook payload). Avoids the full 12-month
+ * recompute when only a handful of commits have landed since last index.
+ *
+ * Approximation: `unique_authors` is NOT updated incrementally because the
+ * existing row stores only the count, not the underlying author set, so a
+ * union cannot be computed without a schema change. The count converges on
+ * the next full re-index. `commit_count`, `lines_changed`, and `last_modified`
+ * are updated accurately.
+ */
+async function applyIncrementalChurn(owner, repoName, token, repoId, commitShas) {
+  if (!Array.isArray(commitShas) || commitShas.length === 0) return;
+  console.time(`[churn] Incremental (${repoId})`);
+
+  const limit = pLimit(DETAIL_CONCURRENCY);
+  const details = await Promise.allSettled(
+    commitShas.map(sha => limit(async () => {
+      const url = `${GITHUB_API}/repos/${owner}/${repoName}/commits/${sha}`;
+      return githubGet(url, token);
+    }))
+  );
+
+  // Build per-file delta from fetched commit details
+  const deltaMap = new Map(); // filePath → { countDelta, linesDelta, lastModified }
+  for (const result of details) {
+    if (result.status !== 'fulfilled') continue;
+    const commit = result.value;
+    const dateStr = commit.commit?.author?.date || commit.commit?.committer?.date;
+    const ts = dateStr ? new Date(dateStr) : null;
+    for (const file of commit.files || []) {
+      const fp = file.filename;
+      if (!fp) continue;
+      if (!deltaMap.has(fp)) {
+        deltaMap.set(fp, { countDelta: 0, linesDelta: 0, lastModified: null });
+      }
+      const entry = deltaMap.get(fp);
+      entry.countDelta += 1;
+      entry.linesDelta += (file.additions || 0) + (file.deletions || 0);
+      if (ts && (!entry.lastModified || ts > entry.lastModified)) {
+        entry.lastModified = ts;
+      }
+    }
+  }
+
+  if (deltaMap.size === 0) {
+    console.timeEnd(`[churn] Incremental (${repoId})`);
+    return;
+  }
+
+  // Read existing churn rows for just the touched files
+  const touchedPaths = [...deltaMap.keys()];
+  const { data: existingRows, error: readErr } = await supabaseAdmin
+    .from('file_churn')
+    .select('file_path, commit_count, unique_authors, lines_changed, last_modified')
+    .eq('repo_id', repoId)
+    .in('file_path', touchedPaths);
+  if (readErr) {
+    console.warn(`[churn] Incremental read failed: ${readErr.message}`);
+    console.timeEnd(`[churn] Incremental (${repoId})`);
+    return;
+  }
+  const existingByPath = new Map((existingRows || []).map(r => [r.file_path, r]));
+
+  // Compose upsert rows
+  const rows = [];
+  for (const [filePath, delta] of deltaMap.entries()) {
+    const existing = existingByPath.get(filePath);
+    const existingTs = existing?.last_modified ? new Date(existing.last_modified) : null;
+    const nextTs = delta.lastModified && (!existingTs || delta.lastModified > existingTs)
+      ? delta.lastModified
+      : existingTs;
+    rows.push({
+      repo_id: repoId,
+      file_path: filePath,
+      commit_count:  (existing?.commit_count  || 0) + delta.countDelta,
+      lines_changed: (existing?.lines_changed || 0) + delta.linesDelta,
+      unique_authors: existing?.unique_authors || 0,
+      last_modified: nextTs ? nextTs.toISOString() : null,
+    });
+  }
+
+  const { error: upErr } = await supabaseAdmin
+    .from('file_churn')
+    .upsert(rows, { onConflict: 'repo_id,file_path', ignoreDuplicates: false });
+  if (upErr) console.warn(`[churn] Incremental upsert failed: ${upErr.message}`);
+  else console.log(`[churn] Incremental update touched ${rows.length} files for repo ${repoId}`);
+
+  console.timeEnd(`[churn] Incremental (${repoId})`);
+}
+
+/**
+ * Hydrate file_churn into the same Map<filePath, entry> shape that
+ * fetchRepoChurn returns, so the indexer's refactoring_candidate scoring can
+ * run identically after either a full or an incremental update.
+ *
+ * `authors` is reconstructed as a placeholder Set sized to match the stored
+ * unique_authors count — only `.size` is read downstream.
+ */
+async function readChurnFromDb(repoId) {
+  const { data, error } = await supabaseAdmin
+    .from('file_churn')
+    .select('file_path, commit_count, unique_authors, lines_changed, last_modified')
+    .eq('repo_id', repoId);
+  if (error) {
+    console.warn(`[churn] readChurnFromDb failed: ${error.message}`);
+    return new Map();
+  }
+  const map = new Map();
+  for (const row of data || []) {
+    const authorCount = row.unique_authors || 0;
+    const authors = new Set();
+    for (let i = 0; i < authorCount; i++) authors.add(`__author_${i}__`);
+    map.set(row.file_path, {
+      count: row.commit_count || 0,
+      authors,
+      lines: row.lines_changed || 0,
+      lastModified: row.last_modified ? new Date(row.last_modified) : null,
+    });
+  }
+  return map;
+}
+
+module.exports = { fetchRepoChurn, applyIncrementalChurn, readChurnFromDb };
