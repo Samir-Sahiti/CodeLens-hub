@@ -16,12 +16,19 @@ const VALID_EXTENSIONS = new Set(['.js', '.jsx', '.ts', '.tsx', '.py', '.cs']);
  */
 const { indexRepository } = require('./indexerService');
 
-const startGitHubIndexing = async (repoId, githubToken, repoFullName) => {
+const startGitHubIndexing = async (repoId, githubToken, repoFullName, options = {}) => {
   const [owner, name] = repoFullName.split('/');
   // The service handles marking it ready or failed, and the full try/catch pipeline.
   // We wrap it again here to ensure unhandled rejections never reach the main process.
   try {
-    await indexRepository({ repoId, owner, name, token: githubToken, source: 'github' });
+    await indexRepository({
+      repoId,
+      owner,
+      name,
+      token: githubToken,
+      source: 'github',
+      incrementalChurnCommits: options.incrementalChurnCommits,
+    });
   } catch (err) {
     console.error(`[Indexer] Top-level fallback error for ${repoFullName}:`, err.message);
   }

@@ -123,11 +123,18 @@ const handleGitHubPush = async (req, res) => {
     return res.status(200).json({ ok: true, skipped: 'push not to default branch' });
   }
 
-  // Fire-and-forget re-index (US-028)
-  console.log(`[webhook] Triggering re-index for repo ${repo.id} (${fullName}) on push to ${ref}`);
-  
+  // Fire-and-forget re-index (US-028). For US-050, hand the payload's commit
+  // SHAs to the indexer so the churn phase updates only changed files instead
+  // of re-fetching the full 12-month history.
+  const incrementalChurnCommits = Array.isArray(payload.commits)
+    ? payload.commits.map((c) => c?.id).filter(Boolean)
+    : [];
+
+  console.log(`[webhook] Triggering re-index for repo ${repo.id} (${fullName}) on push to ${ref}` +
+    (incrementalChurnCommits.length ? ` (incremental churn over ${incrementalChurnCommits.length} commits)` : ''));
+
   queue.add(async () => {
-    await indexer.startGitHubIndexing(repo.id, githubToken, repo.name);
+    await indexer.startGitHubIndexing(repo.id, githubToken, repo.name, { incrementalChurnCommits });
   });
 
   return res.status(200).send("OK");

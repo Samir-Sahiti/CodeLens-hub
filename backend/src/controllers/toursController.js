@@ -175,13 +175,30 @@ const generateTour = async (req, res) => {
     }
   }
 
+  // Batch-fetch first chunk for non-relevant step files (avoid N+1 inside the Claude loop)
+  const fallbackByPath = new Map();
+  const nonRelevantStepPaths = result.filter((p) => !relevantSet.has(p));
+  if (nonRelevantStepPaths.length > 0) {
+    const { data: fallbackRows } = await supabaseAdmin
+      .from('code_chunks')
+      .select('file_path, content, start_line, end_line')
+      .eq('repo_id', repoId)
+      .in('file_path', nonRelevantStepPaths)
+      .order('start_line', { ascending: true });
+    for (const row of fallbackRows || []) {
+      if (!fallbackByPath.has(row.file_path)) fallbackByPath.set(row.file_path, row);
+    }
+  }
+
   // 7. Generate Claude explanation for each step
+  // Track budget in-memory: snapshot once, then decrement from each Claude usage report.
+  // Avoids an api_usage range scan per step.
+  let budgetRemaining = MAX_DAILY_TOKENS - (await dailyTokensUsed(userId));
   const steps = [];
   for (let i = 0; i < result.length; i++) {
     const filePath = result[i];
 
-    // Per-step budget check
-    if ((await dailyTokensUsed(userId)) >= MAX_DAILY_TOKENS) {
+    if (budgetRemaining <= 0) {
       console.warn(`[tour] daily token budget exhausted at step ${i + 1}/${result.length}`);
       break;
     }
@@ -198,18 +215,11 @@ const generateTour = async (req, res) => {
       startLine = best.start_line;
       endLine   = best.end_line;
     } else {
-      // File reached via graph traversal but not in relevant set — fetch first chunk
-      const { data: fallbackChunks } = await supabaseAdmin
-        .from('code_chunks')
-        .select('content, start_line, end_line')
-        .eq('repo_id', repoId)
-        .eq('file_path', filePath)
-        .order('start_line', { ascending: true })
-        .limit(1);
-      if (fallbackChunks && fallbackChunks.length > 0) {
-        excerpt   = fallbackChunks[0].content;
-        startLine = fallbackChunks[0].start_line;
-        endLine   = fallbackChunks[0].end_line;
+      const fallback = fallbackByPath.get(filePath);
+      if (fallback) {
+        excerpt   = fallback.content;
+        startLine = fallback.start_line;
+        endLine   = fallback.end_line;
       }
     }
 
@@ -233,12 +243,15 @@ const generateTour = async (req, res) => {
         messages:  [{ role: 'user', content: userPrompt }],
       });
       explanation = response.content[0]?.type === 'text' ? response.content[0].text : '';
+      const inputTokens  = response.usage?.input_tokens  || 0;
+      const outputTokens = response.usage?.output_tokens || 0;
+      budgetRemaining -= inputTokens + outputTokens;
       await recordUsage({
         userId,
         endpoint:         'tour-generate',
         provider:         'anthropic',
-        promptTokens:     response.usage?.input_tokens  || 0,
-        completionTokens: response.usage?.output_tokens || 0,
+        promptTokens:     inputTokens,
+        completionTokens: outputTokens,
       });
     } catch (err) {
       console.error(`[tour] Claude call failed at step ${i + 1}:`, err.message);
@@ -249,6 +262,10 @@ const generateTour = async (req, res) => {
   }
 
   // 8. Optionally persist
+  if (steps.length === 0) {
+    return res.status(429).json({ error: 'Daily token budget exhausted' });
+  }
+
   if (save) {
     const title = query.length > 80 ? query.slice(0, 77) + '…' : query;
 
@@ -280,7 +297,11 @@ const generateTour = async (req, res) => {
 
     const { error: stepsErr } = await supabaseAdmin.from('tour_steps').insert(stepRows);
     if (stepsErr) {
+      // Compensating delete: the tour row is already committed, so undo it rather
+      // than leaving an empty tour visible in the library.
       console.error('[tour] Failed to insert tour steps:', stepsErr.message);
+      await supabaseAdmin.from('tours').delete().eq('id', tour.id);
+      return res.status(500).json({ error: 'Failed to save tour steps' });
     }
 
     return res.json({ tour, steps });
@@ -342,7 +363,7 @@ const listTours = async (req, res) => {
 
   const { data: tourRows, error: toursErr } = await supabaseAdmin
     .from('tours')
-    .select('id, repo_id, created_by, title, description, original_query, is_auto_generated, is_team_shared, created_at, updated_at')
+    .select('id, repo_id, created_by, title, description, original_query, is_auto_generated, is_team_shared, forked_from, created_at, updated_at')
     .eq('repo_id', repoId)
     .order('updated_at', { ascending: false });
 

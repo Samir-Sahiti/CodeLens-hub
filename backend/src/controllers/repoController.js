@@ -954,6 +954,19 @@ const getDiff = async (req, res) => {
         if (error) console.warn('[getDiff] Cache write failed:', error.message);
       });
 
+    // Opportunistic TTL cleanup for this repo. us051_arch_diff.sql documents a
+    // 7-day expiry but relies on a scheduled job; pruning on cache miss keeps
+    // the table bounded without requiring pg_cron to be enabled.
+    const cutoffIso = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    supabaseAdmin
+      .from('diff_cache')
+      .delete()
+      .eq('repo_id', repoId)
+      .lt('created_at', cutoffIso)
+      .then(({ error }) => {
+        if (error) console.warn('[getDiff] Cache TTL cleanup failed:', error.message);
+      });
+
     res.json(diff);
   } catch (err) {
     console.error('[getDiff] Error:', err);
