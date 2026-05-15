@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   backend:
     build:
@@ -16,7 +14,7 @@ services:
       - .env
     depends_on:
       - postgres
-    command: npm run dev
+    command: sh -c "npm install --no-audit --no-fund && npm run dev"
 
   frontend:
     build:
@@ -31,7 +29,7 @@ services:
       - NODE_ENV=development
     env_file:
       - .env
-    command: npm run dev -- --host 0.0.0.0 --port 3000
+    command: sh -c "npm install --no-audit --no-fund && npm run dev -- --host 0.0.0.0 --port 3000"
 
   postgres:
     image: postgres:15-alpine
