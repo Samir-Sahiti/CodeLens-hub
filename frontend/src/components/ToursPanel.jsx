@@ -4,7 +4,7 @@ import { apiUrl } from '../lib/api';
 import { formatDate } from '../lib/constants';
 import { useToast } from './Toast';
 import Modal from './ui/Modal';
-import { AlertTriangle, MoreVertical, Search, Star, Trash2 } from './ui/Icons';
+import { AlertTriangle, GitFork, MoreVertical, Pencil, Search, Star, Trash2 } from './ui/Icons';
 import { Banner, Button, EmptyState, IconButton, Input, Skeleton } from './ui/Primitives';
 
 const PAGE_SIZE = 30;
@@ -39,7 +39,7 @@ function groupTours(tours, userId) {
   };
 }
 
-function TourGroup({ title, icon: Icon, tours, onStartTour, onRequestDelete, page, onPageChange }) {
+function TourGroup({ title, icon: Icon, tours, onStartTour, onRequestDelete, onRequestEdit, onRequestFork, page, onPageChange }) {
   if (!tours.length) return null;
 
   const needsPagination = tours.length > PAGE_SIZE;
@@ -63,6 +63,8 @@ function TourGroup({ title, icon: Icon, tours, onStartTour, onRequestDelete, pag
             tour={tour}
             onStartTour={onStartTour}
             onRequestDelete={onRequestDelete}
+            onRequestEdit={onRequestEdit}
+            onRequestFork={onRequestFork}
           />
         ))}
       </div>
@@ -109,9 +111,12 @@ function CreatorAvatar({ creator }) {
   );
 }
 
-function TourCard({ tour, onStartTour, onRequestDelete }) {
+function TourCard({ tour, onStartTour, onRequestDelete, onRequestEdit, onRequestFork }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const creator = tour.creator || {};
+  const canEdit = tour.can_edit ?? tour.can_delete;
+  const canFork = !canEdit && tour.is_team_shared === true;
+  const showMenu = canEdit || canFork;
 
   return (
     <article className="relative rounded-lg border border-surface-800 bg-surface-900/55 p-4 shadow-panel">
@@ -122,7 +127,7 @@ function TourCard({ tour, onStartTour, onRequestDelete }) {
             {getDisplayText(tour)}
           </p>
         </div>
-        {tour.can_delete && (
+        {showMenu && (
           <div className="relative shrink-0">
             <IconButton
               label="Tour actions"
@@ -131,18 +136,46 @@ function TourCard({ tour, onStartTour, onRequestDelete }) {
               onClick={() => setMenuOpen((value) => !value)}
             />
             {menuOpen && (
-              <div className="absolute right-0 top-9 z-10 min-w-32 rounded-lg border border-surface-700 bg-surface-950 p-1 shadow-panel">
-                <button
-                  type="button"
-                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs text-red-200 transition hover:bg-red-500/10"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    onRequestDelete(tour);
-                  }}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                  Delete
-                </button>
+              <div className="absolute right-0 top-9 z-10 min-w-36 rounded-lg border border-surface-700 bg-surface-950 p-1 shadow-panel">
+                {canEdit && (
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs text-surface-200 transition hover:bg-surface-800"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onRequestEdit?.(tour);
+                    }}
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                    Edit
+                  </button>
+                )}
+                {canFork && (
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs text-surface-200 transition hover:bg-surface-800"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onRequestFork?.(tour);
+                    }}
+                  >
+                    <GitFork className="h-3.5 w-3.5" />
+                    Fork
+                  </button>
+                )}
+                {tour.can_delete && (
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs text-red-200 transition hover:bg-red-500/10"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onRequestDelete(tour);
+                    }}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    Delete
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -167,16 +200,19 @@ function TourCard({ tour, onStartTour, onRequestDelete }) {
   );
 }
 
-export default function ToursPanel({ repoId, onStartTour }) {
+export default function ToursPanel({ repoId, onStartTour, onEditTour, onToursLoaded }) {
   const { user, session } = useAuth();
   const toast = useToast();
   const composerRef = useRef(null);
   const [tours, setTours] = useState([]);
+  const [repoHasTeam, setRepoHasTeam] = useState(false);
   const [query, setQuery] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isForking, setIsForking] = useState(false);
   const [error, setError] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
+  const [shareImpact, setShareImpact] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [pages, setPages] = useState({ featured: 0, mine: 0, team: 0 });
 
@@ -194,12 +230,14 @@ export default function ToursPanel({ repoId, onStartTour }) {
       }
       const data = await res.json();
       setTours(data.tours || []);
+      setRepoHasTeam(Boolean(data.repo_has_team));
+      onToursLoaded?.({ tours: data.tours || [], repoHasTeam: Boolean(data.repo_has_team) });
     } catch (err) {
       setError(err.message || 'Failed to fetch tours');
     } finally {
       setIsLoading(false);
     }
-  }, [repoId, session?.access_token]);
+  }, [onToursLoaded, repoId, session?.access_token]);
 
   useEffect(() => {
     fetchTours();
@@ -249,6 +287,52 @@ export default function ToursPanel({ repoId, onStartTour }) {
       setIsGenerating(false);
     }
   }, [fetchTours, handleStartTour, isGenerating, query, repoId, session?.access_token, toast]);
+
+  const handleRequestEdit = useCallback((tour) => {
+    onEditTour?.(tour);
+  }, [onEditTour]);
+
+  const handleRequestFork = useCallback(async (tour) => {
+    if (!session?.access_token || isForking) return;
+    setIsForking(true);
+    try {
+      const res = await fetch(apiUrl(`/api/repos/${repoId}/tours/${tour.id}/fork`), {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to fork tour');
+      }
+      const data = await res.json();
+      const forked = data.tour ? { ...data.tour, steps: data.steps || [] } : null;
+      await fetchTours();
+      toast.success(`Forked "${tour.title}"`);
+      if (forked) handleStartTour(forked);
+    } catch (err) {
+      toast.error(err.message || 'Failed to fork tour');
+    } finally {
+      setIsForking(false);
+    }
+  }, [fetchTours, handleStartTour, isForking, repoId, session?.access_token, toast]);
+
+  const handleRequestDelete = useCallback(async (tour) => {
+    setDeleteTarget(tour);
+    setShareImpact(null);
+    if (tour.is_team_shared && session?.access_token) {
+      try {
+        const res = await fetch(apiUrl(`/api/repos/${repoId}/tours/${tour.id}/share-impact`), {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setShareImpact(typeof data.teammate_count === 'number' ? data.teammate_count : null);
+        }
+      } catch {
+        /* non-fatal — the warning just doesn't render */
+      }
+    }
+  }, [repoId, session?.access_token]);
 
   const handleConfirmDelete = useCallback(async () => {
     if (!deleteTarget || !session?.access_token) return;
@@ -319,7 +403,9 @@ export default function ToursPanel({ repoId, onStartTour }) {
             icon={Star}
             tours={groups.featured}
             onStartTour={handleStartTour}
-            onRequestDelete={setDeleteTarget}
+            onRequestDelete={handleRequestDelete}
+            onRequestEdit={handleRequestEdit}
+            onRequestFork={handleRequestFork}
             page={pages.featured}
             onPageChange={(page) => setPages((current) => ({ ...current, featured: page }))}
           />
@@ -327,7 +413,9 @@ export default function ToursPanel({ repoId, onStartTour }) {
             title="My tours"
             tours={groups.mine}
             onStartTour={handleStartTour}
-            onRequestDelete={setDeleteTarget}
+            onRequestDelete={handleRequestDelete}
+            onRequestEdit={handleRequestEdit}
+            onRequestFork={handleRequestFork}
             page={pages.mine}
             onPageChange={(page) => setPages((current) => ({ ...current, mine: page }))}
           />
@@ -335,7 +423,9 @@ export default function ToursPanel({ repoId, onStartTour }) {
             title="Team tours"
             tours={groups.team}
             onStartTour={handleStartTour}
-            onRequestDelete={setDeleteTarget}
+            onRequestDelete={handleRequestDelete}
+            onRequestEdit={handleRequestEdit}
+            onRequestFork={handleRequestFork}
             page={pages.team}
             onPageChange={(page) => setPages((current) => ({ ...current, team: page }))}
           />
@@ -352,6 +442,11 @@ export default function ToursPanel({ repoId, onStartTour }) {
           <Banner tone="warning" icon={AlertTriangle}>
             This deletes the tour and its steps.
           </Banner>
+          {deleteTarget?.is_team_shared && typeof shareImpact === 'number' && shareImpact > 0 && (
+            <Banner tone="warning" icon={AlertTriangle}>
+              {shareImpact} {shareImpact === 1 ? 'teammate' : 'teammates'} can currently see this tour.
+            </Banner>
+          )}
           <p className="text-sm text-surface-300">
             Delete <span className="font-semibold text-surface-100">{deleteTarget?.title}</span>?
           </p>

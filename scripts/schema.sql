@@ -851,5 +851,90 @@ CREATE TRIGGER tours_set_updated_at BEFORE UPDATE ON tours
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- =============================================================================
+-- US-060: atomic update of a tour and its steps
+-- =============================================================================
+-- Receives the new step list as JSONB; renumbers step_order 1..N on insert so
+-- the client never has to reconcile ordering. DELETE + INSERT inside the same
+-- statement-level transaction (PostgreSQL functions are atomic by default).
+-- Caller-provided title/description/is_team_shared are coalesced — pass NULL to
+-- leave existing values untouched.
+
+CREATE OR REPLACE FUNCTION update_tour_with_steps(
+  p_tour_id        UUID,
+  p_title          TEXT,
+  p_description    TEXT,
+  p_is_team_shared BOOLEAN,
+  p_steps          JSONB
+) RETURNS VOID AS $$
+BEGIN
+  UPDATE tours
+     SET title          = COALESCE(p_title, title),
+         description    = COALESCE(p_description, description),
+         is_team_shared = COALESCE(p_is_team_shared, is_team_shared)
+   WHERE id = p_tour_id;
+
+  DELETE FROM tour_steps WHERE tour_id = p_tour_id;
+
+  INSERT INTO tour_steps (tour_id, step_order, file_path, start_line, end_line, explanation)
+  SELECT
+    p_tour_id,
+    (row_number() OVER (ORDER BY ord))::INT AS step_order,
+    file_path,
+    start_line,
+    end_line,
+    explanation
+  FROM jsonb_to_recordset(p_steps) AS s(
+    ord         INT,
+    file_path   TEXT,
+    start_line  INT,
+    end_line    INT,
+    explanation TEXT
+  );
+END;
+$$ LANGUAGE plpgsql;
+
+GRANT EXECUTE ON FUNCTION update_tour_with_steps(UUID, TEXT, TEXT, BOOLEAN, JSONB) TO service_role;
+
+-- =============================================================================
+-- US-061: deep-copy a tour into a fork for the current user
+-- =============================================================================
+-- Returns the new tour's id. forked_from points back to the source; the fork
+-- starts unshared and titled "Copy of {original}". Steps are duplicated with
+-- their original step_order preserved.
+
+CREATE OR REPLACE FUNCTION fork_tour(p_tour_id UUID, p_user_id UUID)
+RETURNS UUID AS $$
+DECLARE
+  v_new_tour_id UUID;
+BEGIN
+  INSERT INTO tours (repo_id, created_by, title, description, original_query, is_auto_generated, is_team_shared, forked_from)
+  SELECT repo_id,
+         p_user_id,
+         'Copy of ' || title,
+         description,
+         original_query,
+         false,
+         false,
+         id
+    FROM tours
+   WHERE id = p_tour_id
+  RETURNING id INTO v_new_tour_id;
+
+  IF v_new_tour_id IS NULL THEN
+    RAISE EXCEPTION 'Source tour % not found', p_tour_id;
+  END IF;
+
+  INSERT INTO tour_steps (tour_id, step_order, file_path, start_line, end_line, explanation)
+  SELECT v_new_tour_id, step_order, file_path, start_line, end_line, explanation
+    FROM tour_steps
+   WHERE tour_id = p_tour_id;
+
+  RETURN v_new_tour_id;
+END;
+$$ LANGUAGE plpgsql;
+
+GRANT EXECUTE ON FUNCTION fork_tour(UUID, UUID) TO service_role;
+
+-- =============================================================================
 -- END OF SCHEMA
 -- =============================================================================
