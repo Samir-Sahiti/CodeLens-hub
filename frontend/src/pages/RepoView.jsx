@@ -19,6 +19,7 @@ const MetricsPanel         = lazy(() => import('../components/MetricsPanel'));
 const IssuesPanel          = lazy(() => import('../components/IssuesPanel'));
 const SettingsPanel        = lazy(() => import('../components/SettingsPanel'));
 const TourViewer           = lazy(() => import('../components/TourViewer'));
+const TourEditor           = lazy(() => import('../components/TourEditor'));
 const ToursPanel           = lazy(() => import('../components/ToursPanel'));
 
 const STAGE_COPY = {
@@ -141,6 +142,11 @@ export default function RepoView() {
   const [isDiffModalOpen, setIsDiffModalOpen] = useState(false);
   const [activeTour, setActiveTour] = useState(null);
   const [isTourViewerOpen, setIsTourViewerOpen] = useState(false);
+  const [editingTour, setEditingTour] = useState(null);
+  const [toursForRepo, setToursForRepo] = useState({ tours: [], repoHasTeam: false });
+  const [toursReloadKey, setToursReloadKey] = useState(0);
+  const [deepLinkMissingTour, setDeepLinkMissingTour] = useState(false);
+  const deepLinkHandledRef = useRef(false);
   const [tourProgressById, setTourProgressById] = useState({});
   const [attackSurfaceGraphMode, setAttackSurfaceGraphMode] = useState({ isActive: false, sourceId: null });
   const [pausedGraphMode, setPausedGraphMode] = useState(null);
@@ -268,6 +274,46 @@ export default function RepoView() {
     window.addEventListener('codelens:start-tour', handleStartTourEvent);
     return () => window.removeEventListener('codelens:start-tour', handleStartTourEvent);
   }, [handleOpenTour]);
+
+  // US-062: handle deep-link `?tour=<id>&step=<n>` once tours have loaded.
+  // Only fire once per repo visit — once consumed we strip the params from
+  // the URL so a refresh doesn't trigger a second open.
+  useEffect(() => {
+    if (deepLinkHandledRef.current) return;
+    const tourId = searchParams.get('tour');
+    if (!tourId) return;
+    if (!toursForRepo.tours || toursForRepo.tours.length === 0) return; // tours not loaded yet
+
+    deepLinkHandledRef.current = true;
+    const requestedStep = parseInt(searchParams.get('step'), 10);
+    const match = toursForRepo.tours.find((t) => t.id === tourId);
+
+    if (!match) {
+      setDeepLinkMissingTour(true);
+      setSearchParams({ tab: 'tours' }, { replace: true });
+      return;
+    }
+
+    const total = (match.steps || []).length;
+    let targetIndex = 0;
+    if (Number.isInteger(requestedStep) && requestedStep >= 1 && requestedStep <= total) {
+      targetIndex = requestedStep - 1;
+    } else if (Number.isInteger(requestedStep)) {
+      toast.info(`Step ${requestedStep} not available — opening at step 1`);
+    }
+
+    const tourKey = getTourKey(match);
+    setTourProgressById((prev) => ({ ...prev, [tourKey]: targetIndex }));
+    // Strip the deep-link params after consuming them so a refresh doesn't
+    // re-trigger this effect and so the URL stays clean while the user is in-tour.
+    // Tour state lives in component state; the Copy-link button rebuilds the
+    // URL from current state on demand.
+    const next = new URLSearchParams(searchParams);
+    next.delete('tour');
+    next.delete('step');
+    setSearchParams(next, { replace: true });
+    handleOpenTour(match);
+  }, [handleOpenTour, searchParams, setSearchParams, toast, toursForRepo.tours]);
 
   const fetchAnalysisData = useCallback(async (force = false) => {
     if ((hasFetchedData && !force) || !session?.access_token) return;
@@ -730,7 +776,18 @@ export default function RepoView() {
               </div>
 
               <div className={activeTab === 'tours' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
-                <ToursPanel repoId={repoId} onStartTour={handleOpenTour} />
+                {deepLinkMissingTour && (
+                  <Banner tone="warning" className="mb-3">
+                    This tour is not available to you. <Link to="/dashboard" className="underline">Back to dashboard</Link>
+                  </Banner>
+                )}
+                <ToursPanel
+                  key={toursReloadKey}
+                  repoId={repoId}
+                  onStartTour={handleOpenTour}
+                  onEditTour={setEditingTour}
+                  onToursLoaded={setToursForRepo}
+                />
               </div>
 
               {/* Review tab — CodeReviewPanel */}
@@ -771,6 +828,25 @@ export default function RepoView() {
           onStepChange={handleTourStepChange}
           onClose={handleCloseTour}
           onFinish={handleFinishTour}
+        />
+      </Suspense>
+
+      {/* Tour editor — US-060 */}
+      <Suspense fallback={null}>
+        <TourEditor
+          repoId={repoId}
+          tour={editingTour}
+          open={!!editingTour}
+          graphNodes={analysisData.nodes}
+          repoHasTeam={toursForRepo.repoHasTeam}
+          onClose={() => setEditingTour(null)}
+          onSaved={(savedTour) => {
+            setEditingTour(null);
+            setToursReloadKey((k) => k + 1);
+            if (activeTour?.id === savedTour?.id) {
+              setActiveTour(savedTour);
+            }
+          }}
         />
       </Suspense>
 

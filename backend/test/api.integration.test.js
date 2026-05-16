@@ -335,6 +335,224 @@ describe('Backend API integration (mocked)', () => {
     expect(supabaseCallLog).toContain('tours.delete.many');
   });
 
+  it('PATCH /api/repos/:repoId/tours/:tourId updates tour and renumbers steps via RPC', async () => {
+    const rpcCalls = [];
+    supabaseAdminMock = createSupabaseMock({
+      'repositories.select.maybeSingle': async () => ({ data: { id: 'repo-1' }, error: null }),
+      'team_members.select.many': async () => ({ data: [], error: null }),
+      'tours.select.maybeSingle': async () => ({ data: { id: 'tour-1', created_by: 'user-1', is_team_shared: false }, error: null }),
+      'graph_nodes.select.many': async () => ({
+        data: [{ file_path: 'a.js' }, { file_path: 'b.js' }],
+        error: null,
+      }),
+      'tours.select.single': async () => ({
+        data: {
+          id: 'tour-1', repo_id: 'repo-1', created_by: 'user-1', title: 'Renamed', description: null,
+          original_query: null, is_auto_generated: false, is_team_shared: false, forked_from: null,
+          created_at: '2026-05-01T00:00:00Z', updated_at: '2026-05-02T00:00:00Z',
+        },
+        error: null,
+      }),
+      'tour_steps.select.many': async () => ({
+        data: [
+          { id: 's1', tour_id: 'tour-1', step_order: 1, file_path: 'a.js', start_line: 1, end_line: 2, explanation: 'step one description' },
+          { id: 's2', tour_id: 'tour-1', step_order: 2, file_path: 'b.js', start_line: 3, end_line: 4, explanation: 'step two description' },
+        ],
+        error: null,
+      }),
+      'rpc.update_tour_with_steps': async ({ args }) => {
+        rpcCalls.push(args);
+        return { data: null, error: null };
+      },
+    });
+
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const toursController = (await import('../src/controllers/toursController.js')).default;
+    const app = express();
+    app.use(express.json());
+    app.patch('/api/repos/:repoId/tours/:tourId', (req, _res, next) => { req.user = { id: 'user-1' }; next(); }, wrap(toursController.updateTour));
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message || 'error' }));
+
+    const res = await request(app)
+      .patch('/api/repos/repo-1/tours/tour-1')
+      .send({
+        title: 'Renamed',
+        description: null,
+        is_team_shared: false,
+        steps: [
+          { order: 1, file_path: 'b.js', start_line: 3, end_line: 4, explanation: 'step two description' },
+          { order: 0, file_path: 'a.js', start_line: 1, end_line: 2, explanation: 'step one description' },
+        ],
+      })
+      .expect(200);
+
+    expect(res.body.tour.title).toBe('Renamed');
+    expect(rpcCalls).toHaveLength(1);
+    expect(rpcCalls[0].p_title).toBe('Renamed');
+    // Ordering by `order` ASC happens server-side via row_number() so payload order is preserved as-is
+    expect(rpcCalls[0].p_steps[0].file_path).toBe('b.js');
+    expect(rpcCalls[0].p_steps[1].file_path).toBe('a.js');
+  });
+
+  it('PATCH /api/repos/:repoId/tours/:tourId rejects non-creator with 403', async () => {
+    supabaseAdminMock = createSupabaseMock({
+      'repositories.select.maybeSingle': async () => ({ data: { id: 'repo-1' }, error: null }),
+      'team_members.select.many': async () => ({ data: [], error: null }),
+      'tours.select.maybeSingle': async () => ({ data: { id: 'tour-1', created_by: 'other-user', is_team_shared: false }, error: null }),
+    });
+
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const toursController = (await import('../src/controllers/toursController.js')).default;
+    const app = express();
+    app.use(express.json());
+    app.patch('/api/repos/:repoId/tours/:tourId', (req, _res, next) => { req.user = { id: 'user-1' }; next(); }, wrap(toursController.updateTour));
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message || 'error' }));
+
+    await request(app)
+      .patch('/api/repos/repo-1/tours/tour-1')
+      .send({
+        steps: [
+          { order: 0, file_path: 'a.js', start_line: 1, end_line: 2, explanation: 'long enough explanation' },
+          { order: 1, file_path: 'b.js', start_line: 1, end_line: 2, explanation: 'long enough explanation' },
+        ],
+      })
+      .expect(403);
+  });
+
+  it('PATCH /api/repos/:repoId/tours/:tourId rejects unknown file paths with 400', async () => {
+    supabaseAdminMock = createSupabaseMock({
+      'repositories.select.maybeSingle': async () => ({ data: { id: 'repo-1' }, error: null }),
+      'team_members.select.many': async () => ({ data: [], error: null }),
+      'tours.select.maybeSingle': async () => ({ data: { id: 'tour-1', created_by: 'user-1', is_team_shared: false }, error: null }),
+      'graph_nodes.select.many': async () => ({ data: [{ file_path: 'a.js' }], error: null }),
+    });
+
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const toursController = (await import('../src/controllers/toursController.js')).default;
+    const app = express();
+    app.use(express.json());
+    app.patch('/api/repos/:repoId/tours/:tourId', (req, _res, next) => { req.user = { id: 'user-1' }; next(); }, wrap(toursController.updateTour));
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message || 'error' }));
+
+    const res = await request(app)
+      .patch('/api/repos/repo-1/tours/tour-1')
+      .send({
+        steps: [
+          { order: 0, file_path: 'a.js',       start_line: 1, end_line: 2, explanation: 'long enough explanation' },
+          { order: 1, file_path: 'unknown.js', start_line: 1, end_line: 2, explanation: 'long enough explanation' },
+        ],
+      })
+      .expect(400);
+
+    expect(res.body.error).toMatch(/unknown file path/i);
+  });
+
+  it('POST /api/repos/:repoId/tours/:tourId/fork deep-copies the tour for the caller', async () => {
+    const rpcCalls = [];
+    supabaseAdminMock = createSupabaseMock({
+      'repositories.select.maybeSingle': async () => ({ data: { id: 'repo-1' }, error: null }),
+      'team_members.select.many': async () => ({ data: [], error: null }),
+      'tours.select.maybeSingle': async () => ({
+        data: { id: 'tour-1', created_by: 'user-1', is_team_shared: false, repo_id: 'repo-1' },
+        error: null,
+      }),
+      'tours.select.single': async () => ({
+        data: {
+          id: 'new-tour-id', repo_id: 'repo-1', created_by: 'user-1',
+          title: 'Copy of Original', description: null, original_query: null,
+          is_auto_generated: false, is_team_shared: false, forked_from: 'tour-1',
+          created_at: '2026-05-01T00:00:00Z', updated_at: '2026-05-01T00:00:00Z',
+        },
+        error: null,
+      }),
+      'tour_steps.select.many': async () => ({
+        data: [{ id: 'sf', tour_id: 'new-tour-id', step_order: 1, file_path: 'a.js', start_line: 1, end_line: 2, explanation: 'step' }],
+        error: null,
+      }),
+      'rpc.fork_tour': async ({ args }) => {
+        rpcCalls.push(args);
+        return { data: 'new-tour-id', error: null };
+      },
+    });
+
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const toursController = (await import('../src/controllers/toursController.js')).default;
+    const app = express();
+    app.use(express.json());
+    app.post('/api/repos/:repoId/tours/:tourId/fork', (req, _res, next) => { req.user = { id: 'user-1' }; next(); }, wrap(toursController.forkTour));
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message || 'error' }));
+
+    const res = await request(app)
+      .post('/api/repos/repo-1/tours/tour-1/fork')
+      .expect(201);
+
+    expect(res.body.tour.id).toBe('new-tour-id');
+    expect(res.body.tour.forked_from).toBe('tour-1');
+    expect(rpcCalls[0]).toEqual({ p_tour_id: 'tour-1', p_user_id: 'user-1' });
+  });
+
+  it('POST /api/repos/:repoId/tours/:tourId/fork rejects non-team-shared tours from non-creators', async () => {
+    supabaseAdminMock = createSupabaseMock({
+      'repositories.select.maybeSingle': async () => ({ data: { id: 'repo-1' }, error: null }),
+      'team_members.select.many': async () => ({ data: [{ team_id: 't1' }], error: null }),
+      'team_repositories.select.maybeSingle': async () => ({ data: { repo_id: 'repo-1' }, error: null }),
+      'tours.select.maybeSingle': async () => ({
+        data: { id: 'tour-1', created_by: 'other-user', is_team_shared: false, repo_id: 'repo-1' },
+        error: null,
+      }),
+    });
+
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const toursController = (await import('../src/controllers/toursController.js')).default;
+    const app = express();
+    app.use(express.json());
+    app.post('/api/repos/:repoId/tours/:tourId/fork', (req, _res, next) => { req.user = { id: 'user-1' }; next(); }, wrap(toursController.forkTour));
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message || 'error' }));
+
+    await request(app)
+      .post('/api/repos/repo-1/tours/tour-1/fork')
+      .expect(403);
+  });
+
+  it('GET /api/repos/:repoId/tours/:tourId/share-impact counts distinct teammates excluding creator', async () => {
+    supabaseAdminMock = createSupabaseMock({
+      'repositories.select.maybeSingle': async () => ({ data: { id: 'repo-1' }, error: null }),
+      'team_members.select.many': async () => ({
+        data: [
+          { team_id: 't1', user_id: 'user-1' }, // viewer
+          { team_id: 't1', user_id: 'user-2' },
+          { team_id: 't1', user_id: 'user-3' },
+        ],
+        error: null,
+      }),
+      'tours.select.maybeSingle': async () => ({
+        data: { id: 'tour-1', created_by: 'user-1', is_team_shared: true },
+        error: null,
+      }),
+      'team_repositories.select.many': async () => ({ data: [{ team_id: 't1' }], error: null }),
+    });
+
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const toursController = (await import('../src/controllers/toursController.js')).default;
+    const app = express();
+    app.use(express.json());
+    app.get('/api/repos/:repoId/tours/:tourId/share-impact', (req, _res, next) => { req.user = { id: 'user-1' }; next(); }, wrap(toursController.getShareImpact));
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message || 'error' }));
+
+    const res = await request(app)
+      .get('/api/repos/repo-1/tours/tour-1/share-impact')
+      .expect(200);
+
+    // user-2 and user-3 (user-1 is the creator, excluded)
+    expect(res.body.teammate_count).toBe(2);
+  });
+
   it('DELETE /api/repos/:repoId/tours/:tourId rejects non-creator deletion', async () => {
     supabaseAdminMock = createSupabaseMock({
       'repositories.select.maybeSingle': async () => ({ data: { id: 'repo-1' }, error: null }),

@@ -3,7 +3,7 @@ import { useAuth } from '../context/AuthContext';
 import { apiUrl } from '../lib/api';
 import { useToast } from './Toast';
 import { AnswerBlock, HighlightedCodeBlock, getLanguageClass } from './SharedAnswerComponents';
-import { AlertTriangle, ChevronLeft, ChevronRight, Copy, FileCode, X } from './ui/Icons';
+import { AlertTriangle, ChevronLeft, ChevronRight, Copy, FileCode, LinkIcon, X } from './ui/Icons';
 import { Banner, Button, IconButton, Skeleton } from './ui/Primitives';
 
 const MAX_FALLBACK_LINES = 200;
@@ -126,6 +126,18 @@ export default function TourViewer({
     }
   }, [step?.file_path, toast]);
 
+  const handleCopyStepLink = useCallback(async () => {
+    if (!tour?.id || !repoId) return;
+    const stepNumber = safeStepIndex + 1;
+    const url = `${window.location.origin}/repo/${encodeURIComponent(repoId)}?tour=${encodeURIComponent(tour.id)}&step=${stepNumber}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      toast.success(`Link copied — step ${stepNumber} of ${title}`);
+    } catch {
+      toast.error('Failed to copy link');
+    }
+  }, [repoId, safeStepIndex, title, toast, tour?.id]);
+
   useEffect(() => {
     if (!open || !step?.file_path || !session?.access_token) return;
 
@@ -216,9 +228,22 @@ export default function TourViewer({
           <div className="min-w-0">
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-surface-500">Tour</p>
             <h2 className="mt-1 truncate text-base font-semibold text-surface-100">{title}</h2>
-            <p className="mt-1 text-xs text-surface-500">
-              Step {safeStepIndex + 1} of {totalSteps || 1}
-            </p>
+            {tour?.forked_from && tour?.forked_from_creator?.name && (
+              <p className="mt-0.5 truncate text-[11px] italic text-surface-500">
+                Forked from {tour.forked_from_creator.name}
+              </p>
+            )}
+            <div className="mt-1 flex items-center gap-2 text-xs text-surface-500">
+              <span>Step {safeStepIndex + 1} of {totalSteps || 1}</span>
+              {tour?.id && (
+                <IconButton
+                  label="Copy link to this step"
+                  icon={LinkIcon}
+                  onClick={handleCopyStepLink}
+                  variant="ghost"
+                />
+              )}
+            </div>
           </div>
           <IconButton label="Close tour" icon={X} onClick={onClose} variant="ghost" />
         </div>

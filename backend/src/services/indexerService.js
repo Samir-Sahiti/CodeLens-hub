@@ -11,6 +11,7 @@ const { isTestFilePath, parseCoverageOverrides } = require('./testCoverageServic
 const { recordUsage } = require('./usageTracker'); // US-042
 const { isManifestFile, parseManifest } = require('./manifestParser'); // US-045
 const { scanDependencies } = require('./osvScanner'); // US-045
+const { generateStartHereTour } = require('./startHereTourService'); // US-059
 const { OpenAI } = require('openai');
 const { supabaseAdmin } = require('../db/supabase');
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || 'sk-dummy' });
@@ -880,6 +881,18 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
 
     console.timeEnd(`[indexer] Total pipeline (${repoId})`);
     console.log(`[indexer] Successfully finished indexing for repoId: ${repoId}`);
+
+    // US-059: kick off Start Here tour generation as fire-and-forget at the very
+    // end of the pipeline. By now graph_nodes, graph_edges, and code_chunks all
+    // exist so excerpt fallback works. Must not await — failures are logged but
+    // never block indexing completion.
+    if (repoUserId) {
+      setImmediate(() => {
+        generateStartHereTour({ repoId, userId: repoUserId }).catch((err) => {
+          console.error('[indexer] Start Here tour generation failed:', err.message);
+        });
+      });
+    }
 
   } catch (error) {
     if (repoId) {

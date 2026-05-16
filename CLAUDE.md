@@ -362,6 +362,7 @@ ESLint in both `frontend/` and `backend/`. No Prettier, no commit hooks. Run `np
 ## Notes for Development
 
 - Tree-sitter native modules require build tools (python3, make, g++) — `backend/Dockerfile.dev` handles this
+- `docker-compose.yml` runs `npm install` on every container start for `backend` and `frontend` so new dependencies in `package.json` are picked up without a manual rebuild — the anonymous `/app/node_modules` volume otherwise persists across `docker compose build` and silently hides them
 - Apply `scripts/schema.sql` + `scripts/us048_security_audits.sql` via Supabase SQL Editor before first run
 - Frontend Vite proxy (`/api/*` → port 3001) configured in `frontend/vite.config.js`
 - Attack surface toggle forces `clusteringEnabled = false` — clustering uses cluster-level edge IDs incompatible with individual-node path IDs

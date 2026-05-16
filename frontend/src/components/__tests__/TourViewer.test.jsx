@@ -104,6 +104,28 @@ describe('TourViewer', () => {
     expect(toast.success).toHaveBeenCalledWith('Copied src/auth.js');
   });
 
+  it('copies a deep link to the current step and shows a toast (US-062)', async () => {
+    renderViewer({ stepIndex: 1 });
+
+    fireEvent.click(screen.getByLabelText(/copy link to this step/i));
+
+    await waitFor(() => expect(clipboardSpy).toHaveBeenCalledTimes(1));
+    const url = clipboardSpy.mock.calls[0][0];
+    expect(url).toMatch(/\/repo\/repo-1\?tour=tour-1&step=2$/);
+    expect(toast.success).toHaveBeenCalledWith('Link copied — step 2 of Authentication flow');
+  });
+
+  it('renders "Forked from" attribution when forked_from is set (US-061)', () => {
+    renderViewer({
+      tour: {
+        ...tour,
+        forked_from: 'original-tour-id',
+        forked_from_creator: { id: 'user-2', name: 'Alice' },
+      },
+    });
+    expect(screen.getByText('Forked from Alice')).toBeInTheDocument();
+  });
+
   it('disables Prev on the first step, advances with Next, and finishes on the last step', async () => {
     const user = userEvent.setup();
     const onStepChange = vi.fn();
