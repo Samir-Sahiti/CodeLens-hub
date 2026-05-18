@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const path = require('path');
 const { Octokit } = require('octokit');
 const { supabaseAdmin } = require('../db/supabase');
+const { SAFE_FETCH_CEILING, warnIfCeilingHit } = require('../lib/dbHelpers');
 const _indexer = require('../services/indexer');
 const { isManifestFile, parseManifest } = require('../services/manifestParser');
 const { scanDependencies } = require('../services/osvScanner');
@@ -300,15 +301,19 @@ const getAnalysisData = async (req, res) => {
       { data: issues, error: issuesErr }
     ] = await Promise.all([
       supabaseAdmin.from('repositories').select('has_coverage_files').eq('id', repoId).single(),
-      supabaseAdmin.from('graph_nodes').select('*').eq('repo_id', repoId).order('file_path', { ascending: true }),
-      supabaseAdmin.from('graph_edges').select('*').eq('repo_id', repoId).order('from_path', { ascending: true }).order('to_path', { ascending: true }),
-      supabaseAdmin.from('analysis_issues').select('*').eq('repo_id', repoId).order('id', { ascending: true })
+      supabaseAdmin.from('graph_nodes').select('*').eq('repo_id', repoId).order('file_path', { ascending: true }).range(0, SAFE_FETCH_CEILING - 1),
+      supabaseAdmin.from('graph_edges').select('*').eq('repo_id', repoId).order('from_path', { ascending: true }).order('to_path', { ascending: true }).range(0, SAFE_FETCH_CEILING - 1),
+      supabaseAdmin.from('analysis_issues').select('*').eq('repo_id', repoId).order('id', { ascending: true }).range(0, SAFE_FETCH_CEILING - 1),
     ]);
 
     if (repoMetaErr) throw repoMetaErr;
     if (nodesErr) throw nodesErr;
     if (edgesErr) throw edgesErr;
     if (issuesErr) throw issuesErr;
+
+    warnIfCeilingHit('getAnalysisData.nodes', nodes);
+    warnIfCeilingHit('getAnalysisData.edges', edges);
+    warnIfCeilingHit('getAnalysisData.issues', issues);
 
     console.log(`[getAnalysisData] Found ${nodes.length} nodes, ${edges.length} edges, ${issues.length} issues for repo ${repoId}`);
 
@@ -751,12 +756,15 @@ const getChurn = async (req, res) => {
       { data: churnRows, error: churnErr },
       { data: nodeRows,  error: nodeErr  },
     ] = await Promise.all([
-      supabaseAdmin.from('file_churn').select('file_path,commit_count,unique_authors,lines_changed,last_modified').eq('repo_id', repoId),
-      supabaseAdmin.from('graph_nodes').select('file_path,complexity_score').eq('repo_id', repoId),
+      supabaseAdmin.from('file_churn').select('file_path,commit_count,unique_authors,lines_changed,last_modified').eq('repo_id', repoId).range(0, SAFE_FETCH_CEILING - 1),
+      supabaseAdmin.from('graph_nodes').select('file_path,complexity_score').eq('repo_id', repoId).range(0, SAFE_FETCH_CEILING - 1),
     ]);
 
     if (churnErr) throw churnErr;
     if (nodeErr)  throw nodeErr;
+
+    warnIfCeilingHit('getChurn.file_churn', churnRows);
+    warnIfCeilingHit('getChurn.graph_nodes', nodeRows);
 
     if (!churnRows || churnRows.length === 0) {
       return res.json({ churn: [] });

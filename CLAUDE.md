@@ -101,14 +101,20 @@ CodeLens-hub/
 │   │   ├── secret-rules.json         # Regex rules for secret scanning
 │   │   └── rules/                    # Per-language SAST rules (US-046)
 │   ├── parsers/            # Tree-sitter AST parsing per language
+│   │   ├── parserPool.js             # Piscina worker pool singleton (Phase 5.1)
+│   │   └── parser-worker.js          # Worker entry — JSON-safe parsed result
+│   ├── lib/                # Shared helpers — dbHelpers, sseAbort
+│   ├── observability/      # AsyncLocalStorage request ledger (Phase 0)
 │   ├── ai/                 # ragService.js (RAG pipeline)
-│   ├── db/                 # Supabase admin client
+│   ├── db/                 # Supabase admin client (instrumented fetch)
 │   └── middleware/         # Auth, error handling, AI rate limiting
 │
 ├── scripts/
-│   ├── setup.sh                      # Idempotent bootstrap
-│   ├── schema.sql                    # Full DB schema — apply via Supabase SQL Editor
-│   └── us048_security_audits.sql     # security_audits table + RLS
+│   ├── setup.sh                              # Idempotent bootstrap
+│   ├── schema.sql                            # Full DB schema — apply via Supabase SQL Editor
+│   ├── us048_security_audits.sql             # security_audits table + RLS
+│   ├── maintenance_truncate_api_usage.sql    # Monthly — prune raw api_usage > 30 days
+│   └── maintenance_evict_embedding_cache.sql # Quarterly — evict embedding_cache idle > 90 days
 │
 └── docker-compose.yml      # postgres + backend + frontend
 ```
@@ -130,6 +136,8 @@ CodeLens-hub/
 | `POST` | `/api/review/:id/security-audit` | Whole-repo security audit (US-048) |
 | `GET` | `/api/review/:id/security-audits` | Audit history |
 | `GET` | `/api/review/:id/security-audits/:auditId` | Single audit |
+| `POST` | `/api/review/:id/duplication-refactor` | SSE: AI shared-utility refactor for a duplicate cluster |
+| `POST` | `/api/issues/:issueId/proposal` | SSE: AI fix proposal for an `analysis_issues` row (US-063) |
 
 ---
 
@@ -146,9 +154,17 @@ Tables (all with RLS):
 - `vulnerability_cache` — OSV.dev results per `(ecosystem, name, version)` with 24 h TTL (US-045)
 - `dependency_manifests` — per-package SCA results for the Dependencies tab; cleared on re-index (US-045)
 - `security_audits` — whole-repo AI audit reports: `{ id, user_id, repo_id, findings_json, created_at }` (US-048)
-- `api_usage` — per-user token usage tracking for daily budget enforcement (US-042)
+- `api_usage` — per-user token usage log (audit/debug; truncated monthly — see Maintenance)
+- `api_usage_daily` — `(user_id, usage_date)` rollup maintained by an `AFTER INSERT` trigger on `api_usage`; read by every budget check so the rolling-24 h scan never grows
+- `issue_proposals` — AI fix proposals for `analysis_issues` (US-063); status `pending | accepted | dismissed | stale`. Re-index sets `stale` on any proposal whose underlying issue is being deleted
+- `embedding_cache` — global, content-hash-keyed OpenAI embedding cache; rows shared across repos and accessed only via `service_role`. `last_used_at` drives quarterly eviction
+- `graph_edges.symbols TEXT[]` — per-importer symbol list (US-064); empty array on edges written before the column existed
 
 **Schema migration:** `scripts/schema.sql` is idempotent and safe to re-run. Apply via Supabase SQL Editor. The `scripts/us048_security_audits.sql` file creates the `security_audits` table separately.
+
+**Indexer-side RPCs** (also in `scripts/schema.sql`):
+- `prepare_repo_reindex(repo_id, unchanged_paths, changed_or_deleted_paths, preserve_churn)` — single PL/pgSQL call that stale-marks pending proposals, deletes non-preservable issues (preserves `hardcoded_secret` / `insecure_pattern` / `missing_auth` whose `file_paths` are entirely in `unchanged_paths`), wipes derived tables, and partial-purges nodes/chunks/file_contents for changed-or-deleted files
+- `bulk_insert_analysis_issues(repo_id, issues jsonb)` — single insert with server-side shape validation (`type` non-null, `file_paths` non-empty)
 
 ---
 
@@ -165,18 +181,25 @@ GROQ_API_KEY          # for RAG LLM responses
 ANTHROPIC_API_KEY     # for AI code review + security audit (US-048)
 NODE_ENV, PORT
 MAX_DAILY_TOKENS_PER_USER   # optional, default 500000 (US-042)
+
+# Performance / observability knobs (all optional)
+SLOW_REQUEST_MS             # WARN threshold for the request-timing middleware, default 500
+LOG_REQUEST_TIMING          # 'true' → log every request, not only slow ones
+SUPABASE_FETCH_CEILING      # row limit on bulk SELECTs, default 50000 (Phase 1.2)
+PARSER_WORKER_COUNT         # piscina pool size; default = min(os.cpus().length, 8)
+PARSER_WORKERS_DISABLED     # 'true' → skip the worker pool, parse in-process
 ```
 
 ---
 
 ## Indexing Pipeline (Core Flow)
 
-Per-file scanning runs inside a `p-limit` concurrency pool. All scanners are wrapped in try/catch — failures are logged and never block the pipeline.
+Per-file scanning runs inside a `p-limit` concurrency pool. Tree-sitter parsing for non-`.cs` files is offloaded to a **Piscina worker pool** (`backend/src/parsers/parserPool.js`) so multi-core hosts actually use multiple cores; `.cs` files stay in-process because the pre-pass tree is cached and reused by the main pass to avoid a double parse. All scanners are wrapped in try/catch — failures are logged and never block the pipeline.
 
 1. Repo tree fetched (GitHub Octokit or uploaded ZIP)
 2. Files filtered by supported extension; manifest files separated
-3. Incremental hash check — unchanged files reuse their DB state
-4. Tree-sitter parses each changed file → imports, exports, cyclomatic complexity
+3. Incremental hash check — unchanged files reuse their DB state. A single `prepare_repo_reindex` RPC then stale-marks pending proposals, deletes non-preservable issues, wipes derived tables, and partial-purges changed/deleted nodes/chunks/file_contents in one transactional call
+4. Tree-sitter parses each changed file → imports, exports, cyclomatic complexity. JS/TS parsers also emit per-import symbol lists used by the proposal-context builder (US-064)
 5. Per-file scanners run in the same loop:
    - **Secret scanner** (`secretScanner.js`) — regex rules + high-entropy catch-all; suppressions filtered via `suppSet` (US-044)
    - **SAST engine** (`sastEngine.js`) — AST-query rules per language; per-repo disabled rules respected (US-046)
@@ -185,8 +208,9 @@ Per-file scanning runs inside a `p-limit` concurrency pool. All scanners are wra
 7. Dependency graph upserted (`graph_nodes` + `graph_edges`); metrics (incoming/outgoing counts) computed in-memory then persisted
 8. Architectural issue detection: circular dependencies (DFS), god files, high coupling, dead code
 9. SCA: manifest files parsed → OSV.dev batch query → `vulnerability_cache` + `dependency_manifests` + `analysis_issues` (US-045)
-10. All collected issues bulk-inserted into `analysis_issues`
+10. All collected issues bulk-inserted via `bulk_insert_analysis_issues` (single RPC instead of chunked inserts)
 11. File contents stored in `file_contents` table for AI review retrieval (US-043)
+12. Semantic chunks: each chunk's `sha256(content)` is looked up in `embedding_cache` first; only cache misses go to OpenAI. New embeddings are upserted into the cache and `last_used_at` is bumped on hits
 
 ---
 
@@ -355,7 +379,11 @@ ESLint in both `frontend/` and `backend/`. No Prettier, no commit hooks. Run `np
 - **Error handling:** `express-async-errors` patches async routes; centralized error middleware
 - **Concurrency:** `p-limit` controls concurrent file fetches; OSV enrichment limited to 5 concurrent requests
 - **Incremental indexing:** Files with unchanged `content_hash` skip parsing and scanning; their DB state (including `node_classification`) is preserved as-is
-- **SSE streaming:** AI review and security audit use Server-Sent Events; frontend reads with `ReadableStream` + `TextDecoder`; abort via `AbortController`
+- **SSE streaming:** AI review and security audit use Server-Sent Events; frontend reads with `ReadableStream` + `TextDecoder`; abort via `AbortController`. Server-side, every Claude stream binds `req.on('close')` to an `AbortController` via `backend/src/lib/sseAbort.js` (`bindRequestAbort` / `isAbortError`) so a closed tab stops generating tokens mid-stream
+- **Shared backend helpers** (`backend/src/lib/`):
+  - `dbHelpers.js` — `SAFE_FETCH_CEILING` + `warnIfCeilingHit` for bulk `.range(0, SAFE_FETCH_CEILING - 1)` selects; `withSupabaseRetry(fn, { tries, baseMs, label })` for critical writes (retries on 5xx / 429 / network errors only)
+  - `sseAbort.js` — `bindRequestAbort(req)` returns `{ signal, cleanup, isAborted }`; pass `signal` to any upstream SDK call and call `cleanup()` in `finally`
+- **Observability (Phase 0):** every request runs inside an `AsyncLocalStorage` ledger (`backend/src/observability/requestStore.js`); the Supabase client's custom fetch records `(method, table, durationMs, status)` per round-trip. Requests slower than `SLOW_REQUEST_MS` log a one-line summary with the top 3 DB calls. Set `LOG_REQUEST_TIMING=true` to log every request
 
 ---
 
@@ -367,3 +395,12 @@ ESLint in both `frontend/` and `backend/`. No Prettier, no commit hooks. Run `np
 - Frontend Vite proxy (`/api/*` → port 3001) configured in `frontend/vite.config.js`
 - Attack surface toggle forces `clusteringEnabled = false` — clustering uses cluster-level edge IDs incompatible with individual-node path IDs
 - `issue_suppressions` is rule-agnostic: `rule_id` is a free-text string, `line_number: 0` is the convention for file-level suppressions (used by `missing_auth`)
+
+---
+
+## Maintenance
+
+Periodic SQL snippets in [scripts/](scripts/) — apply via Supabase SQL Editor. No pg_cron required.
+
+- `maintenance_truncate_api_usage.sql` — monthly. Deletes `api_usage` rows older than 30 days. The rolling budget is served by `api_usage_daily` (trigger-maintained rollup), so raw `api_usage` is only needed for audit/debugging.
+- `maintenance_evict_embedding_cache.sql` — quarterly. Removes `embedding_cache` rows whose `last_used_at` is older than 90 days. The cache is keyed by chunk content hash and shared across repos.

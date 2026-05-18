@@ -27,17 +27,23 @@ setInterval(() => {
   for (const [k, v] of hourCounters)   if (now > v.expiry) hourCounters.delete(k);
 }, 5 * 60 * 1000);
 
+// Phase 3.3: read the api_usage_daily rollup instead of scanning api_usage.
+// A 24h rolling window straddles at most two UTC days, so we fetch today +
+// yesterday and trust the trigger to keep the rollup current.
 async function dailyTokensUsed(userId) {
-  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const now    = new Date();
+  const today  = now.toISOString().slice(0, 10);
+  const yest   = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
   const { data, error } = await supabaseAdmin
-    .from('api_usage')
+    .from('api_usage_daily')
     .select('prompt_tokens, completion_tokens, embedding_tokens')
     .eq('user_id', userId)
-    .gte('created_at', since);
+    .in('usage_date', [today, yest]);
 
   if (error) return 0; // fail open
   return (data || []).reduce(
-    (sum, r) => sum + (r.prompt_tokens || 0) + (r.completion_tokens || 0) + (r.embedding_tokens || 0),
+    (sum, r) => sum + Number(r.prompt_tokens || 0) + Number(r.completion_tokens || 0) + Number(r.embedding_tokens || 0),
     0
   );
 }

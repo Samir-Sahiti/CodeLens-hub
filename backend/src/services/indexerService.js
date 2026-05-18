@@ -1,4 +1,5 @@
 const { parseFile } = require('../parsers/repositoryParser');
+const { parseFileInPool } = require('../parsers/parserPool'); // Phase 5.1
 const { extractChunksFromFile } = require('../parsers/chunkParser');
 const { detectIssues } = require('./issueDetection');
 const { scanFileForSecrets } = require('./secretScanner');
@@ -14,6 +15,7 @@ const { scanDependencies } = require('./osvScanner'); // US-045
 const { generateStartHereTour } = require('./startHereTourService'); // US-059
 const { OpenAI } = require('openai');
 const { supabaseAdmin } = require('../db/supabase');
+const { SAFE_FETCH_CEILING, warnIfCeilingHit, withSupabaseRetry } = require('../lib/dbHelpers');
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || 'sk-dummy' });
 const pLimit = require('p-limit');
 const fs = require('fs/promises');
@@ -55,17 +57,6 @@ function chunkArray(arr, size) {
     chunks.push(arr.slice(i, i + size));
   }
   return chunks;
-}
-
-function toAnalysisIssueInsert(issue, repoId) {
-  return {
-    id: crypto.randomUUID(),
-    repo_id: issue.repo_id || repoId,
-    type: issue.type,
-    severity: issue.severity,
-    file_paths: Array.isArray(issue.file_paths) ? issue.file_paths : [],
-    description: issue.description || null,
-  };
 }
 
 async function fetchGithubZipAndExtract(owner, name, token, destDir) {
@@ -134,22 +125,29 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     const { data: existingNodeRows } = await supabaseAdmin
       .from('graph_nodes')
       .select('file_path, content_hash, language, line_count, complexity_score, node_classification, is_test_file')
-      .eq('repo_id', repoId);
+      .eq('repo_id', repoId)
+      .range(0, SAFE_FETCH_CEILING - 1);
+    warnIfCeilingHit('indexer.graph_nodes pre-fetch', existingNodeRows);
     const existingNodeMap = new Map((existingNodeRows || []).map(n => [n.file_path, n]));
 
-    // Also pre-fetch existing edges for unchanged files (we'll reuse them to skip re-parsing imports)
+    // Also pre-fetch existing edges for unchanged files (we'll reuse them to skip re-parsing imports).
+    // `symbols` is the US-064 per-importer symbol list — empty array on edges written before that migration.
     const { data: existingEdgeRows } = await supabaseAdmin
       .from('graph_edges')
-      .select('from_path, to_path')
-      .eq('repo_id', repoId);
+      .select('from_path, to_path, symbols')
+      .eq('repo_id', repoId)
+      .range(0, SAFE_FETCH_CEILING - 1);
+    warnIfCeilingHit('indexer.graph_edges pre-fetch', existingEdgeRows);
 
-    // Fetch repo owner for usage tracking (US-042)
+    // Phase 2.3: pull repo metadata in ONE fetch instead of separately fetching
+    // user_id here and sast_disabled_rules later in the parsing phase.
     const { data: repoMeta } = await supabaseAdmin
       .from('repositories')
-      .select('user_id')
+      .select('user_id, sast_disabled_rules')
       .eq('id', repoId)
       .single();
     const repoUserId = repoMeta?.user_id || null;
+    const disabledSastRules = repoMeta?.sast_disabled_rules || [];
 
     // 1. Fetch & filter files
     console.time(`[indexer] Phase 1: File discovery (${repoId})`);
@@ -241,53 +239,35 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
 
     const changedOrDeletedPaths = [...changedFilePaths, ...deletedFilePaths];
 
-    // ── Targeted clearing instead of blanket wipe ─────────────────────────────
-    // Pre-fetch per-file issues (secrets + SAST) for unchanged files before clearing.
-    // We skip scanning unchanged files so we need to re-inject their existing issues.
-    const PER_FILE_ISSUE_TYPES = ['hardcoded_secret', 'insecure_pattern'];
-    let preservedPerFileIssues = [];
-    if (unchangedFilePaths.size > 0) {
-      const unchangedArr = [...unchangedFilePaths];
-      const batches = chunkArray(unchangedArr, 150);
-      for (const batch of batches) {
-        const { data: existing } = await supabaseAdmin
-          .from('analysis_issues')
-          .select('*')
-          .eq('repo_id', repoId)
-          .in('type', PER_FILE_ISSUE_TYPES)
-          .overlaps('file_paths', batch);
-        if (existing) preservedPerFileIssues.push(...existing);
-      }
+    // ── Phase 2.1: single RPC handles issue preservation + clearing ───────────
+    // prepare_repo_reindex performs proposal stale-marking, non-preservable
+    // issue delete, dependency_manifests + graph_edges + duplication_candidates
+    // wipes, optional file_churn wipe, coverage-flag reset, and the partial
+    // node/chunk/file_contents purge for changed-or-deleted files — all in one
+    // transactional SQL function. Replaces ~10 sequential PostgREST round-trips.
+    const preserveChurn = Array.isArray(incrementalChurnCommits) && incrementalChurnCommits.length > 0;
+    const { data: prepareResult, error: prepareErr } = await withSupabaseRetry(
+      () => supabaseAdmin.rpc('prepare_repo_reindex', {
+        p_repo_id: repoId,
+        p_unchanged_paths: [...unchangedFilePaths],
+        p_changed_or_deleted_paths: changedOrDeletedPaths,
+        p_preserve_churn: preserveChurn,
+      }),
+      { label: 'indexer.prepare_repo_reindex' },
+    );
+
+    if (prepareErr) {
+      throw new Error(`prepare_repo_reindex failed: ${prepareErr.message}`);
     }
 
-    // Always clear: issues, dependency_manifests, all edges (coupling counts change)
-    // Partial clear: nodes/chunks/file_contents only for changed or deleted files
-    await supabaseAdmin.from('analysis_issues').delete().eq('repo_id', repoId);
-    await supabaseAdmin.from('dependency_manifests').delete().eq('repo_id', repoId);
-    await supabaseAdmin.from('graph_edges').delete().eq('repo_id', repoId);
-    // US-050: full-recompute path wipes churn; incremental webhook path preserves
-    // existing rows so applyIncrementalChurn can add deltas onto them.
-    if (!Array.isArray(incrementalChurnCommits) || incrementalChurnCommits.length === 0) {
-      await supabaseAdmin.from('file_churn').delete().eq('repo_id', repoId);
-    }
-    await supabaseAdmin.from('duplication_candidates').delete().eq('repo_id', repoId); // US-052
-    await supabaseAdmin
-      .from('graph_nodes')
-      .update({ has_test_coverage: false, coverage_percentage: null, is_test_file: false })
-      .eq('repo_id', repoId);
-
-    if (changedOrDeletedPaths.length > 0) {
-      const pathBatches = chunkArray(changedOrDeletedPaths, 150);
-      for (const batch of pathBatches) {
-        await supabaseAdmin.from('graph_nodes').delete().eq('repo_id', repoId).in('file_path', batch);
-        await supabaseAdmin.from('code_chunks').delete().eq('repo_id', repoId).in('file_path', batch);
-        await supabaseAdmin.from('file_contents').delete().eq('repo_id', repoId).in('file_path', batch);
-      }
-    }
+    // RPC returns a one-row table; supabase-js wraps it as an array.
+    const report = Array.isArray(prepareResult) ? prepareResult[0] : prepareResult;
+    console.log(`[indexer] Issues: ${report?.preserved_count ?? 0} preserved, ${report?.deleted_count ?? 0} deleted (single-RPC prepare)`);
 
     const limit = pLimit(10);
-    // Seed with pre-fetched per-file issues from unchanged files (secrets + SAST)
-    const issues = [...preservedPerFileIssues];
+    // `issues` accumulates only newly-detected issues. Preserved (unchanged-file)
+    // issues remain in the DB with their original ids — we never re-insert them.
+    const issues = [];
 
     // Fetch existing suppressions for this repo BEFORE scanning
     const { data: suppressions } = await supabaseAdmin
@@ -296,13 +276,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       .eq('repo_id', repoId);
     const suppSet = new Set(suppressions?.map(s => `${s.file_path}:${s.rule_id}:${s.line_number}`) || []);
 
-    // Fetch sast_disabled_rules for this repo (US-046)
-    const { data: repoConfig } = await supabaseAdmin
-      .from('repositories')
-      .select('sast_disabled_rules')
-      .eq('id', repoId)
-      .single();
-    const disabledSastRules = repoConfig?.sast_disabled_rules || [];
+    // sast_disabled_rules (US-046) was already loaded with the repo metadata above.
 
     // 2.5 Optional Pre-pass for C# Namespaces (US-011)
     const namespaceMap = new Map();
@@ -310,6 +284,13 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     const filesToProcess = pendingFiles.filter(f => changedFilePaths.has(f.path));
 
     const isCSharpRepo = pendingFiles.some(f => f.path.toLowerCase().endsWith('.cs'));
+
+    // Phase 5.3: cache C# parses between the pre-pass and the main pass. The
+    // pre-pass needs `exports` (namespaces); the main pass needs the full
+    // parsed result with resolved imports. Without this cache, every .cs file
+    // is parsed twice. We key by file path (content_hash is implied — only
+    // changed files reach this point).
+    const csharpPreParse = new Map();
 
     if (isCSharpRepo) {
       console.log(`[indexer] C# files detected. Running namespace pre-pass on changed files...`);
@@ -321,7 +302,11 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
               if (!file.content) {
                 file.content = await fs.readFile(file.fsPath, 'utf-8');
               }
+              // Pre-pass stays in-process: parses produce a Set-based namespace
+              // map that's mutated below, which is awkward to ship through the
+              // worker pool. The cached result feeds the main pass.
               const parsed = parseFile(file.path, file.content, getAllFilesSet);
+              csharpPreParse.set(file.path, parsed);
               for (const ns of parsed.exports) {
                 if (!namespaceMap.has(ns)) namespaceMap.set(ns, new Set());
                 namespaceMap.get(ns).add(file.path);
@@ -353,8 +338,33 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
             if (!file.content) {
               file.content = await fs.readFile(file.fsPath, 'utf-8');
             }
-            // Parse file directly, passing namespaceMap for C# resolution
-            const parsed = parseFile(file.path, file.content, isCSharpRepo ? namespaceMap : getAllFilesSet);
+
+            // Phase 5.1 + 5.3: parse via the worker pool, except .cs files
+            // (which (a) need the namespace map for resolution, awkward to
+            // pass over the wire, and (b) already have a cached pre-pass tree
+            // we can reuse to skip the dominant tree-sitter parse cost).
+            let parsed;
+            const isCs = file.path.toLowerCase().endsWith('.cs');
+            if (isCs) {
+              const cached = csharpPreParse.get(file.path);
+              const cachedTree = cached && cached._tree ? cached._tree : null;
+              parsed = parseFile(
+                file.path,
+                file.content,
+                namespaceMap,
+                cachedTree
+                  ? { cachedTree, cachedComplexity: cached.complexity }
+                  : {},
+              );
+              // Free the cached tree as soon as the main pass consumes it.
+              csharpPreParse.delete(file.path);
+            } else {
+              parsed = await parseFileInPool({
+                filePath: file.path,
+                content: file.content,
+                allFiles: getAllFilesSet,
+              });
+            }
             parsedFiles.push(parsed);
 
             // Secret scanning (US-044)
@@ -445,10 +455,15 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       }
     }
 
-    // Reconstruct edges originating from unchanged files
+    // Reconstruct edges originating from unchanged files (symbols carried forward)
     for (const edge of (existingEdgeRows || [])) {
       if (unchangedFilePaths.has(edge.from_path)) {
-        allEdges.push({ repo_id: repoId, from_path: edge.from_path, to_path: edge.to_path });
+        allEdges.push({
+          repo_id: repoId,
+          from_path: edge.from_path,
+          to_path: edge.to_path,
+          symbols: Array.isArray(edge.symbols) ? edge.symbols : [],
+        });
       }
     }
 
@@ -485,22 +500,30 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
         coverage_percentage: null,
       });
 
+      const importSymbols = file.importSymbols || {};
       for (const imp of file.imports) {
-        // Create edges correctly
+        // US-064: edges carry the per-importer symbol list when the parser
+        // can extract it. Empty array on languages or import forms where we
+        // can't reliably name the imported symbols.
         allEdges.push({
           repo_id: repoId,
           from_path: file.filePath,
-          to_path: imp
+          to_path: imp,
+          symbols: Array.isArray(importSymbols[imp]) ? importSymbols[imp] : [],
         });
       }
     }
 
-    // Dedupe edges in memory
+    // Dedupe edges in memory, unioning symbols across duplicate (from, to) pairs.
     const edgeMap = new Map();
     for (const edge of allEdges) {
       const edgeKey = `${edge.from_path}->${edge.to_path}`;
       if (!edgeMap.has(edgeKey)) {
-        edgeMap.set(edgeKey, edge);
+        edgeMap.set(edgeKey, { ...edge, symbols: [...(edge.symbols || [])] });
+      } else {
+        const existing = edgeMap.get(edgeKey);
+        const merged = new Set([...(existing.symbols || []), ...(edge.symbols || [])]);
+        existing.symbols = [...merged];
       }
     }
     const uniqueEdges = Array.from(edgeMap.values());
@@ -524,22 +547,24 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     });
     console.log(`[indexer] Coverage: ${testFilesSet.size} test file(s), ${heuristicCoveredPaths.size} heuristic target(s), ${coverageByPath.size} formal override(s).`);
 
-    // 6. bulk insert nodes
+    // 6. bulk insert nodes (retry on transient 5xx / 429 / network errors)
     console.time(`[indexer] Phase 3: DB writes (${repoId})`);
     const nodeChunks = chunkArray(uniqueNodes, 500);
     for (const chunk of nodeChunks) {
-      const { error } = await supabaseAdmin
-        .from('graph_nodes')
-        .upsert(chunk, { onConflict: 'repo_id,file_path', ignoreDuplicates: true });
+      const { error } = await withSupabaseRetry(
+        () => supabaseAdmin.from('graph_nodes').upsert(chunk, { onConflict: 'repo_id,file_path', ignoreDuplicates: true }),
+        { label: 'indexer.graph_nodes.upsert' },
+      );
       if (error) throw new Error(`Database error inserting nodes: ${error.message}`);
     }
 
     // 7. bulk insert edges
     const edgeChunks = chunkArray(uniqueEdges, 500);
     for (const chunk of edgeChunks) {
-      const { error } = await supabaseAdmin
-        .from('graph_edges')
-        .upsert(chunk, { onConflict: 'repo_id,from_path,to_path', ignoreDuplicates: true });
+      const { error } = await withSupabaseRetry(
+        () => supabaseAdmin.from('graph_edges').upsert(chunk, { onConflict: 'repo_id,from_path,to_path', ignoreDuplicates: true }),
+        { label: 'indexer.graph_edges.upsert' },
+      );
       if (error) throw new Error(`Database error inserting edges: ${error.message}`);
     }
 
@@ -564,9 +589,10 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     // 8b. persist metrics to graph_nodes via update
     const metricsChunks = chunkArray(finalNodes, 500);
     for (const chunk of metricsChunks) {
-      const { error } = await supabaseAdmin
-        .from('graph_nodes')
-        .upsert(chunk, { onConflict: 'repo_id,file_path', ignoreDuplicates: false }); // false to DO UPDATE
+      const { error } = await withSupabaseRetry(
+        () => supabaseAdmin.from('graph_nodes').upsert(chunk, { onConflict: 'repo_id,file_path', ignoreDuplicates: false }), // false to DO UPDATE
+        { label: 'indexer.graph_nodes.metrics' },
+      );
       if (error) throw new Error(`Database error updating metrics: ${error.message}`);
     }
     console.timeEnd(`[indexer] Phase 3: DB writes (${repoId})`);
@@ -650,12 +676,25 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       .eq('type', 'untested_critical_file');
 
     if (issues.length > 0) {
-      const issueRows = issues
+      // Phase 2.2: bulk_insert_analysis_issues consolidates 1-N chunked inserts
+      // into a single RPC. Shape validation (type non-null, file_paths
+      // non-empty) is enforced server-side now.
+      const issuePayload = issues
         .filter(issue => issue?.type && Array.isArray(issue.file_paths) && issue.file_paths.length > 0)
-        .map(issue => toAnalysisIssueInsert(issue, repoId));
-      const issueChunks = chunkArray(issueRows, 500);
-      for (const chunk of issueChunks) {
-        const { error } = await supabaseAdmin.from('analysis_issues').insert(chunk);
+        .map(issue => ({
+          type:        issue.type,
+          severity:    issue.severity || null,
+          file_paths:  issue.file_paths,
+          description: issue.description || null,
+        }));
+      if (issuePayload.length > 0) {
+        const { error } = await withSupabaseRetry(
+          () => supabaseAdmin.rpc('bulk_insert_analysis_issues', {
+            p_repo_id: repoId,
+            p_issues: issuePayload,
+          }),
+          { label: 'indexer.bulk_insert_analysis_issues' },
+        );
         if (error) console.error(`[indexer] Database error inserting issues: ${error.message}`);
       }
     }
@@ -684,10 +723,13 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     if (fileContentRows.length > 0) {
       const fcBatches = chunkArray(fileContentRows, 200);
       for (const batch of fcBatches) {
-        const { error: fcErr } = await supabaseAdmin
-          .from('file_contents')
-          .upsert(batch, { onConflict: 'repo_id,file_path', ignoreDuplicates: false });
-        if (fcErr) console.error(`[indexer] file_contents insert error: ${fcErr.message}`);
+        const { error: fcErr } = await withSupabaseRetry(
+          () => supabaseAdmin.from('file_contents').upsert(batch, { onConflict: 'repo_id,file_path', ignoreDuplicates: false }),
+          { label: 'indexer.file_contents.upsert' },
+        );
+        // file_contents drives RAG retrieval — promote from warning to error so we
+        // notice silent breakage. Retry already handled transient cases above.
+        if (fcErr) console.error(`[indexer] file_contents insert error (RAG retrieval may be incomplete): ${fcErr.message}`);
       }
     }
     console.log(`[indexer] Stored ${fileContentRows.length} file contents.`);
@@ -747,10 +789,77 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
 
         console.log(`[indexer] Generated ${allExtractedChunks.length} raw chunks for ${changedFilePaths.size} changed files. Proceeding to OpenAI.`);
 
-        // 10c. Batch API vectors — batch size of 100 (OpenAI supports up to 2048 inputs)
+        // 10b. Phase 5.2: embedding cache lookup by content hash.
+        // Identical chunks across repos (shared library code, copied
+        // components) reuse the cached embedding instead of paying OpenAI
+        // again. Cache is global by content_hash; access is via service_role.
         console.time(`[indexer] Phase 5: Embedding (${repoId})`);
-        const batches = chunkArray(allExtractedChunks, 100);
+        const chunksWithHash = allExtractedChunks.map((chunk) => ({
+          ...chunk,
+          content_hash: sha256(chunk.content),
+        }));
+
+        const uniqueHashes = Array.from(new Set(chunksWithHash.map(c => c.content_hash)));
+        const cachedEmbeddings = new Map();
+        if (uniqueHashes.length > 0) {
+          // Look up in batches — Supabase has a URL length cap on `in.()` filters.
+          const lookupBatches = chunkArray(uniqueHashes, 500);
+          for (const hashBatch of lookupBatches) {
+            const { data: cacheRows, error: cacheErr } = await supabaseAdmin
+              .from('embedding_cache')
+              .select('content_hash, embedding')
+              .in('content_hash', hashBatch);
+            if (cacheErr) {
+              console.warn(`[indexer] embedding_cache lookup failed (continuing without cache): ${cacheErr.message}`);
+              break;
+            }
+            for (const row of (cacheRows || [])) {
+              cachedEmbeddings.set(row.content_hash, row.embedding);
+            }
+          }
+        }
+
         const mappedPayloads = [];
+        const newCacheRows = []; // for write-back, dedup'd by content_hash
+        const seenNewHashes = new Set();
+        const chunksToEmbed = [];
+        for (const chunk of chunksWithHash) {
+          const cached = cachedEmbeddings.get(chunk.content_hash);
+          if (cached) {
+            mappedPayloads.push({
+              repo_id: chunk.repo_id,
+              file_path: chunk.file_path,
+              start_line: chunk.start_line,
+              end_line: chunk.end_line,
+              content: chunk.content,
+              embedding: cached,
+            });
+          } else {
+            chunksToEmbed.push(chunk);
+          }
+        }
+        console.log(`[indexer] Embedding cache: ${cachedEmbeddings.size}/${uniqueHashes.length} unique hashes hit (skipping ${allExtractedChunks.length - chunksToEmbed.length} of ${allExtractedChunks.length} chunks).`);
+
+        // Touch last_used_at for cache hits so the eviction job doesn't drop
+        // hot rows. Fire-and-forget — failure here doesn't affect correctness,
+        // but we must catch rejections to avoid unhandledRejection warnings.
+        if (cachedEmbeddings.size > 0) {
+          const hitHashes = Array.from(cachedEmbeddings.keys());
+          for (const batch of chunkArray(hitHashes, 500)) {
+            supabaseAdmin
+              .from('embedding_cache')
+              .update({ last_used_at: new Date().toISOString() })
+              .in('content_hash', batch)
+              .then(
+                ({ error }) => {
+                  if (error) console.warn(`[indexer] embedding_cache touch failed: ${error.message}`);
+                },
+                (err) => console.warn(`[indexer] embedding_cache touch threw: ${err.message}`),
+              );
+          }
+        }
+
+        const batches = chunkArray(chunksToEmbed, 100);
 
         // Process embedding batches with concurrency limit of 5
         const embedLimit = pLimit(5);
@@ -768,15 +877,30 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
                   recordUsage({ userId: repoUserId, endpoint: 'indexer/embed', provider: 'openai', embeddingTokens: res.usage.total_tokens });
                 }
 
+                const perChunkTokens = batch.length > 0
+                  ? Math.round((res.usage?.total_tokens || 0) / batch.length)
+                  : 0;
                 for (let i = 0; i < batch.length; i++) {
+                  const embedding = res.data[i].embedding;
                   mappedPayloads.push({
                     repo_id: batch[i].repo_id,
                     file_path: batch[i].file_path,
                     start_line: batch[i].start_line,
                     end_line: batch[i].end_line,
                     content: batch[i].content,
-                    embedding: res.data[i].embedding
+                    embedding,
                   });
+                  // Phase 5.2: collect a single row per unique content_hash for
+                  // write-back to embedding_cache.
+                  const hash = batch[i].content_hash;
+                  if (hash && !seenNewHashes.has(hash)) {
+                    seenNewHashes.add(hash);
+                    newCacheRows.push({
+                      content_hash: hash,
+                      embedding,
+                      token_count: perChunkTokens,
+                    });
+                  }
                 }
               } catch (batchErr) {
                 console.warn(`[indexer] Batch ${batchIdx} embed failed: ${batchErr.message}. Falling back to per-chunk.`);
@@ -788,14 +912,24 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
                       input: singleChunk.content,
                       model: "text-embedding-3-small"
                     });
+                    const embedding = singleRes.data[0].embedding;
                     mappedPayloads.push({
                       repo_id: singleChunk.repo_id,
                       file_path: singleChunk.file_path,
                       start_line: singleChunk.start_line,
                       end_line: singleChunk.end_line,
                       content: singleChunk.content,
-                      embedding: singleRes.data[0].embedding
+                      embedding,
                     });
+                    const hash = singleChunk.content_hash;
+                    if (hash && !seenNewHashes.has(hash)) {
+                      seenNewHashes.add(hash);
+                      newCacheRows.push({
+                        content_hash: hash,
+                        embedding,
+                        token_count: singleRes.usage?.total_tokens || 0,
+                      });
+                    }
                   } catch (singleErr) {
                     console.warn(`[indexer] Failed to embed chunk in ${singleChunk.file_path}: ${singleErr.message}`);
                   }
@@ -813,7 +947,24 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
              if (insErr) console.error(`[indexer] DB insert err for vectors: ${insErr.message}`);
            }
         }
-        console.log(`[indexer] Completely finished semantic embeddings mappings. Saved ${mappedPayloads.length} vectors!`);
+
+        // Phase 5.2: write newly-embedded hashes back to the cache so the next
+        // repo that contains the same chunk can skip OpenAI. ON CONFLICT just
+        // bumps last_used_at — a race between concurrent indexing runs is a
+        // duplicate-key conflict, not an error.
+        if (newCacheRows.length > 0) {
+          const cacheBatches = chunkArray(newCacheRows, 500);
+          for (const cBatch of cacheBatches) {
+            const { error: cacheErr } = await supabaseAdmin
+              .from('embedding_cache')
+              .upsert(
+                cBatch.map(r => ({ ...r, last_used_at: new Date().toISOString() })),
+                { onConflict: 'content_hash' }
+              );
+            if (cacheErr) console.warn(`[indexer] embedding_cache writeback failed: ${cacheErr.message}`);
+          }
+        }
+        console.log(`[indexer] Completely finished semantic embeddings mappings. Saved ${mappedPayloads.length} vectors (${newCacheRows.length} new cache rows)!`);
         console.timeEnd(`[indexer] Phase 5: Embedding (${repoId})`);
 
         try {

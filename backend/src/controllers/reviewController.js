@@ -6,6 +6,7 @@ const { OpenAI }        = require('openai');
 const Anthropic         = require('@anthropic-ai/sdk');
 const { supabaseAdmin } = require('../db/supabase');
 const { recordUsage }   = require('../services/usageTracker');
+const { bindRequestAbort, isAbortError } = require('../lib/sseAbort');
 
 const MODEL = 'claude-sonnet-4-20250514';
 const MAX_DAILY_TOKENS = parseInt(process.env.MAX_DAILY_TOKENS_PER_USER || '500000', 10);
@@ -49,16 +50,22 @@ async function canAccessRepo(repoId, userId) {
   return !!teamRepo;
 }
 
+// Phase 3.3: read the api_usage_daily rollup instead of scanning api_usage.
+// Mirrors the aiRateLimit middleware so per-target audit budget checks (which
+// run once per file in a whole-repo audit) stay O(1) regardless of usage
+// table size. A 24h rolling window straddles at most two UTC days.
 async function dailyTokensUsed(userId) {
-  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const now    = new Date();
+  const today  = now.toISOString().slice(0, 10);
+  const yest   = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const { data, error } = await supabaseAdmin
-    .from('api_usage')
+    .from('api_usage_daily')
     .select('prompt_tokens, completion_tokens, embedding_tokens')
     .eq('user_id', userId)
-    .gte('created_at', since);
+    .in('usage_date', [today, yest]);
   if (error) return 0;
   return (data || []).reduce(
-    (sum, row) => sum + (row.prompt_tokens || 0) + (row.completion_tokens || 0) + (row.embedding_tokens || 0),
+    (sum, row) => sum + Number(row.prompt_tokens || 0) + Number(row.completion_tokens || 0) + Number(row.embedding_tokens || 0),
     0
   );
 }
@@ -324,31 +331,47 @@ async function embedSnippet(snippet, userId, endpoint = 'review') {
   return embedding;
 }
 
-async function streamClaude({ system, user, send, userId, endpoint = 'review', maxTokens = 1500 }) {
-  const stream = await anthropic.messages.create({
-    model: MODEL,
-    max_tokens: maxTokens,
-    system,
-    messages: [{ role: 'user', content: user }],
-    stream: true,
-  });
-
+async function streamClaude({ system, user, send, userId, endpoint = 'review', maxTokens = 1500, req }) {
+  const { signal, cleanup } = bindRequestAbort(req);
   let text = '';
   let inputTokens = 0;
   let outputTokens = 0;
-  for await (const event of stream) {
-    if (event.type === 'message_start') {
-      inputTokens = event.message?.usage?.input_tokens || 0;
-    } else if (event.type === 'message_delta') {
-      outputTokens = event.usage?.output_tokens || outputTokens;
-    } else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
-      text += event.delta.text;
-      send?.({ type: 'chunk', text: event.delta.text });
+  let aborted = false;
+
+  try {
+    const stream = await anthropic.messages.create({
+      model: MODEL,
+      max_tokens: maxTokens,
+      system,
+      messages: [{ role: 'user', content: user }],
+      stream: true,
+    }, { signal });
+
+    for await (const event of stream) {
+      if (event.type === 'message_start') {
+        inputTokens = event.message?.usage?.input_tokens || 0;
+      } else if (event.type === 'message_delta') {
+        outputTokens = event.usage?.output_tokens || outputTokens;
+      } else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+        text += event.delta.text;
+        send?.({ type: 'chunk', text: event.delta.text });
+      }
     }
+  } catch (err) {
+    if (isAbortError(err, signal)) {
+      aborted = true;
+      console.warn(`[review] Claude stream aborted by client disconnect (endpoint=${endpoint}, partial_output_tokens=${outputTokens})`);
+    } else {
+      throw err;
+    }
+  } finally {
+    cleanup();
   }
 
+  // Record usage even on abort — input tokens were already billed and any partial
+  // output tokens count too. Skipping this would let abuse vectors hide cost.
   await recordUsage({ userId, endpoint, provider: 'anthropic', promptTokens: inputTokens, completionTokens: outputTokens });
-  return { text, inputTokens, outputTokens };
+  return { text, inputTokens, outputTokens, aborted };
 }
 
 async function fetchFileSource(repoId, filePath) {
@@ -467,7 +490,10 @@ const review = async (req, res) => {
 
     let chunks;
     try {
-      const retrieved = await retrieveChunks(repoId, embedding, mode === 'security_audit' ? 12 : 5);
+      // Phase 1.6: security_audit fetched 12 chunks then sliced to 5 after re-rank,
+      // wasting ~half the vector compute. 6 keeps the re-rank meaningful while
+      // halving the distance work.
+      const retrieved = await retrieveChunks(repoId, embedding, mode === 'security_audit' ? 6 : 5);
       chunks = mode === 'security_audit' ? rerankSecurityChunks(retrieved).slice(0, 5) : retrieved.slice(0, 5);
     } catch {
       send({ type: 'error', message: 'Failed to search the codebase index. Please try again.' });
@@ -478,7 +504,8 @@ const review = async (req, res) => {
     const { system, user } = buildReviewPrompt(snippet.trim(), contextDescription, chunks, mode, filePath);
     // In security_audit mode, suppress raw chunk events — findings arrive as structured `finding` SSE events instead.
     const chunkSend = mode === 'security_audit' ? null : send;
-    const { text } = await streamClaude({ system, user, send: chunkSend, userId: req.user.id, endpoint: 'review' });
+    const { text, aborted } = await streamClaude({ system, user, send: chunkSend, userId: req.user.id, endpoint: 'review', req });
+    if (aborted) return res.end();
 
     if (mode === 'security_audit') {
       const issues = await fetchDeterministicIssues(repoId, filePath ? [filePath] : []);
@@ -581,7 +608,9 @@ const runSecurityAudit = async (req, res) => {
       send({ type: 'progress', file_path: target.file_path, index: index + 1, total: preparedTargets.length, status: 'auditing', estimated_tokens: estimatedTokens, remaining_tokens: remaining });
 
       const embedding = await embedSnippet(source.slice(0, 12000), req.user.id, 'security_audit');
-      const retrieved = await retrieveChunks(repoId, embedding, 12);
+      // Phase 1.6: retrieve 6 then keep 5 — half the vector distance compute we
+      // were spending when this was 12.
+      const retrieved = await retrieveChunks(repoId, embedding, 6);
       const chunks = rerankSecurityChunks(retrieved).slice(0, 5);
       send({ type: 'sources', file_path: target.file_path, sources: chunks.map(formatSource) });
 
@@ -599,7 +628,17 @@ const runSecurityAudit = async (req, res) => {
       }
 
       const { system, user } = buildReviewPrompt(source.slice(0, 20000), `Whole-repo security audit target: ${target.file_path}`, chunks, 'security_audit', target.file_path);
-      const { text } = await streamClaude({ system, user, send, userId: req.user.id, endpoint: 'security_audit', maxTokens: 1200 });
+      const { text, aborted } = await streamClaude({ system, user, send, userId: req.user.id, endpoint: 'security_audit', maxTokens: 1200, req });
+      if (aborted) {
+        // Client disconnected mid-audit. Persist a partial report so the user
+        // can resume from where we stopped, then exit the loop without billing
+        // for remaining targets.
+        report.status = 'partial';
+        report.summary.narrative = `Security audit aborted by client after ${report.summary.audited_count} file(s).`;
+        const audit = await persistAudit({ userId: req.user.id, repoId, report });
+        try { send({ type: 'aborted', audit }); } catch { /* connection already gone */ }
+        return res.end();
+      }
       report.raw_text += `\n\n--- ${target.file_path} ---\n${text}`;
 
       const fileIssues = deterministicIssues.filter((issue) => (issue.file_paths || []).includes(target.file_path));
@@ -710,21 +749,507 @@ const duplicationRefactor = async (req, res) => {
     }
 
     const { system, user } = buildDuplicationRefactorPrompt(cluster);
-    await streamClaude({
+    const { aborted } = await streamClaude({
       system,
       user,
       send,
       userId: req.user.id,
       endpoint: 'duplication_refactor',
       maxTokens: 1800,
+      req,
     });
 
-    send({ type: 'done' });
+    if (!aborted) send({ type: 'done' });
     res.end();
   } catch (err) {
     console.error('[duplication-refactor] Unhandled error:', err);
     try {
       send({ type: 'error', message: 'Failed to generate a duplication refactor. Please try again.' });
+      res.end();
+    } catch {
+      res.end();
+    }
+  }
+};
+
+// ─── US-064: Refactor proposal generation ─────────────────────────────────────
+
+const PROPOSAL_MAX_TOKENS = 4000;
+const PROPOSAL_FILE_BUDGET_CHARS = 30000; // ≈ 7.5k tokens per file
+const PROPOSAL_NEIGHBOUR_LIMIT = 5;
+const PROPOSAL_IMPORTERS_LIMIT = 30;
+
+const PROPOSAL_SYSTEM_BASE = [
+  'You are a senior engineer proposing a concrete code refactor.',
+  'Output a single JSON object matching this exact schema:',
+  '{ "summary": string, "rationale": string, "changes": [{ "file_path": string, "action": "create"|"modify"|"delete", "diff": string, "full_content": string }], "risks": string[] }',
+  'Return ONLY the JSON object. No commentary, no markdown fences, no prose around it.',
+  'Diffs MUST be in unified format (--- a/path, +++ b/path, @@ hunks).',
+  'For create and modify actions, include the entire resulting file as full_content.',
+  'For delete actions, leave full_content empty and explain in risks.',
+  'List in risks anything the static analysis could miss (reflection, dynamic imports, runtime DI).',
+].join(' ');
+
+async function fetchAnalysisIssue(repoId, issueId) {
+  const { data, error } = await supabaseAdmin
+    .from('analysis_issues')
+    .select('id, repo_id, type, severity, file_paths, description')
+    .eq('id', issueId)
+    .eq('repo_id', repoId)
+    .maybeSingle();
+  if (error || !data) return null;
+  return data;
+}
+
+async function fetchCachedPendingProposal(issueId, userId) {
+  const { data } = await supabaseAdmin
+    .from('issue_proposals')
+    .select('id, proposal_json, created_at')
+    .eq('issue_id', issueId)
+    .eq('user_id', userId)
+    .eq('status', 'pending')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return data || null;
+}
+
+function clipFile(source, limit = PROPOSAL_FILE_BUDGET_CHARS) {
+  if (!source) return '';
+  if (source.length <= limit) return source;
+  return source.slice(0, limit) + '\n/* [CodeLens] truncated for context budget */';
+}
+
+async function buildGodFileContext(issue, repoId, filePath) {
+  const source = clipFile(await fetchFileSource(repoId, filePath) || '');
+
+  const { data: importers } = await supabaseAdmin
+    .from('graph_edges')
+    .select('from_path, symbols')
+    .eq('repo_id', repoId)
+    .eq('to_path', filePath);
+
+  const ranked = (importers || []).slice().sort((a, b) => {
+    const al = Array.isArray(a.symbols) ? a.symbols.length : 0;
+    const bl = Array.isArray(b.symbols) ? b.symbols.length : 0;
+    return bl - al;
+  });
+
+  const importerLines = ranked.slice(0, PROPOSAL_IMPORTERS_LIMIT).map((r) => {
+    const syms = (Array.isArray(r.symbols) ? r.symbols : []).filter(Boolean);
+    return syms.length > 0
+      ? `- ${r.from_path}: uses ${syms.join(', ')}`
+      : `- ${r.from_path}: (no symbol tracking on this edge)`;
+  }).join('\n');
+
+  const system = PROPOSAL_SYSTEM_BASE + ' Specifically: split a god file into focused modules, minimising cross-cuts based on which symbols each importer actually uses. For backward compatibility, the original file should re-export from the new files unless explicitly safe to break.';
+  const user = [
+    `File flagged as a god file: ${filePath}`,
+    issue.description ? `Issue description: ${issue.description}` : '',
+    '',
+    'Importers and the symbols each one uses:',
+    importerLines || '(no importers found)',
+    '',
+    'Current file content:',
+    '```',
+    source,
+    '```',
+  ].filter(Boolean).join('\n');
+  return { system, user };
+}
+
+async function buildCircularContext(issue, repoId) {
+  const paths = Array.isArray(issue.file_paths) ? issue.file_paths : [];
+  const fileBlocks = [];
+  for (const p of paths.slice(0, 6)) {
+    const src = await fetchFileSource(repoId, p);
+    const trimmed = clipFile(src || '(file content unavailable)', 8000);
+    fileBlocks.push(`--- ${p} ---\n${trimmed}`);
+  }
+
+  let edges = [];
+  if (paths.length > 0) {
+    const { data } = await supabaseAdmin
+      .from('graph_edges')
+      .select('from_path, to_path, symbols')
+      .eq('repo_id', repoId)
+      .in('from_path', paths)
+      .in('to_path', paths);
+    edges = data || [];
+  }
+
+  const edgeLines = edges.map((e) => {
+    const syms = Array.isArray(e.symbols) && e.symbols.length > 0 ? ` (${e.symbols.join(', ')})` : '';
+    return `- ${e.from_path} → ${e.to_path}${syms}`;
+  }).join('\n');
+
+  const system = PROPOSAL_SYSTEM_BASE + ' Specifically: break a circular import cycle with the cheapest possible cut — usually extracting a shared dependency into a new file, moving one symbol, or inverting a dependency.';
+  const user = [
+    `Circular dependency involves: ${paths.join(', ')}`,
+    issue.description ? `Issue description: ${issue.description}` : '',
+    '',
+    'Edges between these files (importer → importee, symbols where known):',
+    edgeLines || '(no edges captured)',
+    '',
+    'File contents:',
+    fileBlocks.join('\n\n'),
+  ].filter(Boolean).join('\n');
+  return { system, user };
+}
+
+async function buildHighCouplingContext(issue, repoId, filePath) {
+  const source = clipFile(await fetchFileSource(repoId, filePath) || '');
+
+  const { data: outEdges } = await supabaseAdmin
+    .from('graph_edges')
+    .select('to_path, symbols')
+    .eq('repo_id', repoId)
+    .eq('from_path', filePath);
+  const { data: inEdges } = await supabaseAdmin
+    .from('graph_edges')
+    .select('from_path, symbols')
+    .eq('repo_id', repoId)
+    .eq('to_path', filePath);
+
+  const neighbourMap = new Map();
+  for (const e of (outEdges || [])) {
+    const n = neighbourMap.get(e.to_path) || { path: e.to_path, count: 0, symbols: new Set() };
+    n.count += 1;
+    (e.symbols || []).forEach((s) => n.symbols.add(s));
+    neighbourMap.set(e.to_path, n);
+  }
+  for (const e of (inEdges || [])) {
+    const n = neighbourMap.get(e.from_path) || { path: e.from_path, count: 0, symbols: new Set() };
+    n.count += 1;
+    (e.symbols || []).forEach((s) => n.symbols.add(s));
+    neighbourMap.set(e.from_path, n);
+  }
+  const top = [...neighbourMap.values()].sort((a, b) => b.count - a.count).slice(0, PROPOSAL_NEIGHBOUR_LIMIT);
+  const lines = top.map((n) => `- ${n.path}${n.symbols.size > 0 ? ` (symbols: ${[...n.symbols].join(', ')})` : ''}`).join('\n');
+
+  const system = PROPOSAL_SYSTEM_BASE + ' Specifically: reduce coupling by introducing an interface, narrowing the API surface, or relocating responsibilities.';
+  const user = [
+    `High coupling on file: ${filePath}`,
+    issue.description ? `Issue description: ${issue.description}` : '',
+    '',
+    `Top ${PROPOSAL_NEIGHBOUR_LIMIT} most-coupled neighbours:`,
+    lines || '(no neighbours identified)',
+    '',
+    'File content:',
+    '```',
+    source,
+    '```',
+  ].filter(Boolean).join('\n');
+  return { system, user };
+}
+
+async function buildDeadCodeContext(issue, repoId, filePath) {
+  const source = clipFile(await fetchFileSource(repoId, filePath) || '');
+  const { data: incoming } = await supabaseAdmin
+    .from('graph_edges')
+    .select('from_path')
+    .eq('repo_id', repoId)
+    .eq('to_path', filePath);
+
+  const system = PROPOSAL_SYSTEM_BASE + ' Specifically: remove dead code. Use action "delete" for files that should be removed entirely. Flag reflection / dynamic-import callers as risks since the static graph could miss them.';
+  const user = [
+    `Dead code candidate: ${filePath}`,
+    `Static incoming edges: ${(incoming || []).length}`,
+    issue.description ? `Issue description: ${issue.description}` : '',
+    '',
+    'Current file content:',
+    '```',
+    source,
+    '```',
+  ].filter(Boolean).join('\n');
+  return { system, user };
+}
+
+async function buildMissingAuthContext(issue, repoId, filePath) {
+  const source = clipFile(await fetchFileSource(repoId, filePath) || '');
+  const system = PROPOSAL_SYSTEM_BASE + ' Specifically: add auth protection to an unauthenticated route handler. Re-use the same middleware/decorator pattern the rest of the file already uses for authenticated routes if one is visible. If no auth helper is imported, propose a minimal import based on the file\'s existing dependencies.';
+  const user = [
+    `Route handler file with unauthenticated routes: ${filePath}`,
+    issue.description ? `Issue description (lists the unauthenticated paths): ${issue.description}` : '',
+    '',
+    'File content:',
+    '```',
+    source,
+    '```',
+  ].filter(Boolean).join('\n');
+  return { system, user };
+}
+
+async function buildHardcodedSecretContext(issue, repoId, filePath) {
+  const source = await fetchFileSource(repoId, filePath) || '';
+  const lineMatch = String(issue.description || '').match(/line\s+(\d+)/i);
+  const line = lineMatch ? Number(lineMatch[1]) : null;
+
+  let snippet;
+  if (line) {
+    const lines = source.split('\n');
+    const start = Math.max(0, line - 11);
+    const end = Math.min(lines.length, line + 10);
+    snippet = lines.slice(start, end).map((l, i) => `${start + i + 1}: ${l}`).join('\n');
+  } else {
+    snippet = clipFile(source, 8000);
+  }
+
+  const envExample = await fetchFileSource(repoId, '.env.example');
+
+  const system = PROPOSAL_SYSTEM_BASE + ' Specifically: replace a hardcoded secret with a runtime read from environment configuration. NEVER repeat the original secret value verbatim. Add the new key to .env.example if it is provided, otherwise list it in risks.';
+  const user = [
+    `File with hardcoded secret: ${filePath}`,
+    issue.description ? `Issue description: ${issue.description}` : '',
+    line ? `Secret is on line ${line} (±10 lines below).` : '',
+    '',
+    'Source snippet:',
+    '```',
+    snippet,
+    '```',
+    envExample ? `\nExisting .env.example:\n\`\`\`\n${clipFile(envExample, 4000)}\n\`\`\`` : '\n(.env.example not found in repo)',
+  ].filter(Boolean).join('\n');
+  return { system, user };
+}
+
+async function buildVulnDependencyContext(issue, repoId, filePath) {
+  const source = filePath ? clipFile(await fetchFileSource(repoId, filePath) || '', 12000) : '';
+  const system = PROPOSAL_SYSTEM_BASE + ' Specifically: a dependency in this manifest has a known vulnerability. Propose the safe upgrade. For lockfiles, only describe the version change in the diff and list re-generation steps in risks — do not invent a full lockfile diff.';
+  const user = [
+    `Vulnerable dependency in: ${filePath || '(unknown manifest)'}`,
+    issue.description ? `Issue description: ${issue.description}` : '',
+    '',
+    filePath ? `Manifest content:\n\`\`\`\n${source}\n\`\`\`` : '',
+  ].filter(Boolean).join('\n');
+  return { system, user };
+}
+
+async function buildGenericContext(issue, repoId, filePath) {
+  const source = filePath ? clipFile(await fetchFileSource(repoId, filePath) || '') : '';
+  const user = [
+    `Issue type: ${issue.type}`,
+    `Affected file: ${filePath || '(none)'}`,
+    `Severity: ${issue.severity || 'unknown'}`,
+    `Description: ${issue.description || '(no description)'}`,
+    filePath ? `\nFile content:\n\`\`\`\n${source}\n\`\`\`` : '',
+  ].filter(Boolean).join('\n');
+  return { system: PROPOSAL_SYSTEM_BASE, user };
+}
+
+async function buildContextForIssue(issue, repoId) {
+  const primary = Array.isArray(issue.file_paths) ? issue.file_paths[0] : null;
+  switch (issue.type) {
+    case 'god_file':              return buildGodFileContext(issue, repoId, primary);
+    case 'circular_dependency':   return buildCircularContext(issue, repoId);
+    case 'high_coupling':         return buildHighCouplingContext(issue, repoId, primary);
+    case 'dead_code':             return buildDeadCodeContext(issue, repoId, primary);
+    case 'missing_auth':          return buildMissingAuthContext(issue, repoId, primary);
+    case 'hardcoded_secret':      return buildHardcodedSecretContext(issue, repoId, primary);
+    case 'vulnerable_dependency': return buildVulnDependencyContext(issue, repoId, primary);
+    default:                      return buildGenericContext(issue, repoId, primary);
+  }
+}
+
+function extractStreamingSummary(text) {
+  const match = text.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)/);
+  if (!match) return '';
+  // Unescape in the correct JSON order: collapse `\\` first via a sentinel so
+  // that a literal backslash followed by `n` (e.g. a Windows path) isn't
+  // mis-interpreted as a newline escape.
+  return match[1]
+    .replace(/\\\\/g, '')
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"')
+    .replace(//g, '\\');
+}
+
+function normalizeChange(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const action = String(raw.action || '').toLowerCase();
+  if (!['create', 'modify', 'delete'].includes(action)) return null;
+  const filePath = String(raw.file_path || '').trim();
+  if (!filePath) return null;
+  return {
+    file_path: filePath,
+    action,
+    diff: typeof raw.diff === 'string' ? raw.diff : '',
+    full_content: typeof raw.full_content === 'string' ? raw.full_content : '',
+  };
+}
+
+function normalizeProposal(parsed) {
+  if (!parsed || typeof parsed !== 'object') return null;
+  return {
+    summary:   String(parsed.summary || '').trim(),
+    rationale: String(parsed.rationale || '').trim(),
+    changes:   Array.isArray(parsed.changes) ? parsed.changes.map(normalizeChange).filter(Boolean) : [],
+    risks:     Array.isArray(parsed.risks) ? parsed.risks.map((r) => String(r).trim()).filter(Boolean) : [],
+  };
+}
+
+function parseProposalJson(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return null;
+
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidates = fenced ? [fenced[1].trim(), trimmed] : [trimmed];
+  for (const candidate of candidates) {
+    try {
+      return normalizeProposal(JSON.parse(candidate));
+    } catch {
+      // Try the next candidate.
+    }
+  }
+
+  // Last-resort: extract the largest brace-balanced JSON substring.
+  const start = trimmed.indexOf('{');
+  if (start < 0) return null;
+  let depth = 0;
+  for (let i = start; i < trimmed.length; i++) {
+    if (trimmed[i] === '{') depth++;
+    else if (trimmed[i] === '}') {
+      depth--;
+      if (depth === 0) {
+        try {
+          return normalizeProposal(JSON.parse(trimmed.slice(start, i + 1)));
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function emitProposalEvents(send, proposal) {
+  if (!proposal) return;
+  if (proposal.summary) send({ type: 'summary_delta', delta: proposal.summary });
+  for (const change of (proposal.changes || [])) send({ type: 'change', change });
+  for (const risk of (proposal.risks || [])) send({ type: 'risk', risk });
+}
+
+const generateProposal = async (req, res) => {
+  const { repoId, issueId } = req.params;
+  const regenerate = String(req.query?.regenerate || '').toLowerCase() === 'true';
+
+  const allowed = await canAccessRepo(repoId, req.user.id);
+  if (!allowed) return res.status(404).json({ error: 'Repository not found or unauthorized' });
+
+  const issue = await fetchAnalysisIssue(repoId, issueId);
+  if (!issue) return res.status(404).json({ error: 'Issue not found' });
+
+  openSse(res);
+  const send = sendFactory(res);
+
+  try {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      send({ type: 'error', message: 'Proposal generation requires the Anthropic API key.' });
+      return res.end();
+    }
+
+    if (!regenerate) {
+      const cached = await fetchCachedPendingProposal(issueId, req.user.id);
+      if (cached?.proposal_json) {
+        emitProposalEvents(send, cached.proposal_json);
+        send({ type: 'done', proposal_id: cached.id, cached: true });
+        return res.end();
+      }
+    }
+
+    const { system, user } = await buildContextForIssue(issue, repoId);
+    const { signal, cleanup } = bindRequestAbort(req);
+
+    let text = '';
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let summaryEmitted = '';
+    let aborted = false;
+
+    try {
+      const stream = await anthropic.messages.create({
+        model: MODEL,
+        max_tokens: PROPOSAL_MAX_TOKENS,
+        system,
+        messages: [{ role: 'user', content: user }],
+        stream: true,
+      }, { signal });
+
+      for await (const event of stream) {
+        if (event.type === 'message_start') {
+          inputTokens = event.message?.usage?.input_tokens || 0;
+        } else if (event.type === 'message_delta') {
+          outputTokens = event.usage?.output_tokens || outputTokens;
+        } else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+          text += event.delta.text;
+          const currentSummary = extractStreamingSummary(text);
+          if (currentSummary && currentSummary.length > summaryEmitted.length) {
+            const delta = currentSummary.slice(summaryEmitted.length);
+            summaryEmitted = currentSummary;
+            send({ type: 'summary_delta', delta });
+          }
+        }
+      }
+    } catch (streamErr) {
+      if (isAbortError(streamErr, signal)) {
+        aborted = true;
+        console.warn(`[proposals] Claude stream aborted by client disconnect (issue=${issueId}, partial_output_tokens=${outputTokens})`);
+      } else {
+        throw streamErr;
+      }
+    } finally {
+      cleanup();
+    }
+
+    await recordUsage({
+      userId: req.user.id,
+      endpoint: 'proposal_generation',
+      provider: 'anthropic',
+      promptTokens: inputTokens,
+      completionTokens: outputTokens,
+    });
+
+    if (aborted) return res.end();
+
+    const parsed = parseProposalJson(text);
+    if (!parsed) {
+      send({ type: 'error', message: 'Could not parse a structured proposal from the model output.' });
+      return res.end();
+    }
+
+    // If we never streamed any summary text (model emitted summary after other fields), send it now.
+    if (!summaryEmitted && parsed.summary) {
+      send({ type: 'summary_delta', delta: parsed.summary });
+    }
+    for (const change of parsed.changes) send({ type: 'change', change });
+    for (const risk of parsed.risks) send({ type: 'risk', risk });
+
+    const { data: inserted, error: insErr } = await supabaseAdmin
+      .from('issue_proposals')
+      .insert({
+        issue_id: issueId,
+        user_id: req.user.id,
+        status: 'pending',
+        proposal_json: parsed,
+        prompt_tokens: inputTokens,
+        completion_tokens: outputTokens,
+      })
+      .select('id')
+      .single();
+
+    if (insErr) {
+      console.warn('[proposals] Failed to persist proposal:', insErr.message);
+      send({ type: 'error', message: 'Could not save the generated proposal.' });
+      return res.end();
+    }
+
+    send({ type: 'done', proposal_id: inserted.id });
+    res.end();
+  } catch (err) {
+    console.error('[proposals] Unhandled error:', err);
+    try {
+      send({ type: 'error', message: 'An unexpected error occurred generating the proposal.' });
       res.end();
     } catch {
       res.end();
@@ -738,6 +1263,7 @@ module.exports = {
   listSecurityAudits,
   getSecurityAudit,
   duplicationRefactor,
+  generateProposal,
   _private: {
     parseFindingsFromText,
     rerankSecurityChunks,
@@ -745,5 +1271,9 @@ module.exports = {
     linkFindingsToIssues,
     estimateAuditTokens,
     buildDuplicationRefactorPrompt,
+    parseProposalJson,
+    normalizeProposal,
+    extractStreamingSummary,
+    buildContextForIssue,
   },
 };

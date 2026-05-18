@@ -18,6 +18,7 @@ const { OpenAI }     = require('openai');
 const Anthropic      = require('@anthropic-ai/sdk');
 const { supabaseAdmin } = require('../db/supabase');
 const { recordUsage } = require('../services/usageTracker');
+const { bindRequestAbort, isAbortError } = require('../lib/sseAbort');
 
 const _openai    = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || 'sk-dummy' });
 const _anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || 'sk-ant-dummy' });
@@ -244,32 +245,47 @@ const search = async (req, res) => {
 
     // 8. Stream Claude response
     const llmStart = Date.now();
-    const stream = await anthropic.messages.create({
-      model:      'claude-sonnet-4-20250514',
-      max_tokens: 1500,
-      system,
-      messages:   [{ role: 'user', content: user }],
-      stream:     true,
-    });
-
+    const { signal, cleanup } = bindRequestAbort(req);
+    let aborted = false;
     let inputTokens = 0, outputTokens = 0;
-    for await (const event of stream) {
-      if (pipelineTimedOut) break;
-      if (event.type === 'message_start') {
-        inputTokens = event.message?.usage?.input_tokens || 0;
-      } else if (event.type === 'message_delta') {
-        outputTokens = event.usage?.output_tokens || 0;
-      } else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
-        send({ type: 'chunk', text: event.delta.text });
+    try {
+      const stream = await anthropic.messages.create({
+        model:      'claude-sonnet-4-20250514',
+        max_tokens: 1500,
+        system,
+        messages:   [{ role: 'user', content: user }],
+        stream:     true,
+      }, { signal });
+
+      for await (const event of stream) {
+        if (pipelineTimedOut) break;
+        if (event.type === 'message_start') {
+          inputTokens = event.message?.usage?.input_tokens || 0;
+        } else if (event.type === 'message_delta') {
+          outputTokens = event.usage?.output_tokens || 0;
+        } else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+          send({ type: 'chunk', text: event.delta.text });
+        }
       }
+    } catch (streamErr) {
+      if (isAbortError(streamErr, signal)) {
+        aborted = true;
+        console.warn(`[search] Claude stream aborted by client disconnect (partial_output_tokens=${outputTokens})`);
+      } else {
+        throw streamErr;
+      }
+    } finally {
+      cleanup();
     }
 
     recordUsage({ userId: req.user.id, endpoint: 'search', provider: 'anthropic', promptTokens: inputTokens, completionTokens: outputTokens });
 
     clearTimeout(timeoutId);
-    if (!pipelineTimedOut) {
+    if (!pipelineTimedOut && !aborted) {
       console.log(`[search] LLM streaming took ${Date.now() - llmStart}ms, total pipeline ${Date.now() - pipelineStart}ms`);
       send({ type: 'done' });
+      res.end();
+    } else if (aborted) {
       res.end();
     }
 
