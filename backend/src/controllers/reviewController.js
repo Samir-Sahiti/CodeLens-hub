@@ -1126,6 +1126,7 @@ function parseProposalJson(text) {
 function emitProposalEvents(send, proposal) {
   if (!proposal) return;
   if (proposal.summary) send({ type: 'summary_delta', delta: proposal.summary });
+  if (proposal.rationale) send({ type: 'rationale_delta', delta: proposal.rationale });
   for (const change of (proposal.changes || [])) send({ type: 'change', change });
   for (const risk of (proposal.risks || [])) send({ type: 'risk', risk });
 }
@@ -1222,6 +1223,7 @@ const generateProposal = async (req, res) => {
     if (!summaryEmitted && parsed.summary) {
       send({ type: 'summary_delta', delta: parsed.summary });
     }
+    if (parsed.rationale) send({ type: 'rationale_delta', delta: parsed.rationale });
     for (const change of parsed.changes) send({ type: 'change', change });
     for (const risk of parsed.risks) send({ type: 'risk', risk });
 
@@ -1257,6 +1259,38 @@ const generateProposal = async (req, res) => {
   }
 };
 
+const updateProposalStatus = async (req, res) => {
+  const { repoId, issueId, proposalId } = req.params;
+  const { status } = req.body || {};
+
+  if (!['discarded'].includes(status)) {
+    return res.status(400).json({ error: 'Unsupported proposal status' });
+  }
+
+  const allowed = await canAccessRepo(repoId, req.user.id);
+  if (!allowed) return res.status(404).json({ error: 'Repository not found or unauthorized' });
+
+  const issue = await fetchAnalysisIssue(repoId, issueId);
+  if (!issue) return res.status(404).json({ error: 'Issue not found' });
+
+  const { data, error } = await supabaseAdmin
+    .from('issue_proposals')
+    .update({ status })
+    .eq('id', proposalId)
+    .eq('issue_id', issueId)
+    .eq('user_id', req.user.id)
+    .select('id, status')
+    .maybeSingle();
+
+  if (error) {
+    console.error('[proposals] Failed to update proposal status:', error);
+    return res.status(500).json({ error: 'Failed to update proposal status' });
+  }
+  if (!data) return res.status(404).json({ error: 'Proposal not found' });
+
+  res.json({ ok: true, proposal: data });
+};
+
 module.exports = {
   review,
   runSecurityAudit,
@@ -1264,6 +1298,7 @@ module.exports = {
   getSecurityAudit,
   duplicationRefactor,
   generateProposal,
+  updateProposalStatus,
   _private: {
     parseFindingsFromText,
     rerankSecurityChunks,

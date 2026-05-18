@@ -8,6 +8,7 @@ import { apiUrl } from '../lib/api';
 import { getSyntaxLanguage } from '../lib/constants';
 import Modal from './ui/Modal';
 import { Button, Badge } from './ui/Primitives';
+import ProposalPanel from './ProposalPanel';
 import {
   Package, Lock, ShieldAlert, GitMerge,
   FileWarning, Link2, FileX, Search,
@@ -43,7 +44,7 @@ function getBadgeStyles(severity) {
 }
 
 // ── IssueGroup ────────────────────────────────────────────────────────────────
-const IssueGroup = memo(function IssueGroup({ type, label, Icon, issues, nodeMap, onIssueClick, onSuppress, onDisableRule, actionsDisabled, scrollParent }) {
+const IssueGroup = memo(function IssueGroup({ type, label, Icon, issues, nodeMap, onIssueClick, onSuppress, onDisableRule, onProposeFix, actionsDisabled, scrollParent }) {
   const [isOpen, setIsOpen] = useState(true);
 
   return (
@@ -92,6 +93,7 @@ const IssueGroup = memo(function IssueGroup({ type, label, Icon, issues, nodeMap
                   onIssueClick={onIssueClick}
                   onSuppress={onSuppress}
                   onDisableRule={onDisableRule}
+                  onProposeFix={onProposeFix}
                   actionsDisabled={actionsDisabled}
                 />
               </div>
@@ -110,6 +112,7 @@ const IssueGroup = memo(function IssueGroup({ type, label, Icon, issues, nodeMap
                 onIssueClick={onIssueClick}
                 onSuppress={onSuppress}
                 onDisableRule={onDisableRule}
+                onProposeFix={onProposeFix}
                 actionsDisabled={actionsDisabled}
               />
             ))}
@@ -121,7 +124,7 @@ const IssueGroup = memo(function IssueGroup({ type, label, Icon, issues, nodeMap
 });
 
 // ── IssueCard ─────────────────────────────────────────────────────────────────
-const IssueCard = memo(function IssueCard({ issue, type, onIssueClick, onSuppress, onDisableRule, actionsDisabled }) {
+const IssueCard = memo(function IssueCard({ issue, type, onIssueClick, onSuppress, onDisableRule, onProposeFix, actionsDisabled }) {
   return (
     <div
       onClick={() => onIssueClick(issue)}
@@ -132,38 +135,50 @@ const IssueCard = memo(function IssueCard({ issue, type, onIssueClick, onSuppres
           {issue.severity || 'UNKNOWN'}
         </span>
 
-        {/* Suppress button for secrets */}
-        {type === 'hardcoded_secret' && (
+        <div className="flex flex-wrap items-center gap-2 sm:justify-end">
           <button
-            onClick={(e) => { e.stopPropagation(); onSuppress(e, issue); }}
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onProposeFix(issue); }}
             disabled={actionsDisabled}
-            className="text-xs text-gray-500 hover:text-gray-200 underline transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 rounded-md border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-1 text-xs font-medium text-indigo-200 transition-colors hover:bg-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            Mark as false positive
+            <Sparkles className="h-3.5 w-3.5" />
+            Propose fix
           </button>
-        )}
 
-        {/* Suppress button for unauthenticated routes */}
-        {type === 'missing_auth' && (
-          <button
-            onClick={(e) => { e.stopPropagation(); onSuppress(e, issue); }}
-            disabled={actionsDisabled}
-            className="text-xs text-gray-500 hover:text-gray-200 underline transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            Mark as intentionally public
-          </button>
-        )}
+          {/* Suppress button for secrets */}
+          {type === 'hardcoded_secret' && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onSuppress(e, issue); }}
+              disabled={actionsDisabled}
+              className="text-xs text-gray-500 hover:text-gray-200 underline transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Mark as false positive
+            </button>
+          )}
 
-        {/* Disable rule button for insecure patterns */}
-        {type === 'insecure_pattern' && (
-          <button
-            onClick={(e) => { e.stopPropagation(); onDisableRule(e, issue); }}
-            disabled={actionsDisabled}
-            className="text-xs text-gray-500 hover:text-gray-200 underline transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            Disable this rule
-          </button>
-        )}
+          {/* Suppress button for unauthenticated routes */}
+          {type === 'missing_auth' && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onSuppress(e, issue); }}
+              disabled={actionsDisabled}
+              className="text-xs text-gray-500 hover:text-gray-200 underline transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Mark as intentionally public
+            </button>
+          )}
+
+          {/* Disable rule button for insecure patterns */}
+          {type === 'insecure_pattern' && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onDisableRule(e, issue); }}
+              disabled={actionsDisabled}
+              className="text-xs text-gray-500 hover:text-gray-200 underline transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Disable this rule
+            </button>
+          )}
+        </div>
       </div>
 
       <p className="text-gray-300 text-sm mb-4 leading-relaxed whitespace-pre-wrap">
@@ -428,6 +443,7 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
   const [filterText,  setFilterText]  = useState('');
   const [isFetching, setIsFetching] = useState(false);
   const [canMutateIssues, setCanMutateIssues] = useState(true);
+  const [selectedProposalIssue, setSelectedProposalIssue] = useState(null);
   // Phase 4.1: callback ref so the scroll-parent element propagates through
   // state and triggers a re-render — IssueGroup's customScrollParent prop
   // needs the actual DOM node, not a ref placeholder.
@@ -567,6 +583,12 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
     }
   }, [canMutateIssues, repoId, session]);
 
+  const handleApplyProposal = useCallback((proposal) => {
+    window.dispatchEvent(new CustomEvent('codelens:apply-proposal', {
+      detail: { proposal, issue: selectedProposalIssue },
+    }));
+  }, [selectedProposalIssue]);
+
   if ((!localIssues || localIssues.length === 0) && duplicationClusters.length === 0) {
     return (
       <>
@@ -592,11 +614,20 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
           token={accessToken}
           onClose={() => setSelectedDuplicationCluster(null)}
         />
+        <ProposalPanel
+          repoId={repoId}
+          issue={selectedProposalIssue}
+          token={accessToken}
+          open={!!selectedProposalIssue}
+          onClose={() => setSelectedProposalIssue(null)}
+          onApplyProposal={handleApplyProposal}
+        />
       </>
     );
   }
 
   return (
+    <>
     <div
       ref={setScrollParent}
       className="relative flex h-auto min-h-[30rem] flex-col overflow-auto rounded-xl bg-gray-950 p-1 xl:h-[calc(100vh-12rem)]"
@@ -643,6 +674,7 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
               onIssueClick={handleIssueClick}
               onSuppress={handleSuppress}
               onDisableRule={handleDisableSastRule}
+              onProposeFix={setSelectedProposalIssue}
               actionsDisabled={!canMutateIssues}
               scrollParent={scrollParent}
             />
@@ -669,5 +701,14 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
         onClose={() => setSelectedDuplicationCluster(null)}
       />
     </div>
+    <ProposalPanel
+      repoId={repoId}
+      issue={selectedProposalIssue}
+      token={accessToken}
+      open={!!selectedProposalIssue}
+      onClose={() => setSelectedProposalIssue(null)}
+      onApplyProposal={handleApplyProposal}
+    />
+    </>
   );
 }

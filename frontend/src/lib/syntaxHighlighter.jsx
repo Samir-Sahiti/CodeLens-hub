@@ -32,6 +32,7 @@ import json       from 'react-syntax-highlighter/dist/esm/languages/prism/json';
 import yaml       from 'react-syntax-highlighter/dist/esm/languages/prism/yaml';
 import markdown   from 'react-syntax-highlighter/dist/esm/languages/prism/markdown';
 import sql        from 'react-syntax-highlighter/dist/esm/languages/prism/sql';
+import diff       from 'react-syntax-highlighter/dist/esm/languages/prism/diff';
 
 PrismLight.registerLanguage('javascript', javascript);
 PrismLight.registerLanguage('typescript', typescript);
@@ -48,5 +49,6 @@ PrismLight.registerLanguage('json',       json);
 PrismLight.registerLanguage('yaml',       yaml);
 PrismLight.registerLanguage('markdown',   markdown);
 PrismLight.registerLanguage('sql',        sql);
+PrismLight.registerLanguage('unified-diff', diff);
 
 export default PrismLight;
