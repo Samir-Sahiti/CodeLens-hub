@@ -12,6 +12,7 @@ router.post('/:repoId/duplication-refactor', requireAuth, aiRateLimit, reviewCon
 
 // US-064: refactor proposal generation. Optional ?regenerate=true skips the cache.
 router.post('/:repoId/issues/:issueId/proposals', requireAuth, aiRateLimit, reviewController.generateProposal);
+router.patch('/:repoId/issues/:issueId/proposals/:proposalId', requireAuth, reviewController.updateProposalStatus);
 
 // POST /api/review/:repoId   body: { snippet, context?, mode?, filePath? }
 router.post('/:repoId', requireAuth, aiRateLimit, reviewController.review);
