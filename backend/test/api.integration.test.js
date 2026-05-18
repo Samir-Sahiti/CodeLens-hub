@@ -79,6 +79,11 @@ function createSupabaseMock(handlers) {
       this.limitCount = n;
       return this;
     }
+    range(from, to) {
+      this.rangeFrom = from;
+      this.rangeTo = to;
+      return this;
+    }
     single() {
       this.mode = 'single';
       return this;

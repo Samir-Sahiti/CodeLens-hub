@@ -4,6 +4,7 @@ import { useAuth }          from '../context/AuthContext';
 import { useRepo }          from '../context/RepoContext';
 import { apiUrl }           from '../lib/api';
 import { formatDate }       from '../lib/constants';
+import { mark, measure }    from '../lib/perfMarks';
 import { useToast }         from '../components/Toast';
 import { Badge, Banner, Button, EmptyState, Panel, Skeleton } from '../components/ui/Primitives';
 import { RefreshCw, ArrowLeft, Home, GitCompare } from '../components/ui/Icons';
@@ -317,6 +318,7 @@ export default function RepoView() {
 
   const fetchAnalysisData = useCallback(async (force = false) => {
     if ((hasFetchedData && !force) || !session?.access_token) return;
+    mark('analysis-fetch:start');
     try {
       const [analysisRes, churnRes] = await Promise.all([
         fetch(apiUrl(`/api/repos/${repoId}/analysis`), {
@@ -346,6 +348,8 @@ export default function RepoView() {
       setAnalysisError(null);
     } catch (err) {
       setAnalysisError(err.message || 'Failed to load analysis data');
+    } finally {
+      measure('analysis-fetch');
     }
   }, [repoId, hasFetchedData, session?.access_token]);
 

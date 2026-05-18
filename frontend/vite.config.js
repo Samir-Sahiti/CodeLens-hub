@@ -1,13 +1,31 @@
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 
+// Bundle visualizer (Phase 0): generates dist/stats.html on every production
+// build so chunk size regressions are visible. Loaded dynamically to avoid
+// pulling the dep into the dev server. Soft-fails if the plugin is not
+// installed yet.
+let visualizerPlugin = null;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { visualizer } = require('rollup-plugin-visualizer');
+  visualizerPlugin = visualizer({
+    filename: 'dist/stats.html',
+    template: 'treemap',
+    gzipSize: true,
+    brotliSize: true,
+  });
+} catch {
+  // rollup-plugin-visualizer not installed — that's fine, just skip.
+}
+
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
   // Read env from root directory
   const env = loadEnv(mode, '../', '');
 
   return {
-    plugins: [react()],
+    plugins: [react(), ...(visualizerPlugin ? [visualizerPlugin] : [])],
     envDir: '../', // Tell Vite where to find .env for CLIENT-side variables
 
     server: {

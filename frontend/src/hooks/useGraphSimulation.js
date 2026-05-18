@@ -3,8 +3,11 @@ import * as d3 from 'd3';
 
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 4;
-const PRETICK_FULL = 300;
-const PRETICK_CLUSTERED = 150;
+// Phase 4.3: dropped from 300 to 140 after observing convergence on the
+// 1000-node fixture stabilises well before tick 200. Halves the cold-start
+// CPU spend at first paint.
+const PRETICK_FULL = 140;
+const PRETICK_CLUSTERED = 100;
 const TOUR_VIOLET = '#a78bfa';
 const TOUR_VIOLET_RGBA = 'rgba(167, 139, 250, 0.95)';
 

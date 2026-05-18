@@ -936,5 +936,326 @@ $$ LANGUAGE plpgsql;
 GRANT EXECUTE ON FUNCTION fork_tour(UUID, UUID) TO service_role;
 
 -- =============================================================================
+-- US-064: per-importer symbol tracking on graph_edges
+-- Each edge optionally records the set of symbols the importer references from
+-- the target file. Stored as TEXT[] (rather than one row per symbol) so the
+-- existing (repo_id, from_path, to_path) UNIQUE constraint and upsert path stay
+-- unchanged. Existing edges from older indexer runs carry an empty array.
+-- =============================================================================
+
+ALTER TABLE graph_edges ADD COLUMN IF NOT EXISTS symbols TEXT[] NOT NULL DEFAULT '{}';
+
+-- =============================================================================
+-- US-063: AI refactor proposals
+-- One pending proposal per (user, analysis_issue). Older proposals stay around
+-- with status applied/discarded/stale for the per-user history view.
+-- =============================================================================
+
+DO $$ BEGIN
+  CREATE TYPE proposal_status AS ENUM ('pending', 'applied', 'discarded', 'stale');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE TABLE IF NOT EXISTS issue_proposals (
+  id                UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
+  issue_id          UUID            NOT NULL REFERENCES analysis_issues(id) ON DELETE CASCADE,
+  user_id           UUID            NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  status            proposal_status NOT NULL DEFAULT 'pending',
+  proposal_json     JSONB           NOT NULL,
+  branch_name       TEXT,
+  pr_url            TEXT,
+  prompt_tokens     INTEGER         NOT NULL DEFAULT 0,
+  completion_tokens INTEGER         NOT NULL DEFAULT 0,
+  created_at        TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ     NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS issue_proposals_issue_created_idx
+  ON issue_proposals (issue_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS issue_proposals_user_created_idx
+  ON issue_proposals (user_id, created_at DESC);
+
+ALTER TABLE issue_proposals ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users access only their own proposals" ON issue_proposals;
+CREATE POLICY "Users access only their own proposals"
+  ON issue_proposals FOR ALL
+  USING (auth.uid() = user_id)
+  WITH CHECK (auth.uid() = user_id);
+
+DROP TRIGGER IF EXISTS issue_proposals_set_updated_at ON issue_proposals;
+CREATE TRIGGER issue_proposals_set_updated_at
+  BEFORE UPDATE ON issue_proposals
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- =============================================================================
+-- Phase 2.1: prepare_repo_reindex
+-- Bundles the indexer's issue-preservation + clearing phase into ONE RPC so a
+-- 1000-file re-index drops from ~10 sequential PostgREST round-trips to one
+-- transactional SQL call. Returns row counts for indexer logging.
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION prepare_repo_reindex(
+  p_repo_id                   UUID,
+  p_unchanged_paths           TEXT[],
+  p_changed_or_deleted_paths  TEXT[],
+  p_preserve_churn            BOOLEAN DEFAULT FALSE
+)
+RETURNS TABLE (
+  preserved_count INTEGER,
+  deleted_count   INTEGER
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_preservable_types TEXT[] := ARRAY['hardcoded_secret', 'insecure_pattern', 'missing_auth'];
+  v_preserved_count   INTEGER := 0;
+  v_deleted_count     INTEGER := 0;
+  v_unchanged         TEXT[]  := COALESCE(p_unchanged_paths, ARRAY[]::TEXT[]);
+  v_changed_deleted   TEXT[]  := COALESCE(p_changed_or_deleted_paths, ARRAY[]::TEXT[]);
+BEGIN
+  -- 1. Mark pending proposals stale for issues we're about to delete.
+  --    Done BEFORE the delete so anyone observing the row during the
+  --    transaction sees the 'stale' status before CASCADE removes it.
+  UPDATE issue_proposals p
+     SET status = 'stale', updated_at = NOW()
+   WHERE p.status = 'pending'
+     AND p.issue_id IN (
+       SELECT i.id FROM analysis_issues i
+        WHERE i.repo_id = p_repo_id
+          AND NOT (
+            i.type::TEXT = ANY(v_preservable_types)
+            AND COALESCE(array_length(i.file_paths, 1), 0) > 0
+            AND i.file_paths <@ v_unchanged
+          )
+     );
+
+  -- 2. Count preservable rows (informational, for the indexer log).
+  SELECT COUNT(*)::INTEGER INTO v_preserved_count
+    FROM analysis_issues i
+   WHERE i.repo_id = p_repo_id
+     AND i.type::TEXT = ANY(v_preservable_types)
+     AND COALESCE(array_length(i.file_paths, 1), 0) > 0
+     AND i.file_paths <@ v_unchanged;
+
+  -- 3. Delete non-preservable issues (CASCADE wipes their proposals).
+  WITH deleted AS (
+    DELETE FROM analysis_issues i
+     WHERE i.repo_id = p_repo_id
+       AND NOT (
+         i.type::TEXT = ANY(v_preservable_types)
+         AND COALESCE(array_length(i.file_paths, 1), 0) > 0
+         AND i.file_paths <@ v_unchanged
+       )
+    RETURNING 1
+  )
+  SELECT COUNT(*)::INTEGER INTO v_deleted_count FROM deleted;
+
+  -- 4. Always-cleared derived tables.
+  DELETE FROM dependency_manifests   WHERE repo_id = p_repo_id;
+  DELETE FROM graph_edges            WHERE repo_id = p_repo_id;
+  DELETE FROM duplication_candidates WHERE repo_id = p_repo_id;
+
+  -- 5. Conditionally clear file_churn (preserved on the incremental webhook path).
+  IF NOT p_preserve_churn THEN
+    DELETE FROM file_churn WHERE repo_id = p_repo_id;
+  END IF;
+
+  -- 6. Reset coverage flags on every graph_node for the repo.
+  UPDATE graph_nodes
+     SET has_test_coverage   = FALSE,
+         coverage_percentage = NULL,
+         is_test_file        = FALSE
+   WHERE repo_id = p_repo_id;
+
+  -- 7. Partial clear: drop nodes/chunks/file_contents for changed-or-deleted
+  --    files only. Unchanged files keep their rows so the indexer can reuse
+  --    their parsed state.
+  IF COALESCE(array_length(v_changed_deleted, 1), 0) > 0 THEN
+    DELETE FROM graph_nodes
+     WHERE repo_id = p_repo_id
+       AND file_path = ANY(v_changed_deleted);
+    DELETE FROM code_chunks
+     WHERE repo_id = p_repo_id
+       AND file_path = ANY(v_changed_deleted);
+    DELETE FROM file_contents
+     WHERE repo_id = p_repo_id
+       AND file_path = ANY(v_changed_deleted);
+  END IF;
+
+  RETURN QUERY SELECT v_preserved_count, v_deleted_count;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION prepare_repo_reindex(UUID, TEXT[], TEXT[], BOOLEAN) TO service_role;
+
+-- =============================================================================
+-- Phase 2.2: bulk_insert_analysis_issues
+-- Single insert call instead of chunked-500 inserts from JS. Also moves the
+-- type/file_paths shape check into SQL so a malformed row doesn't slip in.
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION bulk_insert_analysis_issues(
+  p_repo_id UUID,
+  p_issues  JSONB
+)
+RETURNS INTEGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_inserted INTEGER := 0;
+BEGIN
+  IF p_issues IS NULL OR jsonb_array_length(p_issues) = 0 THEN
+    RETURN 0;
+  END IF;
+
+  WITH src AS (
+    SELECT
+      NULLIF(item->>'type', '')             AS type_text,
+      NULLIF(item->>'severity', '')         AS severity,
+      ARRAY(
+        SELECT jsonb_array_elements_text(COALESCE(item->'file_paths', '[]'::jsonb))
+      )                                     AS file_paths,
+      NULLIF(item->>'description', '')      AS description
+    FROM jsonb_array_elements(p_issues) AS item
+  ),
+  filtered AS (
+    SELECT * FROM src
+     WHERE type_text IS NOT NULL
+       AND array_length(file_paths, 1) > 0
+  ),
+  inserted AS (
+    INSERT INTO analysis_issues (id, repo_id, type, severity, file_paths, description)
+    SELECT gen_random_uuid(), p_repo_id, type_text::issue_type, severity, file_paths, description
+      FROM filtered
+    RETURNING 1
+  )
+  SELECT COUNT(*)::INTEGER INTO v_inserted FROM inserted;
+
+  RETURN v_inserted;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION bulk_insert_analysis_issues(UUID, JSONB) TO service_role;
+
+-- =============================================================================
+-- Phase 3: api_usage daily rollup
+-- aiRateLimit reads the rolling 24h token total on every AI request. As
+-- api_usage grows, the full-window scan gets expensive. A trigger-maintained
+-- (user_id, day) rollup keeps the rate-limit check at O(1) regardless of
+-- per-user request volume.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS api_usage_daily (
+  user_id           UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  usage_date        DATE        NOT NULL,
+  prompt_tokens     BIGINT      NOT NULL DEFAULT 0,
+  completion_tokens BIGINT      NOT NULL DEFAULT 0,
+  embedding_tokens  BIGINT      NOT NULL DEFAULT 0,
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, usage_date)
+);
+
+CREATE INDEX IF NOT EXISTS api_usage_daily_user_date_idx
+  ON api_usage_daily (user_id, usage_date DESC);
+
+ALTER TABLE api_usage_daily ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "api_usage_daily owner-read" ON api_usage_daily;
+CREATE POLICY "api_usage_daily owner-read"
+  ON api_usage_daily FOR SELECT
+  USING (auth.uid() = user_id);
+
+-- Trigger: keep api_usage_daily in sync inside the same transaction as the
+-- api_usage insert. Using NEW.created_at (not NOW()) so backfills and tests
+-- aggregate into the correct day.
+CREATE OR REPLACE FUNCTION rollup_api_usage()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  INSERT INTO api_usage_daily (
+    user_id, usage_date, prompt_tokens, completion_tokens, embedding_tokens, updated_at
+  )
+  VALUES (
+    NEW.user_id,
+    (NEW.created_at AT TIME ZONE 'UTC')::DATE,
+    COALESCE(NEW.prompt_tokens, 0),
+    COALESCE(NEW.completion_tokens, 0),
+    COALESCE(NEW.embedding_tokens, 0),
+    NOW()
+  )
+  ON CONFLICT (user_id, usage_date) DO UPDATE
+    SET prompt_tokens     = api_usage_daily.prompt_tokens     + EXCLUDED.prompt_tokens,
+        completion_tokens = api_usage_daily.completion_tokens + EXCLUDED.completion_tokens,
+        embedding_tokens  = api_usage_daily.embedding_tokens  + EXCLUDED.embedding_tokens,
+        updated_at        = NOW();
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS api_usage_rollup_trigger ON api_usage;
+CREATE TRIGGER api_usage_rollup_trigger
+  AFTER INSERT ON api_usage
+  FOR EACH ROW EXECUTE FUNCTION rollup_api_usage();
+
+-- One-time backfill (safe to re-run; ON CONFLICT keeps it idempotent and the
+-- WHERE clause restricts to rows missing in the rollup).
+INSERT INTO api_usage_daily (user_id, usage_date, prompt_tokens, completion_tokens, embedding_tokens, updated_at)
+SELECT
+  u.user_id,
+  (u.created_at AT TIME ZONE 'UTC')::DATE AS usage_date,
+  SUM(COALESCE(u.prompt_tokens, 0))::BIGINT,
+  SUM(COALESCE(u.completion_tokens, 0))::BIGINT,
+  SUM(COALESCE(u.embedding_tokens, 0))::BIGINT,
+  NOW()
+FROM api_usage u
+GROUP BY u.user_id, (u.created_at AT TIME ZONE 'UTC')::DATE
+ON CONFLICT (user_id, usage_date) DO NOTHING;
+
+-- =============================================================================
+-- Phase 5.2: embedding_cache
+-- OpenAI embeddings cost real money. Identical chunks across repos (shared
+-- library code, copied components) get re-embedded otherwise. content_hash is
+-- a SHA-256 of the chunk text; last_used_at supports a manual eviction job.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS embedding_cache (
+  content_hash  TEXT         PRIMARY KEY,
+  embedding     vector(1536) NOT NULL,
+  token_count   INT          NOT NULL DEFAULT 0,
+  created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  last_used_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS embedding_cache_last_used_idx
+  ON embedding_cache (last_used_at);
+
+-- Service role only; embedding_cache has no per-user notion and lookups always
+-- go through trusted backend code.
+ALTER TABLE embedding_cache ENABLE ROW LEVEL SECURITY;
+
+-- =============================================================================
+-- Phase 6: index audit
+-- These indexes were identified as candidates after Phase 0 profiling. They
+-- back the proposal-context graph lookups and issue-type filtering. All are
+-- IF NOT EXISTS so the schema remains idempotent.
+-- =============================================================================
+
+CREATE INDEX IF NOT EXISTS graph_edges_repo_from_idx
+  ON graph_edges (repo_id, from_path);
+
+CREATE INDEX IF NOT EXISTS graph_edges_repo_to_idx
+  ON graph_edges (repo_id, to_path);
+
+CREATE INDEX IF NOT EXISTS analysis_issues_repo_type_idx
+  ON analysis_issues (repo_id, type);
+
+CREATE INDEX IF NOT EXISTS issue_proposals_issue_user_status_idx
+  ON issue_proposals (issue_id, user_id, status, created_at DESC);
+
+-- =============================================================================
 -- END OF SCHEMA
 -- =============================================================================

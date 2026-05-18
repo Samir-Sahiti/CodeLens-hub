@@ -1,4 +1,5 @@
 const { supabase, supabaseAdmin } = require('../db/supabase');
+const { SAFE_FETCH_CEILING, warnIfCeilingHit } = require('../lib/dbHelpers');
 
 /** GET /api/analysis/:repoId/graph — dependency graph nodes + edges */
 const getDependencyGraph = async (req, res) => {
@@ -18,9 +19,11 @@ const getIssues = async (req, res) => {
   const { data, error } = await supabaseAdmin
     .from('analysis_issues')
     .select('*')
-    .eq('repo_id', repoId);
-    
+    .eq('repo_id', repoId)
+    .range(0, SAFE_FETCH_CEILING - 1);
+
   if (error) return res.status(500).json({ error: error.message });
+  warnIfCeilingHit('analysisController.getIssues', data);
   res.json(data);
 };
 

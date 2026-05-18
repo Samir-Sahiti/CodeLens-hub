@@ -18,6 +18,7 @@ const usageRoutes    = require('./routes/usage');
 const adminRoutes    = require('./routes/admin');
 const toursRoutes    = require('./routes/tours');
 const errorHandler   = require('./middleware/errorHandler');
+const { requestTimingMiddleware } = require('./observability/requestStore');
 
 const compression = require('compression');
 
@@ -55,6 +56,10 @@ console.warn = (...args) => originalWarn.apply(console, redact(args));
 app.use(compression());
 app.use(helmet());
 app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:3000' }));
+
+// Request timing + per-request Supabase ledger (Phase 0). Must run before
+// route handlers so AsyncLocalStorage is populated for every downstream call.
+app.use(requestTimingMiddleware({ slowRequestMs: parseInt(process.env.SLOW_REQUEST_MS || '500', 10) }));
 
 // Webhook routes use express.raw per-route and must run before express.json()
 // so the signature validator receives the original request body bytes.

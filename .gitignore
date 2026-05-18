@@ -427,3 +427,6 @@ FodyWeavers.xsd
 
 # Personal / local notes
 DEMO_GUIDE.md
+
+# Claude Code workspace (per-user agent state, plans, transcripts)
+.claude/

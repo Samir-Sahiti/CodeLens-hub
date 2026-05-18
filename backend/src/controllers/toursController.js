@@ -6,6 +6,7 @@ const { OpenAI }        = require('openai');
 const Anthropic         = require('@anthropic-ai/sdk');
 const { supabaseAdmin } = require('../db/supabase');
 const { recordUsage }   = require('../services/usageTracker');
+const { bindRequestAbort } = require('../lib/sseAbort');
 
 const MODEL = 'claude-sonnet-4-20250514';
 const MAX_DAILY_TOKENS = parseInt(process.env.MAX_DAILY_TOKENS_PER_USER || '500000', 10);
@@ -52,16 +53,21 @@ async function canAccessRepo(repoId, userId) {
   return access.isOwner || access.hasTeamAccess;
 }
 
+// Phase 3.3: read the api_usage_daily rollup instead of scanning api_usage.
+// Mirrors the aiRateLimit middleware so per-step tour budget checks stay
+// O(1) regardless of usage table size.
 async function dailyTokensUsed(userId) {
-  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const now    = new Date();
+  const today  = now.toISOString().slice(0, 10);
+  const yest   = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const { data, error } = await supabaseAdmin
-    .from('api_usage')
+    .from('api_usage_daily')
     .select('prompt_tokens, completion_tokens, embedding_tokens')
     .eq('user_id', userId)
-    .gte('created_at', since);
+    .in('usage_date', [today, yest]);
   if (error) return 0;
   return (data || []).reduce(
-    (sum, row) => sum + (row.prompt_tokens || 0) + (row.completion_tokens || 0) + (row.embedding_tokens || 0),
+    (sum, row) => sum + Number(row.prompt_tokens || 0) + Number(row.completion_tokens || 0) + Number(row.embedding_tokens || 0),
     0
   );
 }
@@ -88,6 +94,7 @@ async function explainSteps({
   buildUserPrompt,
   systemPrompt,
   maxTokens = 300,
+  abortSignal,
 }) {
   // Batch-fetch first chunk for files not already in relevantSet (avoid N+1)
   const fallbackByPath = new Map();
@@ -113,6 +120,12 @@ async function explainSteps({
 
     if (budgetRemaining <= 0) {
       console.warn(`[tour] daily token budget exhausted at step ${i + 1}/${filePaths.length}`);
+      stoppedEarly = true;
+      break;
+    }
+
+    if (abortSignal?.aborted) {
+      console.warn(`[tour] aborted by client disconnect at step ${i + 1}/${filePaths.length}`);
       stoppedEarly = true;
       break;
     }
@@ -146,7 +159,7 @@ async function explainSteps({
         max_tokens: maxTokens,
         system:     systemPrompt,
         messages:   [{ role: 'user', content: userPrompt }],
-      });
+      }, abortSignal ? { signal: abortSignal } : undefined);
       explanation = response.content[0]?.type === 'text' ? response.content[0].text : '';
       const inputTokens  = response.usage?.input_tokens  || 0;
       const outputTokens = response.usage?.output_tokens || 0;
@@ -278,24 +291,35 @@ const generateTour = async (req, res) => {
     }
   }
 
-  // 7. Generate Claude explanation for each step
-  const { steps } = await explainSteps({
-    filePaths:    result,
-    repoId,
-    userId,
-    relevantSet,
-    systemPrompt: 'You are a senior software engineer writing clear, concise guided tour steps for developers exploring an unfamiliar codebase.',
-    buildUserPrompt: ({ filePath, index, excerpt }) => {
-      const previousTitles = result.slice(0, index).join(', ') || 'none yet';
-      return (
-        `You are writing one step of a guided tour through a codebase. The user asked: '${query}'. ` +
-        `The tour so far has covered: ${previousTitles}. ` +
-        `The current step is the file \`${filePath}\`. Here's the relevant excerpt:\n\n${excerpt}\n\n` +
-        `Write 2–4 sentences explaining what role this file plays in answering the user's question. ` +
-        `Do not summarise the whole file — focus on its role in this specific flow.`
-      );
-    },
-  });
+  // 7. Generate Claude explanation for each step. Bind the request's close
+  // event so closing the tab mid-tour aborts the remaining per-step calls.
+  const { signal: abortSignal, cleanup: cleanupAbort } = bindRequestAbort(req);
+  let steps;
+  try {
+    ({ steps } = await explainSteps({
+      filePaths:    result,
+      repoId,
+      userId,
+      relevantSet,
+      abortSignal,
+      systemPrompt: 'You are a senior software engineer writing clear, concise guided tour steps for developers exploring an unfamiliar codebase.',
+      buildUserPrompt: ({ filePath, index, excerpt }) => {
+        const previousTitles = result.slice(0, index).join(', ') || 'none yet';
+        return (
+          `You are writing one step of a guided tour through a codebase. The user asked: '${query}'. ` +
+          `The tour so far has covered: ${previousTitles}. ` +
+          `The current step is the file \`${filePath}\`. Here's the relevant excerpt:\n\n${excerpt}\n\n` +
+          `Write 2–4 sentences explaining what role this file plays in answering the user's question. ` +
+          `Do not summarise the whole file — focus on its role in this specific flow.`
+        );
+      },
+    }));
+  } finally {
+    cleanupAbort();
+  }
+  if (abortSignal.aborted) {
+    return res.status(499).end(); // 499 Client Closed Request — Nginx convention
+  }
 
   // 8. Optionally persist
   if (steps.length === 0) {

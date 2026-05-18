@@ -1,6 +1,7 @@
 import { useMemo, useState, useEffect, useCallback, memo } from 'react';
+import { Virtuoso } from 'react-virtuoso';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import SyntaxHighlighter from '../lib/syntaxHighlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { useAuth } from '../context/AuthContext';
 import { apiUrl } from '../lib/api';
@@ -13,6 +14,11 @@ import {
   ChevronDown, ChevronUp, CheckCircle2, AlertTriangle, TrendingUp,
   Copy, Sparkles,
 } from './ui/Icons';
+
+// Phase 4.1: virtualize groups above this size. Below the threshold, virtuoso's
+// scroll-container overhead isn't worth it and a plain map preserves the
+// existing sticky-header + grid behaviour exactly.
+const VIRTUALIZE_THRESHOLD = 30;
 
 // ── Group config ─────────────────────────────────────────────────────────────
 const GROUP_ORDER = [
@@ -37,7 +43,7 @@ function getBadgeStyles(severity) {
 }
 
 // ── IssueGroup ────────────────────────────────────────────────────────────────
-const IssueGroup = memo(function IssueGroup({ type, label, Icon, issues, nodeMap, onIssueClick, onSuppress, onDisableRule, actionsDisabled }) {
+const IssueGroup = memo(function IssueGroup({ type, label, Icon, issues, nodeMap, onIssueClick, onSuppress, onDisableRule, actionsDisabled, scrollParent }) {
   const [isOpen, setIsOpen] = useState(true);
 
   return (
@@ -66,22 +72,49 @@ const IssueGroup = memo(function IssueGroup({ type, label, Icon, issues, nodeMap
 
       {/* Collapsible body */}
       {isOpen && (
-        <div
-          className="grid gap-3"
-          style={{ animation: 'fadeIn 180ms ease both' }}
-        >
-          {issues.map((issue, idx) => (
-            <IssueCard
-              key={issue.id || `${type}-${idx}`}
-              issue={issue}
-              type={type}
-              onIssueClick={onIssueClick}
-              onSuppress={onSuppress}
-              onDisableRule={onDisableRule}
-              actionsDisabled={actionsDisabled}
-            />
-          ))}
-        </div>
+        // Phase 4.1: virtualize only when (a) the group has enough rows to
+        // matter AND (b) the IssuesPanel has handed us a real scroll-parent
+        // element. The scroll-parent ref is set after the first IssuesPanel
+        // render via a callback ref; while it's still null, fall back to the
+        // plain-map render so we never mount Virtuoso against a missing
+        // scroll context (which silently breaks rendering).
+        issues.length > VIRTUALIZE_THRESHOLD && scrollParent ? (
+          <Virtuoso
+            customScrollParent={scrollParent}
+            data={issues}
+            increaseViewportBy={400}
+            computeItemKey={(idx, issue) => issue.id || `${type}-${idx}`}
+            itemContent={(idx, issue) => (
+              <div className="pb-3">
+                <IssueCard
+                  issue={issue}
+                  type={type}
+                  onIssueClick={onIssueClick}
+                  onSuppress={onSuppress}
+                  onDisableRule={onDisableRule}
+                  actionsDisabled={actionsDisabled}
+                />
+              </div>
+            )}
+          />
+        ) : (
+          <div
+            className="grid gap-3"
+            style={{ animation: 'fadeIn 180ms ease both' }}
+          >
+            {issues.map((issue, idx) => (
+              <IssueCard
+                key={issue.id || `${type}-${idx}`}
+                issue={issue}
+                type={type}
+                onIssueClick={onIssueClick}
+                onSuppress={onSuppress}
+                onDisableRule={onDisableRule}
+                actionsDisabled={actionsDisabled}
+              />
+            ))}
+          </div>
+        )
       )}
     </div>
   );
@@ -395,6 +428,10 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
   const [filterText,  setFilterText]  = useState('');
   const [isFetching, setIsFetching] = useState(false);
   const [canMutateIssues, setCanMutateIssues] = useState(true);
+  // Phase 4.1: callback ref so the scroll-parent element propagates through
+  // state and triggers a re-render — IssueGroup's customScrollParent prop
+  // needs the actual DOM node, not a ref placeholder.
+  const [scrollParent, setScrollParent] = useState(null);
 
   // Sync local state if the upstream issues prop changes
   useEffect(() => {
@@ -560,7 +597,10 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
   }
 
   return (
-    <div className="relative flex h-auto min-h-[30rem] flex-col overflow-auto rounded-xl bg-gray-950 p-1 xl:h-[calc(100vh-12rem)]">
+    <div
+      ref={setScrollParent}
+      className="relative flex h-auto min-h-[30rem] flex-col overflow-auto rounded-xl bg-gray-950 p-1 xl:h-[calc(100vh-12rem)]"
+    >
       {/* Info banner with <code> instead of backticks */}
       <div className="mb-4 rounded-xl border border-gray-800 bg-gray-900/40 px-4 py-3 text-sm text-gray-400">
         This is the triage view — showing only actionable problems including vulnerable dependencies.
@@ -604,6 +644,7 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
               onSuppress={handleSuppress}
               onDisableRule={handleDisableSastRule}
               actionsDisabled={!canMutateIssues}
+              scrollParent={scrollParent}
             />
           );
         })}

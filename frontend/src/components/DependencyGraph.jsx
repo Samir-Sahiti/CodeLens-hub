@@ -862,21 +862,30 @@ export default function DependencyGraph({
   const allSinkIdsForPaths = useMemo(() => new Set([...asSinkIds, ...asBothIds]), [asSinkIds, asBothIds]);
   const allSourceIdsForPaths = useMemo(() => new Set([...asSourceIds, ...asBothIds]), [asSourceIds, asBothIds]);
 
-  // Per-source path counts (computed once, used in panel list)
-  const perSourcePathCounts = useMemo(() => {
+  // Phase 1.5: compute all source paths in ONE pass and derive both the counts
+  // and the per-source path arrays from the same map. Previously we ran DFS
+  // once for counts (across every source) and again on every click of a
+  // source to display its paths — clicking around in attack-surface mode now
+  // becomes a Map lookup instead of a fresh DFS each time.
+  const allSourcePaths = useMemo(() => {
     if (!attackSurfaceMode) return new Map();
-    const counts = new Map();
+    const result = new Map();
     for (const sourceId of allSourceIdsForPaths) {
-      counts.set(sourceId, findAllPaths(sourceId, asAdjacency, allSinkIdsForPaths, 50).length);
+      result.set(sourceId, findAllPaths(sourceId, asAdjacency, allSinkIdsForPaths, 50));
     }
-    return counts;
+    return result;
   }, [attackSurfaceMode, allSourceIdsForPaths, asAdjacency, allSinkIdsForPaths]);
 
-  // Paths from the currently-selected source (used for both panel display and highlighting)
+  const perSourcePathCounts = useMemo(() => {
+    const counts = new Map();
+    for (const [sourceId, paths] of allSourcePaths) counts.set(sourceId, paths.length);
+    return counts;
+  }, [allSourcePaths]);
+
   const currentSourcePaths = useMemo(() => {
     if (!attackSurfaceMode || !attackSurfaceSource) return [];
-    return findAllPaths(attackSurfaceSource, asAdjacency, allSinkIdsForPaths, 50);
-  }, [attackSurfaceMode, attackSurfaceSource, asAdjacency, allSinkIdsForPaths]);
+    return allSourcePaths.get(attackSurfaceSource) || [];
+  }, [attackSurfaceMode, attackSurfaceSource, allSourcePaths]);
 
   const attackSurfaceData = useMemo(() => {
     if (!attackSurfaceMode) return null;

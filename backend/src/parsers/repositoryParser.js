@@ -208,10 +208,72 @@ const getLanguageKey = (ext) => {
   return null;
 };
 
+// US-064: collect all import_statement nodes so we can extract per-import
+// symbol lists for the graph_edges.symbols column.
+const collectImportStatements = (node, out) => {
+  if (node.type === 'import_statement') {
+    out.push(node);
+    return; // imports do not nest
+  }
+  for (const child of node.namedChildren) {
+    collectImportStatements(child, out);
+  }
+};
+
+const unquote = (text) => {
+  if (typeof text !== 'string' || text.length < 2) return text;
+  const first = text[0];
+  const last = text[text.length - 1];
+  if ((first === "'" && last === "'") || (first === '"' && last === '"') || (first === '`' && last === '`')) {
+    return text.slice(1, -1);
+  }
+  return text;
+};
+
+// Pulls the imported symbol names from a JS/TS import_statement node.
+// Returns the local-binding name for each specifier — the alias if present,
+// otherwise the original name — so the resulting list reflects what the
+// importing file actually references.
+const extractImportInfo = (importStmt) => {
+  let rawPath = null;
+  const symbols = [];
+  for (const child of importStmt.namedChildren) {
+    if (child.type === 'string') {
+      rawPath = unquote(child.text);
+    } else if (child.type === 'import_clause') {
+      for (const sub of child.namedChildren) {
+        if (sub.type === 'identifier') {
+          symbols.push(sub.text);
+        } else if (sub.type === 'namespace_import') {
+          for (const idChild of sub.namedChildren) {
+            if (idChild.type === 'identifier') symbols.push(idChild.text);
+          }
+        } else if (sub.type === 'named_imports') {
+          for (const spec of sub.namedChildren) {
+            if (spec.type !== 'import_specifier') continue;
+            let chosen = null;
+            if (typeof spec.childForFieldName === 'function') {
+              const alias = spec.childForFieldName('alias');
+              const name = spec.childForFieldName('name');
+              chosen = (alias && alias.text) || (name && name.text) || null;
+            }
+            if (!chosen) {
+              const ids = spec.namedChildren.filter((c) => c.type === 'identifier' || c.type === 'property_identifier');
+              if (ids.length > 0) chosen = ids[ids.length - 1].text;
+            }
+            if (chosen) symbols.push(chosen);
+          }
+        }
+      }
+    }
+  }
+  return { rawPath, symbols };
+};
+
 /**
  * Parse a single file and extract import/dependency edges.
  */
-const parseFile = (filePath, source, allFiles = new Set()) => {
+const parseFile = (filePath, source, allFiles = new Set(), opts = {}) => {
   try {
     const ext = path.extname(filePath).toLowerCase();
 
@@ -228,12 +290,17 @@ const parseFile = (filePath, source, allFiles = new Set()) => {
 
     const parser = getParser(language);
     const src = typeof source === 'string' ? source : (source == null ? '' : String(source));
-    // tree-sitter v0.21.x rejects strings longer than 32767 chars; use callback for large files
-    const tree = src.length < 32768
-      ? parser.parse(src)
-      : parser.parse((i) => i < src.length ? src.slice(i, i + 8192) : null);
+    // Phase 5.3: when a cached tree is supplied (e.g. C# pre-pass result), skip
+    // re-parsing. Tree-sitter parse is the dominant cost; re-running the query
+    // against an existing tree is essentially free.
+    const tree = opts.cachedTree
+      || (src.length < 32768
+        ? parser.parse(src)
+        : parser.parse((i) => i < src.length ? src.slice(i, i + 8192) : null));
 
-    const complexity = calculateComplexity(tree, queryKey);
+    const complexity = opts.cachedComplexity != null
+      ? opts.cachedComplexity
+      : calculateComplexity(tree, queryKey);
 
     const imports = new Set();
     const exports = new Set();
@@ -244,13 +311,7 @@ const parseFile = (filePath, source, allFiles = new Set()) => {
     for (const match of matches) {
       for (const capture of match.captures) {
         if (capture.name === 'import_path') {
-          let rawPath = capture.node.text;
-          // Strip surrounding quotes from the string node
-          if ((rawPath.startsWith("'") && rawPath.endsWith("'")) ||
-              (rawPath.startsWith('"') && rawPath.endsWith('"')) ||
-              (rawPath.startsWith('`') && rawPath.endsWith('`'))) {
-            rawPath = rawPath.slice(1, -1);
-          }
+          const rawPath = unquote(capture.node.text);
           const resolved = resolveImportPath(rawPath, filePath, allFiles, ext);
           if (resolved) {
             if (Array.isArray(resolved)) {
@@ -265,12 +326,40 @@ const parseFile = (filePath, source, allFiles = new Set()) => {
       }
     }
 
-    return {
+    // US-064: build a per-importer symbol map for JS/TS. The tree-sitter Query
+    // path above already collected the file-level imports; this second walk
+    // attaches each statement's specifier names to the resolved target path.
+    const importSymbols = {};
+    if (queryKey === 'javascript') {
+      const importStmts = [];
+      collectImportStatements(tree.rootNode, importStmts);
+      for (const stmt of importStmts) {
+        const { rawPath, symbols } = extractImportInfo(stmt);
+        if (!rawPath || symbols.length === 0) continue;
+        const resolved = resolveImportPath(rawPath, filePath, allFiles, ext);
+        if (!resolved) continue;
+        const paths = Array.isArray(resolved) ? resolved : [resolved];
+        for (const p of paths) {
+          if (!importSymbols[p]) importSymbols[p] = [];
+          for (const sym of symbols) {
+            if (!importSymbols[p].includes(sym)) importSymbols[p].push(sym);
+          }
+        }
+      }
+    }
+
+    const result = {
       filePath,
       imports: Array.from(imports),
       exports: Array.from(exports),
-      complexity
+      complexity,
+      importSymbols,
     };
+    // Non-enumerable so JSON.stringify / structuredClone don't try to ship the
+    // tree-sitter tree object. Consumers that want it for caching read it
+    // directly (Phase 5.3 — C# pre-pass → main pass dedupe).
+    Object.defineProperty(result, '_tree', { value: tree, enumerable: false });
+    return result;
   } catch (err) {
     console.warn(`[Parser] Failed to parse ${filePath}: ${err.message}`);
     return { filePath, imports: [], exports: [], complexity: 1 };

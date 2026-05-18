@@ -13,6 +13,7 @@
 
 const Anthropic = require('@anthropic-ai/sdk');
 const { supabaseAdmin } = require('../db/supabase');
+const { bindRequestAbort, isAbortError } = require('../lib/sseAbort');
 
 const anthropic = globalThis.__CODELENS_ANTHROPIC__ || new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || 'sk-ant-dummy' });
 
@@ -179,21 +180,34 @@ const chatWithFile = async (req, res) => {
       'When you reference code, cite file paths and (approximate) line numbers when possible.',
     ].join(' ');
 
-    const stream = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 1500,
-      system: `${system}\n\n${systemContext}`,
-      messages: [{ role: 'user', content: query.trim() }],
-      stream: true,
-    });
+    const { signal, cleanup } = bindRequestAbort(req);
+    let aborted = false;
+    try {
+      const stream = await anthropic.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1500,
+        system: `${system}\n\n${systemContext}`,
+        messages: [{ role: 'user', content: query.trim() }],
+        stream: true,
+      }, { signal });
 
-    for await (const event of stream) {
-      if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
-        send({ type: 'chunk', text: event.delta.text });
+      for await (const event of stream) {
+        if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+          send({ type: 'chunk', text: event.delta.text });
+        }
       }
+    } catch (streamErr) {
+      if (isAbortError(streamErr, signal)) {
+        aborted = true;
+        console.warn('[fileChat] Claude stream aborted by client disconnect');
+      } else {
+        throw streamErr;
+      }
+    } finally {
+      cleanup();
     }
 
-    send({ type: 'done' });
+    if (!aborted) send({ type: 'done' });
     res.end();
   } catch (err) {
     console.error('[fileChat] Error:', err);
