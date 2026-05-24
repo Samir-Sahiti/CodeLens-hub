@@ -14,6 +14,10 @@ router.post('/:repoId/duplication-refactor', requireAuth, aiRateLimit, reviewCon
 router.post('/:repoId/issues/:issueId/proposals', requireAuth, aiRateLimit, reviewController.generateProposal);
 router.patch('/:repoId/issues/:issueId/proposals/:proposalId', requireAuth, reviewController.updateProposalStatus);
 
+// US-066: apply a generated proposal as a GitHub draft PR + summary list for IssueCard badges.
+router.get('/:repoId/proposals/summary', requireAuth, reviewController.listProposalSummaries);
+router.post('/:repoId/proposals/:proposalId/apply', requireAuth, reviewController.applyProposalAsPr);
+
 // POST /api/review/:repoId   body: { snippet, context?, mode?, filePath? }
 router.post('/:repoId', requireAuth, aiRateLimit, reviewController.review);
 

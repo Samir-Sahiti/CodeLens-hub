@@ -2,11 +2,15 @@
  * Review controller — AI Code Review (US-026) + Security Audit Mode (US-048)
  */
 
+const path              = require('path');
+const { Octokit }       = require('octokit');
 const { OpenAI }        = require('openai');
 const Anthropic         = require('@anthropic-ai/sdk');
 const { supabaseAdmin } = require('../db/supabase');
 const { recordUsage }   = require('../services/usageTracker');
 const { bindRequestAbort, isAbortError } = require('../lib/sseAbort');
+const { withSupabaseRetry } = require('../lib/dbHelpers');
+const { getGithubTokenForUser } = require('../lib/githubAuth');
 
 const MODEL = 'claude-sonnet-4-20250514';
 const MAX_DAILY_TOKENS = parseInt(process.env.MAX_DAILY_TOKENS_PER_USER || '500000', 10);
@@ -804,7 +808,7 @@ async function fetchAnalysisIssue(repoId, issueId) {
 async function fetchCachedPendingProposal(issueId, userId) {
   const { data } = await supabaseAdmin
     .from('issue_proposals')
-    .select('id, proposal_json, created_at')
+    .select('id, proposal_json, prompt_tokens, completion_tokens, created_at')
     .eq('issue_id', issueId)
     .eq('user_id', userId)
     .eq('status', 'pending')
@@ -1081,11 +1085,23 @@ function normalizeChange(raw) {
 
 function normalizeProposal(parsed) {
   if (!parsed || typeof parsed !== 'object') return null;
+  const changes = Array.isArray(parsed.changes) ? parsed.changes.map(normalizeChange).filter(Boolean) : [];
+  const risks   = Array.isArray(parsed.risks) ? parsed.risks.map((r) => String(r).trim()).filter(Boolean) : [];
+
+  // The apply-as-PR endpoint commits change.full_content verbatim, so any
+  // create/modify missing it would silently produce an empty file. Surface
+  // those as risks here rather than letting the user discover them on Apply.
+  for (const change of changes) {
+    if ((change.action === 'create' || change.action === 'modify') && !change.full_content.trim()) {
+      risks.push(`Proposed ${change.action} of ${change.file_path} is missing file contents — cannot be applied as a PR. Regenerate the proposal.`);
+    }
+  }
+
   return {
     summary:   String(parsed.summary || '').trim(),
     rationale: String(parsed.rationale || '').trim(),
-    changes:   Array.isArray(parsed.changes) ? parsed.changes.map(normalizeChange).filter(Boolean) : [],
-    risks:     Array.isArray(parsed.risks) ? parsed.risks.map((r) => String(r).trim()).filter(Boolean) : [],
+    changes,
+    risks,
   };
 }
 
@@ -1154,7 +1170,13 @@ const generateProposal = async (req, res) => {
       const cached = await fetchCachedPendingProposal(issueId, req.user.id);
       if (cached?.proposal_json) {
         emitProposalEvents(send, cached.proposal_json);
-        send({ type: 'done', proposal_id: cached.id, cached: true });
+        send({
+          type: 'done',
+          proposal_id: cached.id,
+          cached: true,
+          prompt_tokens: cached.prompt_tokens || 0,
+          completion_tokens: cached.completion_tokens || 0,
+        });
         return res.end();
       }
     }
@@ -1246,7 +1268,12 @@ const generateProposal = async (req, res) => {
       return res.end();
     }
 
-    send({ type: 'done', proposal_id: inserted.id });
+    send({
+      type: 'done',
+      proposal_id: inserted.id,
+      prompt_tokens: inputTokens,
+      completion_tokens: outputTokens,
+    });
     res.end();
   } catch (err) {
     console.error('[proposals] Unhandled error:', err);
@@ -1257,6 +1284,290 @@ const generateProposal = async (req, res) => {
       res.end();
     }
   }
+};
+
+// ── US-066: Apply proposal as a GitHub draft PR ─────────────────────────────
+
+function buildBranchSlug(issueType, filePath) {
+  const base = `${issueType || 'refactor'}-${path.basename(filePath || 'file')}`;
+  return base
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40) || 'refactor';
+}
+
+function mapGithubError(err) {
+  const status = err?.status || err?.response?.status;
+  if (status === 401) return { http: 401, message: 'Your GitHub token has expired. Reconnect GitHub from Settings.' };
+  if (status === 403) return { http: 403, message: "You don't have write access to this repository." };
+  if (status === 404) return { http: 404, message: 'The repository or one of the files in this proposal no longer exists on GitHub.' };
+  if (status === 422) return { http: 422, message: 'GitHub rejected the changes — likely a path/encoding issue.' };
+  if (status === 429 || (typeof status === 'number' && status >= 500 && status < 600)) {
+    return { http: 502, message: 'GitHub is temporarily unavailable. Try again in a minute.' };
+  }
+  return { http: 500, message: 'Failed to open the pull request.' };
+}
+
+function buildPrBody({ rationale, risks, repoId, issueId, proposalId, issueType }) {
+  const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/+$/, '');
+  const issueLink = frontendUrl
+    ? `${frontendUrl}/repos/${repoId}/issues?issue=${issueId}&proposal=${proposalId}`
+    : `/repos/${repoId}/issues?issue=${issueId}&proposal=${proposalId}`;
+
+  const sections = [];
+  if (rationale) sections.push(`## Why\n${rationale}`);
+  if (risks && risks.length) {
+    sections.push(`## Risks\n${risks.map((r) => `- ${r}`).join('\n')}`);
+  }
+  sections.push(`## Source\nOpened from a [CodeLens proposal](${issueLink}) for issue type \`${issueType || 'unknown'}\`.`);
+  return sections.join('\n\n');
+}
+
+async function findExistingOpenPr(octokit, owner, repo, branchName) {
+  try {
+    const { data } = await octokit.rest.pulls.list({
+      owner,
+      repo,
+      head: `${owner}:${branchName}`,
+      state: 'open',
+      per_page: 1,
+    });
+    return data && data[0] ? data[0] : null;
+  } catch {
+    return null;
+  }
+}
+
+const applyProposalAsPr = async (req, res) => {
+  const { repoId, proposalId } = req.params;
+
+  const allowed = await canAccessRepo(repoId, req.user.id);
+  if (!allowed) return res.status(404).json({ error: 'Repository not found or unauthorized' });
+
+  // Load the proposal joined to its issue so we know the issue type / first file.
+  const { data: proposal, error: propErr } = await supabaseAdmin
+    .from('issue_proposals')
+    .select('id, issue_id, user_id, status, proposal_json, branch_name, pr_url, analysis_issues!inner(id, type, repo_id, file_paths)')
+    .eq('id', proposalId)
+    .eq('user_id', req.user.id)
+    .maybeSingle();
+
+  if (propErr) {
+    console.error('[proposals.apply] Failed to load proposal:', propErr);
+    return res.status(500).json({ error: 'Failed to load proposal' });
+  }
+  if (!proposal) return res.status(404).json({ error: 'Proposal not found' });
+  if (proposal.analysis_issues.repo_id !== repoId) {
+    return res.status(404).json({ error: 'Proposal not found' });
+  }
+  if (proposal.status === 'discarded' || proposal.status === 'stale') {
+    return res.status(409).json({ error: `Cannot apply a ${proposal.status} proposal — regenerate it first.` });
+  }
+
+  // Idempotent short-circuit.
+  if (proposal.status === 'applied' && proposal.pr_url && proposal.branch_name) {
+    return res.json({ branch_name: proposal.branch_name, pr_url: proposal.pr_url, reused: true });
+  }
+
+  const payload = proposal.proposal_json || {};
+  const changes = Array.isArray(payload.changes) ? payload.changes : [];
+  if (changes.length === 0) {
+    return res.status(422).json({ error: 'Proposal has no changes to apply.' });
+  }
+  for (const change of changes) {
+    if ((change.action === 'create' || change.action === 'modify') && !String(change.full_content || '').trim()) {
+      return res.status(422).json({ error: 'This proposal is missing file contents; please regenerate it.' });
+    }
+  }
+
+  const { data: repoRow, error: repoErr } = await supabaseAdmin
+    .from('repositories')
+    .select('id, full_name, default_branch, source')
+    .eq('id', repoId)
+    .single();
+  if (repoErr || !repoRow) return res.status(404).json({ error: 'Repository not found' });
+  if (repoRow.source !== 'github' || !repoRow.full_name || !repoRow.full_name.includes('/')) {
+    return res.status(400).json({ error: 'Only GitHub-connected repositories support Apply via PR.' });
+  }
+
+  const githubToken = await getGithubTokenForUser(req.user.id);
+  if (!githubToken) {
+    return res.status(401).json({ error: 'Your GitHub token has expired. Reconnect GitHub from Settings.' });
+  }
+
+  const [owner, repoName] = repoRow.full_name.split('/');
+  const octokit = new Octokit({ auth: githubToken });
+  const issue = proposal.analysis_issues;
+  const primaryPath = Array.isArray(issue.file_paths) ? issue.file_paths[0] : null;
+  const slug = buildBranchSlug(issue.type, primaryPath);
+  const branchName = `codelens/refactor/${String(proposalId).slice(0, 8)}-${slug}`;
+
+  try {
+    // Resolve default branch — prefer the stored one, fall back to a live lookup.
+    let defaultBranch = repoRow.default_branch;
+    if (!defaultBranch) {
+      const { data: repoMeta } = await octokit.rest.repos.get({ owner, repo: repoName });
+      defaultBranch = repoMeta.default_branch;
+    }
+
+    const { data: baseRef } = await octokit.rest.git.getRef({
+      owner,
+      repo: repoName,
+      ref: `heads/${defaultBranch}`,
+    });
+    const baseSha = baseRef.object.sha;
+
+    const { data: baseCommit } = await octokit.rest.git.getCommit({
+      owner,
+      repo: repoName,
+      commit_sha: baseSha,
+    });
+    const baseTreeSha = baseCommit.tree.sha;
+
+    // Build the new tree: one blob per create/modify, null sha for delete.
+    const treeEntries = [];
+    for (const change of changes) {
+      if (change.action === 'create' || change.action === 'modify') {
+        const { data: blob } = await octokit.rest.git.createBlob({
+          owner,
+          repo: repoName,
+          content: change.full_content,
+          encoding: 'utf-8',
+        });
+        treeEntries.push({ path: change.file_path, mode: '100644', type: 'blob', sha: blob.sha });
+      } else if (change.action === 'delete') {
+        treeEntries.push({ path: change.file_path, mode: '100644', type: 'blob', sha: null });
+      }
+    }
+
+    const { data: newTree } = await octokit.rest.git.createTree({
+      owner,
+      repo: repoName,
+      base_tree: baseTreeSha,
+      tree: treeEntries,
+    });
+
+    const commitMessage = (payload.summary && String(payload.summary).trim()) || `Refactor: ${slug}`;
+    const { data: commit } = await octokit.rest.git.createCommit({
+      owner,
+      repo: repoName,
+      message: commitMessage.slice(0, 4096),
+      tree: newTree.sha,
+      parents: [baseSha],
+    });
+
+    // Create the branch ref, or reuse an existing one (e.g. retry).
+    let branchExists = false;
+    try {
+      await octokit.rest.git.createRef({
+        owner,
+        repo: repoName,
+        ref: `refs/heads/${branchName}`,
+        sha: commit.sha,
+      });
+    } catch (refErr) {
+      if (refErr?.status === 422) {
+        branchExists = true;
+      } else {
+        throw refErr;
+      }
+    }
+
+    let prUrl;
+    if (branchExists) {
+      const existing = await findExistingOpenPr(octokit, owner, repoName, branchName);
+      if (existing) {
+        prUrl = existing.html_url;
+      } else {
+        // Our branch, our commits — fast-forward it to the new commit and open a PR.
+        await octokit.rest.git.updateRef({
+          owner,
+          repo: repoName,
+          ref: `heads/${branchName}`,
+          sha: commit.sha,
+          force: true,
+        });
+      }
+    }
+
+    if (!prUrl) {
+      const title = `Refactor: ${(payload.summary || slug).trim()}`.slice(0, 72);
+      const body = buildPrBody({
+        rationale: payload.rationale,
+        risks: payload.risks,
+        repoId,
+        issueId: issue.id,
+        proposalId,
+        issueType: issue.type,
+      });
+      const { data: pr } = await octokit.rest.pulls.create({
+        owner,
+        repo: repoName,
+        draft: true,
+        head: branchName,
+        base: defaultBranch,
+        title,
+        body,
+      });
+      prUrl = pr.html_url;
+    }
+
+    const persistResult = await withSupabaseRetry(
+      () => supabaseAdmin
+        .from('issue_proposals')
+        .update({ status: 'applied', branch_name: branchName, pr_url: prUrl, updated_at: new Date().toISOString() })
+        .eq('id', proposalId)
+        .eq('user_id', req.user.id),
+      { label: 'issue_proposals.update_applied' },
+    );
+    if (persistResult?.error) {
+      console.warn('[proposals.apply] PR opened but DB write failed:', persistResult.error.message);
+    }
+
+    return res.json({ branch_name: branchName, pr_url: prUrl, reused: false });
+  } catch (err) {
+    const { http, message } = mapGithubError(err);
+    console.error('[proposals.apply] Failed:', err?.status, err?.message);
+    return res.status(http).json({ error: message });
+  }
+};
+
+// ── Lightweight summary for IssueCard badges ────────────────────────────────
+
+const listProposalSummaries = async (req, res) => {
+  const { repoId } = req.params;
+
+  const allowed = await canAccessRepo(repoId, req.user.id);
+  if (!allowed) return res.status(404).json({ error: 'Repository not found or unauthorized' });
+
+  // Newest row per issue. We fetch all of the user's proposals on issues that
+  // belong to this repo (inner-join filter), then pick the latest per issue_id.
+  const { data, error } = await supabaseAdmin
+    .from('issue_proposals')
+    .select('id, issue_id, status, pr_url, created_at, analysis_issues!inner(repo_id)')
+    .eq('user_id', req.user.id)
+    .eq('analysis_issues.repo_id', repoId)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('[proposals.summary] Failed to load summaries:', error);
+    return res.status(500).json({ error: 'Failed to load proposal summaries' });
+  }
+
+  const latestPerIssue = new Map();
+  for (const row of data || []) {
+    if (!latestPerIssue.has(row.issue_id)) {
+      latestPerIssue.set(row.issue_id, {
+        id: row.id,
+        issue_id: row.issue_id,
+        status: row.status,
+        pr_url: row.pr_url || null,
+      });
+    }
+  }
+
+  res.json({ proposals: [...latestPerIssue.values()] });
 };
 
 const updateProposalStatus = async (req, res) => {
@@ -1299,6 +1610,8 @@ module.exports = {
   duplicationRefactor,
   generateProposal,
   updateProposalStatus,
+  applyProposalAsPr,
+  listProposalSummaries,
   _private: {
     parseFindingsFromText,
     rerankSecurityChunks,

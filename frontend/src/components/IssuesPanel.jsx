@@ -13,7 +13,7 @@ import {
   Package, Lock, ShieldAlert, GitMerge,
   FileWarning, Link2, FileX, Search,
   ChevronDown, ChevronUp, CheckCircle2, AlertTriangle, TrendingUp,
-  Copy, Sparkles,
+  Copy, Sparkles, GitBranch,
 } from './ui/Icons';
 
 // Phase 4.1: virtualize groups above this size. Below the threshold, virtuoso's
@@ -44,7 +44,7 @@ function getBadgeStyles(severity) {
 }
 
 // ── IssueGroup ────────────────────────────────────────────────────────────────
-const IssueGroup = memo(function IssueGroup({ type, label, Icon, issues, nodeMap, onIssueClick, onSuppress, onDisableRule, onProposeFix, actionsDisabled, scrollParent }) {
+const IssueGroup = memo(function IssueGroup({ type, label, Icon, issues, nodeMap, onIssueClick, onSuppress, onDisableRule, onProposeFix, actionsDisabled, scrollParent, proposalsByIssue }) {
   const [isOpen, setIsOpen] = useState(true);
 
   return (
@@ -95,6 +95,7 @@ const IssueGroup = memo(function IssueGroup({ type, label, Icon, issues, nodeMap
                   onDisableRule={onDisableRule}
                   onProposeFix={onProposeFix}
                   actionsDisabled={actionsDisabled}
+                  appliedProposal={proposalsByIssue?.[issue.id]}
                 />
               </div>
             )}
@@ -114,6 +115,7 @@ const IssueGroup = memo(function IssueGroup({ type, label, Icon, issues, nodeMap
                 onDisableRule={onDisableRule}
                 onProposeFix={onProposeFix}
                 actionsDisabled={actionsDisabled}
+                appliedProposal={proposalsByIssue?.[issue.id]}
               />
             ))}
           </div>
@@ -124,16 +126,32 @@ const IssueGroup = memo(function IssueGroup({ type, label, Icon, issues, nodeMap
 });
 
 // ── IssueCard ─────────────────────────────────────────────────────────────────
-const IssueCard = memo(function IssueCard({ issue, type, onIssueClick, onSuppress, onDisableRule, onProposeFix, actionsDisabled }) {
+const IssueCard = memo(function IssueCard({ issue, type, onIssueClick, onSuppress, onDisableRule, onProposeFix, actionsDisabled, appliedProposal }) {
+  const hasPrOpen = appliedProposal?.status === 'applied' && appliedProposal?.pr_url;
   return (
     <div
       onClick={() => onIssueClick(issue)}
       className="flex flex-col bg-gray-900/50 hover:bg-gray-800/80 border border-gray-800 hover:border-gray-700 rounded-xl p-5 cursor-pointer transition-all duration-200 hover:-translate-y-px hover:shadow-lg group"
     >
       <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-        <span className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium uppercase tracking-wider ${getBadgeStyles(issue.severity)}`}>
-          {issue.severity || 'UNKNOWN'}
-        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium uppercase tracking-wider ${getBadgeStyles(issue.severity)}`}>
+            {issue.severity || 'UNKNOWN'}
+          </span>
+          {hasPrOpen && (
+            <a
+              href={appliedProposal.pr_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="inline-flex items-center gap-1 rounded-md bg-emerald-500/10 px-2 py-1 text-xs font-medium text-emerald-300 ring-1 ring-inset ring-emerald-500/30 hover:bg-emerald-500/20 transition-colors"
+              title="View the draft PR opened from a CodeLens proposal"
+            >
+              <GitBranch className="h-3 w-3" />
+              PR opened
+            </a>
+          )}
+        </div>
 
         <div className="flex flex-wrap items-center gap-2 sm:justify-end">
           <button
@@ -143,7 +161,7 @@ const IssueCard = memo(function IssueCard({ issue, type, onIssueClick, onSuppres
             className="inline-flex items-center gap-1.5 rounded-md border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-1 text-xs font-medium text-indigo-200 transition-colors hover:bg-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Sparkles className="h-3.5 w-3.5" />
-            Propose fix
+            {hasPrOpen ? 'Open proposal' : 'Propose fix'}
           </button>
 
           {/* Suppress button for secrets */}
@@ -444,6 +462,7 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
   const [isFetching, setIsFetching] = useState(false);
   const [canMutateIssues, setCanMutateIssues] = useState(true);
   const [selectedProposalIssue, setSelectedProposalIssue] = useState(null);
+  const [proposalsByIssue, setProposalsByIssue] = useState({});
   // Phase 4.1: callback ref so the scroll-parent element propagates through
   // state and triggers a re-render — IssueGroup's customScrollParent prop
   // needs the actual DOM node, not a ref placeholder.
@@ -474,6 +493,27 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
     };
 
     fetchDuplication();
+  }, [repoId, accessToken]);
+
+  useEffect(() => {
+    const fetchProposalSummary = async () => {
+      if (!accessToken || !repoId) return;
+      try {
+        const res = await fetch(apiUrl(`/api/review/${repoId}/proposals/summary`), {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const map = {};
+        for (const p of data.proposals || []) {
+          if (p.issue_id) map[p.issue_id] = p;
+        }
+        setProposalsByIssue(map);
+      } catch {
+        // Best-effort — the badges are purely informational.
+      }
+    };
+    fetchProposalSummary();
   }, [repoId, accessToken]);
 
   useEffect(() => {
@@ -583,11 +623,16 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
     }
   }, [canMutateIssues, repoId, session]);
 
-  const handleApplyProposal = useCallback((proposal) => {
-    window.dispatchEvent(new CustomEvent('codelens:apply-proposal', {
-      detail: { proposal, issue: selectedProposalIssue },
+  // Wired by ProposalPanel after a successful Apply via PR. Updates the local
+  // proposal-summary map so the IssueCard badge ("PR opened") reflects the new
+  // state without requiring a panel re-fetch.
+  const handleProposalApplied = useCallback(({ proposalId, issueId, pr_url }) => {
+    if (!issueId) return;
+    setProposalsByIssue((prev) => ({
+      ...prev,
+      [issueId]: { id: proposalId, issue_id: issueId, status: 'applied', pr_url: pr_url || null },
     }));
-  }, [selectedProposalIssue]);
+  }, []);
 
   if ((!localIssues || localIssues.length === 0) && duplicationClusters.length === 0) {
     return (
@@ -620,7 +665,7 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
           token={accessToken}
           open={!!selectedProposalIssue}
           onClose={() => setSelectedProposalIssue(null)}
-          onApplyProposal={handleApplyProposal}
+          onApplied={handleProposalApplied}
         />
       </>
     );
@@ -677,6 +722,7 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
               onProposeFix={setSelectedProposalIssue}
               actionsDisabled={!canMutateIssues}
               scrollParent={scrollParent}
+              proposalsByIssue={proposalsByIssue}
             />
           );
         })}
@@ -707,7 +753,7 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
       token={accessToken}
       open={!!selectedProposalIssue}
       onClose={() => setSelectedProposalIssue(null)}
-      onApplyProposal={handleApplyProposal}
+      onApplied={handleProposalApplied}
     />
     </>
   );
