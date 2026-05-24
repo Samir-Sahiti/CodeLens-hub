@@ -6,7 +6,9 @@ import { Badge, Banner, Button, Skeleton, cx } from './ui/Primitives';
 import {
   AlertTriangle,
   Check,
+  CheckCircle2,
   Copy,
+  ExternalLink,
   GitBranch,
   RefreshCw,
   Sparkles,
@@ -22,6 +24,10 @@ const EMPTY_PROPOSAL = {
   rationale: '',
   changes: [],
   risks: [],
+  branch_name: null,
+  pr_url: null,
+  prompt_tokens: 0,
+  completion_tokens: 0,
 };
 
 function normalizeProposal(raw = {}) {
@@ -36,6 +42,10 @@ function normalizeProposal(raw = {}) {
     rationale: proposal.rationale || '',
     changes: Array.isArray(proposal.changes) ? proposal.changes : [],
     risks: Array.isArray(proposal.risks) ? proposal.risks : [],
+    branch_name: proposal.branch_name || raw.branch_name || null,
+    pr_url: proposal.pr_url || raw.pr_url || null,
+    prompt_tokens: Number(proposal.prompt_tokens || raw.prompt_tokens || 0),
+    completion_tokens: Number(proposal.completion_tokens || raw.completion_tokens || 0),
   };
 }
 
@@ -48,6 +58,10 @@ function mergeProposal(current, incoming) {
     rationale: next.rationale || current.rationale,
     changes: next.changes.length ? next.changes : current.changes,
     risks: next.risks.length ? next.risks : current.risks,
+    branch_name: next.branch_name || current.branch_name,
+    pr_url: next.pr_url || current.pr_url,
+    prompt_tokens: next.prompt_tokens || current.prompt_tokens,
+    completion_tokens: next.completion_tokens || current.completion_tokens,
   };
 }
 
@@ -132,13 +146,14 @@ function DiffBlock({ change }) {
   );
 }
 
-export default function ProposalPanel({ repoId, issue, token, open, onClose, onApplyProposal }) {
+export default function ProposalPanel({ repoId, issue, token, open, onClose, onApplied }) {
   const [proposal, setProposal] = useState(EMPTY_PROPOSAL);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [copyState, setCopyState] = useState('idle');
   const [isDiscarding, setIsDiscarding] = useState(false);
+  const [isApplying, setIsApplying] = useState(false);
 
   const abortRef = useRef(null);
   const panelRef = useRef(null);
@@ -156,7 +171,9 @@ export default function ProposalPanel({ repoId, issue, token, open, onClose, onA
     proposal.summary || proposal.rationale || proposal.changes.length || proposal.risks.length
   );
   const isStale = proposal.status === 'stale';
-  const canMutate = Boolean(proposal.id) && !isStreaming;
+  const isApplied = proposal.status === 'applied';
+  const canMutate = Boolean(proposal.id) && !isStreaming && !isApplying;
+  const totalTokens = (proposal.prompt_tokens || 0) + (proposal.completion_tokens || 0);
 
   const abortActiveStream = useCallback(() => {
     if (abortRef.current) {
@@ -194,6 +211,8 @@ export default function ProposalPanel({ repoId, issue, token, open, onClose, onA
           ...merged,
           id: event.proposal_id || merged.id,
           status: event.status || merged.status || 'pending',
+          prompt_tokens: Number(event.prompt_tokens || merged.prompt_tokens || 0),
+          completion_tokens: Number(event.completion_tokens || merged.completion_tokens || 0),
         };
       });
       setIsStreaming(false);
@@ -344,6 +363,38 @@ export default function ProposalPanel({ repoId, issue, token, open, onClose, onA
     }
   };
 
+  const handleApply = async () => {
+    if (!repoId || !proposal.id || !token || isApplying) return;
+    setIsApplying(true);
+    setError(null);
+    try {
+      const res = await fetch(apiUrl(`/api/review/${repoId}/proposals/${proposal.id}/apply`), {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || `Server error ${res.status}`);
+      }
+      setProposal((prev) => ({
+        ...prev,
+        status: 'applied',
+        branch_name: data.branch_name || prev.branch_name,
+        pr_url: data.pr_url || prev.pr_url,
+      }));
+      onApplied?.({
+        proposalId: proposal.id,
+        issueId: issue?.id,
+        branch_name: data.branch_name,
+        pr_url: data.pr_url,
+      });
+    } catch (err) {
+      setError(err.message || 'Failed to open the pull request.');
+    } finally {
+      setIsApplying(false);
+    }
+  };
+
   if (!open || !issue) return null;
 
   return (
@@ -367,6 +418,9 @@ export default function ProposalPanel({ repoId, issue, token, open, onClose, onA
             </div>
             <h2 id="proposal-panel-title" className="text-base font-semibold text-white">Refactor proposal</h2>
             <p className="mt-1 break-all font-mono text-xs text-accent-soft">{getPrimaryPath(issue)}</p>
+            {proposal.id && totalTokens > 0 && (
+              <p className="mt-1 text-xs text-gray-500">{totalTokens.toLocaleString()} tokens</p>
+            )}
           </div>
           <button
             ref={closeButtonRef}
@@ -388,6 +442,30 @@ export default function ProposalPanel({ repoId, issue, token, open, onClose, onA
                 <p>This file has changed since this proposal was generated</p>
                 <Button size="sm" variant="outline" icon={RefreshCw} onClick={() => loadProposal({ regenerate: true })}>
                   Regenerate
+                </Button>
+              </div>
+            </Banner>
+          )}
+
+          {isApplied && proposal.pr_url && (
+            <Banner tone="success" icon={CheckCircle2} className="items-center">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <p className="font-medium">Draft PR opened on GitHub</p>
+                  {proposal.branch_name && (
+                    <p className="mt-0.5 break-all font-mono text-xs opacity-80">{proposal.branch_name}</p>
+                  )}
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  icon={ExternalLink}
+                  as="a"
+                  href={proposal.pr_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  View PR
                 </Button>
               </div>
             </Banner>
@@ -449,12 +527,16 @@ export default function ProposalPanel({ repoId, issue, token, open, onClose, onA
             >
               Cancel
             </Button>
+          ) : isApplied ? (
+            <Button variant="secondary" icon={copyState === 'copied' ? Check : Copy} disabled={!allDiffs} onClick={handleCopyDiff}>
+              {copyState === 'copied' ? 'Copied' : 'Copy diff'}
+            </Button>
           ) : (
             <>
               <Button variant="danger" icon={Trash2} disabled={!canMutate || isDiscarding} loading={isDiscarding} onClick={handleDiscard}>
                 Discard
               </Button>
-              <Button variant="secondary" icon={RefreshCw} disabled={isStreaming} onClick={() => loadProposal({ regenerate: true })}>
+              <Button variant="secondary" icon={RefreshCw} disabled={!canMutate} onClick={() => loadProposal({ regenerate: true })}>
                 Regenerate
               </Button>
               <Button variant="secondary" icon={copyState === 'copied' ? Check : Copy} disabled={!allDiffs || isStreaming} onClick={handleCopyDiff}>
@@ -463,10 +545,11 @@ export default function ProposalPanel({ repoId, issue, token, open, onClose, onA
               <Button
                 variant="primary"
                 icon={GitBranch}
-                disabled={!canMutate}
-                onClick={() => onApplyProposal?.(proposal)}
+                disabled={!canMutate || isStale}
+                loading={isApplying}
+                onClick={handleApply}
               >
-                Apply via PR
+                {isApplying ? 'Opening PR…' : 'Apply via PR'}
               </Button>
             </>
           )}
