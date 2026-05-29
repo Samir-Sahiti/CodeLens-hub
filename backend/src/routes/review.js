@@ -11,6 +11,7 @@ router.get('/:repoId/security-audits/:auditId', requireAuth, reviewController.ge
 router.post('/:repoId/duplication-refactor', requireAuth, aiRateLimit, reviewController.duplicationRefactor);
 
 // US-064: refactor proposal generation. Optional ?regenerate=true skips the cache.
+router.post('/:repoId/pr-findings/proposals', requireAuth, aiRateLimit, reviewController.generatePrFindingProposal);
 router.post('/:repoId/issues/:issueId/proposals', requireAuth, aiRateLimit, reviewController.generateProposal);
 router.patch('/:repoId/issues/:issueId/proposals/:proposalId', requireAuth, reviewController.updateProposalStatus);
 

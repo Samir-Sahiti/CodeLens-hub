@@ -34,16 +34,14 @@ const handleGitHubPush = async (req, res) => {
   }
 
   const fullName = payload?.repository?.full_name;
-  const ref = payload?.ref;
-
-  if (!fullName || !ref) {
-    return res.status(400).json({ error: 'Missing repository.full_name or ref in payload' });
+  if (!fullName) {
+    return res.status(400).json({ error: 'Missing repository.full_name in payload' });
   }
 
   // Look up the repo by name (stored as "owner/repo")
   const { data: repo, error: fetchError } = await supabaseAdmin
     .from('repositories')
-    .select('id, user_id, webhook_secret, default_branch, full_name, source, auto_sync_enabled, pr_review_enabled')
+    .select('id, user_id, webhook_secret, default_branch, full_name, name, source, auto_sync_enabled, pr_review_enabled')
     .eq('full_name', fullName)
     .eq('source', 'github')
     .maybeSingle();
@@ -104,7 +102,7 @@ const handleGitHubPush = async (req, res) => {
       return res.status(200).json({ ok: true, skipped: 'PR review not enabled for this repo' });
     }
 
-    const repoName = repo.full_name || payload.repository.full_name || payload.repository.name;
+    const repoName = payload.repository?.name;
     if (!repoName) {
       return res.status(200).json({ ok: true, skipped: 'repository metadata missing name' });
     }
@@ -124,6 +122,10 @@ const handleGitHubPush = async (req, res) => {
   }
 
   // Only re-index pushes to the default branch
+  const ref = payload?.ref;
+  if (!ref) {
+    return res.status(400).json({ error: 'Missing ref in push payload' });
+  }
   const defaultRef = `refs/heads/${repo.default_branch || 'main'}`;
   if (ref !== defaultRef) {
     return res.status(200).json({ ok: true, skipped: 'push not to default branch' });

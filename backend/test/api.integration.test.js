@@ -1,6 +1,11 @@
 import express from 'express';
 import request from 'supertest';
+import crypto from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const require = createRequire(import.meta.url);
 
 const octokitMockState = {
   pullsGetResult: { data: { head: { sha: 'headsha123' }, base: { sha: 'basesha123' } } },
@@ -60,9 +65,10 @@ function createSupabaseMock(handlers) {
       this.action = 'delete';
       return this;
     }
-    upsert(payload) {
+    upsert(payload, options) {
       this.action = 'upsert';
       this.payload = payload;
+      this.options = options;
       return this;
     }
     onConflict() {
@@ -147,6 +153,9 @@ describe('Backend API integration (mocked)', () => {
     };
 
     supabaseCallLog = [];
+    globalThis.__CODELENS_NOTIFICATION_EVENTS__ = [];
+    globalThis.__CODELENS_GITHUB_TOKEN__ = null;
+    globalThis.__CODELENS_OCTOKIT__ = null;
 
     globalThis.__CODELENS_OPENAI__ = {
       embeddings: {
@@ -865,8 +874,14 @@ describe('Backend API integration (mocked)', () => {
 
   it('POST /api/repos/:repoId/pulls/:number/reviews stores a PR review and streams findings', async () => {
     octokitMockState.pullsGetResult = { data: { head: { sha: 'headsha123' }, base: { sha: 'basesha123' } } };
-    octokitMockState.listFilesResult = { data: [{ filename: 'src/index.js', additions: 2, patch: '+const a = 1\n' }] };
-    octokitMockState.getContentResult = { data: { content: Buffer.from('const a = 1;\n').toString('base64'), encoding: 'base64' } };
+    octokitMockState.listFilesResult = {
+      data: [{
+        filename: 'src/index.js',
+        additions: 1,
+        patch: "@@ -0,0 +1,1 @@\n+const token = 'abcdefghijklmnopqrstuvwxyz1234567890';\n",
+      }],
+    };
+    octokitMockState.getContentResult = { data: { content: Buffer.from("const token = 'abcdefghijklmnopqrstuvwxyz1234567890';\n").toString('base64'), encoding: 'base64' } };
     globalThis.__CODELENS_OCTOKIT__ = {
       Octokit: class {
         constructor() {}
@@ -896,8 +911,11 @@ describe('Backend API integration (mocked)', () => {
       'repositories.select.maybeSingle': async () => ({ data: { id: 'repo-1', full_name: 'owner/repo' }, error: null }),
       'repositories.select.single': async () => ({ data: { full_name: 'owner/repo' }, error: null }),
       'issue_suppressions.select.many': async () => ({ data: [], error: null }),
-      'pr_reviews.insert.maybeSingle': async (state) => ({ data: { id: 'review-1', ...state.payload }, error: null }),
-      'pr_reviews.update.maybeSingle': async (state) => ({ data: { id: 'review-1', ...state.payload }, error: null }),
+      'analysis_issues.select.many': async () => ({ data: [], error: null }),
+      'graph_edges.select.many': async () => ({ data: [], error: null }),
+      'graph_nodes.select.many': async () => ({ data: [{ file_path: 'src/index.js' }], error: null }),
+      'pr_reviews.upsert.maybeSingle': async (state) => ({ data: { id: 'review-1', ...state.payload, upsertOptions: state.options }, error: null }),
+      'pr_reviews.update.many': async (state) => ({ data: { id: 'review-1', ...state.payload }, error: null }),
     });
 
     globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
@@ -915,6 +933,628 @@ describe('Backend API integration (mocked)', () => {
 
     expect(res.text).toContain('data:');
     expect(res.text).toContain('review_id');
-    expect(supabaseCallLog).toContain('pr_reviews.insert.maybeSingle');
+    expect(res.text).toContain('"type":"finding"');
+    expect(supabaseCallLog).toContain('pr_reviews.upsert.maybeSingle');
+    expect(globalThis.__CODELENS_NOTIFICATION_EVENTS__[0].type).toBe('pr_review.ready');
+  });
+
+  it('POST /api/repos/:repoId/pulls/:number/reviews validates request prerequisites before opening SSE', async () => {
+    supabaseAdminMock = createSupabaseMock({
+      'repositories.select.maybeSingle': async () => ({ data: { id: 'repo-1', full_name: 'owner/repo' }, error: null }),
+    });
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+    globalThis.__CODELENS_SUPABASE_ANON__ = supabaseAdminMock;
+    globalThis.__CODELENS_GITHUB_TOKEN__ = null;
+
+    const reviewController = (await import('../src/controllers/reviewController.js')).runPrReview;
+    const app = express();
+    app.use(express.json());
+    app.post('/api/repos/:repoId/pulls/:number/reviews', (req, _res, next) => { req.user = { id: 'user-1' }; next(); }, reviewController);
+
+    await request(app)
+      .post('/api/repos/repo-1/pulls/not-a-number/reviews')
+      .expect(400);
+
+    await request(app)
+      .post('/api/repos/repo-1/pulls/42/reviews')
+      .expect(401);
+
+    expect(supabaseCallLog).not.toContain('pr_reviews.upsert.maybeSingle');
+  });
+
+  it('PR review pipeline filters unchanged, existing, and suppressed deterministic findings', async () => {
+    const sent = [];
+    const baseContent = "eval('old');\nconst ok = true;\n";
+    const headContent = "eval('old');\neval('new');\nconst token = 'abcdefghijklmnopqrstuvwxyz1234567890';\n";
+    octokitMockState.pullsGetResult = { data: { head: { sha: 'headsha456' }, base: { sha: 'basesha456' } } };
+    octokitMockState.listFilesResult = {
+      data: [{
+        filename: 'src/index.js',
+        additions: 2,
+        patch: "@@ -1,2 +1,3 @@\n eval('old');\n+eval('new');\n+const token = 'abcdefghijklmnopqrstuvwxyz1234567890';\n const ok = true;\n",
+      }],
+    };
+    globalThis.__CODELENS_OCTOKIT__ = {
+      Octokit: class {
+        get rest() {
+          return {
+            pulls: {
+              get: async () => octokitMockState.pullsGetResult,
+              listFiles: async () => octokitMockState.listFilesResult,
+            },
+            repos: {
+              getContent: async ({ ref }) => ({
+                data: {
+                  content: Buffer.from(ref === 'basesha456' ? baseContent : headContent).toString('base64'),
+                  encoding: 'base64',
+                },
+              }),
+            },
+          };
+        }
+        get paginate() {
+          return { iterator: async function* () { yield { data: octokitMockState.listFilesResult.data }; } };
+        }
+      },
+    };
+
+    supabaseAdminMock = createSupabaseMock({
+      'issue_suppressions.select.many': async () => ({ data: [{ file_path: 'src/index.js', rule_id: 'generic_high_entropy', line_number: null }], error: null }),
+      'analysis_issues.select.many': async () => ({
+        data: [{ id: 'existing-js-eval', type: 'insecure_pattern', severity: 'high', description: '[Line 2] Use of eval() (Rule ID: js_eval)', file_paths: ['src/index.js'] }],
+        error: null,
+      }),
+      'graph_edges.select.many': async () => ({ data: [], error: null }),
+      'graph_nodes.select.many': async () => ({ data: [{ file_path: 'src/index.js' }], error: null }),
+      'pr_reviews.upsert.maybeSingle': async (state) => ({ data: { id: 'review-2', ...state.payload }, error: null }),
+      'pr_reviews.update.many': async () => ({ data: null, error: null }),
+    });
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const { runPrReviewBackground } = await import('../src/controllers/reviewController.js');
+    const result = await runPrReviewBackground({
+      repoId: 'repo-1',
+      prNumber: 42,
+      owner: 'owner',
+      repo: 'repo',
+      githubToken: 'gh-token',
+      userId: 'user-1',
+      send: (event) => sent.push(event),
+    });
+
+    expect(result.reviewId).toBe('review-2');
+    expect(sent.filter((event) => event.type === 'finding')).toHaveLength(0);
+    expect(globalThis.__CODELENS_NOTIFICATION_EVENTS__[0].type).toBe('pr_review.ready');
+  });
+
+  it('PR review pipeline suppresses auth coverage findings already present in the PR base', async () => {
+    const sent = [];
+    const baseContent = "const express = require('express');\nconst router = express.Router();\nrouter.get('/admin', handler);\n";
+    const headContent = `${baseContent}// unrelated route file comment\n`;
+    octokitMockState.pullsGetResult = { data: { head: { sha: 'headauth' }, base: { sha: 'baseauth' } } };
+    octokitMockState.listFilesResult = {
+      data: [{
+        filename: 'src/routes.js',
+        additions: 1,
+        patch: "@@ -1,3 +1,4 @@\n const express = require('express');\n const router = express.Router();\n router.get('/admin', handler);\n+// unrelated route file comment\n",
+      }],
+    };
+    globalThis.__CODELENS_OCTOKIT__ = {
+      Octokit: class {
+        get rest() {
+          return {
+            pulls: {
+              get: async () => octokitMockState.pullsGetResult,
+              listFiles: async () => octokitMockState.listFilesResult,
+            },
+            repos: {
+              getContent: async ({ ref }) => ({
+                data: {
+                  content: Buffer.from(ref === 'baseauth' ? baseContent : headContent).toString('base64'),
+                  encoding: 'base64',
+                },
+              }),
+            },
+          };
+        }
+        get paginate() {
+          return { iterator: async function* () { yield { data: octokitMockState.listFilesResult.data }; } };
+        }
+      },
+    };
+
+    supabaseAdminMock = createSupabaseMock({
+      'issue_suppressions.select.many': async () => ({ data: [], error: null }),
+      'analysis_issues.select.many': async () => ({ data: [], error: null }),
+      'graph_edges.select.many': async () => ({ data: [], error: null }),
+      'graph_nodes.select.many': async () => ({ data: [], error: null }),
+      'pr_reviews.upsert.maybeSingle': async (state) => ({ data: { id: 'review-auth', ...state.payload }, error: null }),
+      'pr_reviews.update.many': async () => ({ data: null, error: null }),
+    });
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const { runPrReviewBackground } = await import('../src/controllers/reviewController.js');
+    await runPrReviewBackground({
+      repoId: 'repo-1',
+      prNumber: 42,
+      owner: 'owner',
+      repo: 'repo',
+      githubToken: 'gh-token',
+      userId: 'user-1',
+      send: (event) => sent.push(event),
+    });
+
+    expect(sent.filter((event) => event.type === 'finding')).toHaveLength(0);
+  });
+
+  it('PR review marks an existing review row failed when persistence fails after creation', async () => {
+    const sent = [];
+    octokitMockState.pullsGetResult = { data: { head: { sha: 'headsha789' }, base: { sha: 'basesha789' } } };
+    octokitMockState.listFilesResult = { data: [] };
+    globalThis.__CODELENS_OCTOKIT__ = {
+      Octokit: class {
+        get rest() {
+          return {
+            pulls: { get: async () => octokitMockState.pullsGetResult, listFiles: async () => octokitMockState.listFilesResult },
+            repos: { getContent: async () => ({ data: { content: '', encoding: 'base64' } }) },
+          };
+        }
+        get paginate() {
+          return { iterator: async function* () { yield { data: [] }; } };
+        }
+      },
+    };
+
+    const updatePayloads = [];
+    supabaseAdminMock = createSupabaseMock({
+      'issue_suppressions.select.many': async () => ({ data: [], error: null }),
+      'analysis_issues.select.many': async () => ({ data: [], error: null }),
+      'pr_reviews.upsert.maybeSingle': async (state) => ({ data: { id: 'review-3', ...state.payload }, error: null }),
+      'pr_reviews.update.many': async (state) => {
+        updatePayloads.push(state.payload);
+        if (state.payload.status === 'ready') return { data: null, error: { message: 'write failed' } };
+        return { data: null, error: null };
+      },
+    });
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const { runPrReviewBackground } = await import('../src/controllers/reviewController.js');
+    const result = await runPrReviewBackground({
+      repoId: 'repo-1',
+      prNumber: 42,
+      owner: 'owner',
+      repo: 'repo',
+      githubToken: 'gh-token',
+      userId: 'user-1',
+      send: (event) => sent.push(event),
+    });
+
+    expect(result).toBeNull();
+    expect(updatePayloads).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'failed', summary: expect.stringContaining('Failed to update PR review') }),
+    ]));
+    expect(sent).toContainEqual(expect.objectContaining({ type: 'error' }));
+  });
+
+  it('Large PR reviews emit truncated and analyze only the top 50 files by additions', async () => {
+    const files = Array.from({ length: 51 }, (_, i) => ({
+      filename: `src/file-${i}.js`,
+      additions: i,
+      patch: `@@ -0,0 +1,1 @@\n+const value${i} = ${i};\n`,
+    }));
+    const sent = [];
+    octokitMockState.pullsGetResult = { data: { head: { sha: 'headsha999' }, base: { sha: 'basesha999' } } };
+    octokitMockState.listFilesResult = { data: files };
+    globalThis.__CODELENS_OCTOKIT__ = {
+      Octokit: class {
+        get rest() {
+          return {
+            pulls: { get: async () => octokitMockState.pullsGetResult, listFiles: async () => octokitMockState.listFilesResult },
+            repos: { getContent: async () => ({ data: { content: Buffer.from('const ok = true;\n').toString('base64'), encoding: 'base64' } }) },
+          };
+        }
+        get paginate() {
+          return { iterator: async function* () { yield { data: files }; } };
+        }
+      },
+    };
+    supabaseAdminMock = createSupabaseMock({
+      'issue_suppressions.select.many': async () => ({ data: [], error: null }),
+      'analysis_issues.select.many': async () => ({ data: [], error: null }),
+      'graph_edges.select.many': async () => ({ data: [], error: null }),
+      'graph_nodes.select.many': async () => ({ data: [], error: null }),
+      'pr_reviews.upsert.maybeSingle': async (state) => ({ data: { id: 'review-4', ...state.payload }, error: null }),
+      'pr_reviews.update.many': async () => ({ data: null, error: null }),
+    });
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const { runPrReviewBackground } = await import('../src/controllers/reviewController.js');
+    await runPrReviewBackground({
+      repoId: 'repo-1',
+      prNumber: 42,
+      owner: 'owner',
+      repo: 'repo',
+      githubToken: 'gh-token',
+      userId: 'user-1',
+      send: (event) => sent.push(event),
+    });
+
+    expect(sent).toContainEqual({ type: 'truncated', total_files: 51, analyzed_files: 50 });
+    const analyzedFiles = sent.filter((event) => event.type === 'analyzing_file').map((event) => event.file);
+    expect(analyzedFiles).toHaveLength(50);
+    expect(analyzedFiles).toContain('src/file-50.js');
+    expect(analyzedFiles).not.toContain('src/file-0.js');
+  });
+
+  it('POST /api/repos/:repoId/reviews/:reviewId/publish posts one GitHub review and persists returned ids', async () => {
+    const githubCalls = [];
+    globalThis.__CODELENS_GITHUB_TOKEN__ = 'owner-token';
+    globalThis.__CODELENS_OCTOKIT__ = {
+      Octokit: class {
+        get rest() {
+          return {
+            pulls: {
+              listFiles: async () => ({ data: [{ filename: 'src/index.js', patch: '@@ -1,1 +1,1 @@\n+eval(input)\n' }] }),
+              createReview: async (payload) => {
+                githubCalls.push(['createReview', payload]);
+                return { data: { id: 9001 } };
+              },
+              listCommentsForReview: async (payload) => {
+                githubCalls.push(['listCommentsForReview', payload]);
+                return { data: [{ id: 7001, path: 'src/index.js', line: 1 }] };
+              },
+              updateReviewComment: async (payload) => githubCalls.push(['updateReviewComment', payload]),
+              deleteReviewComment: async (payload) => githubCalls.push(['deleteReviewComment', payload]),
+              updateReview: async (payload) => githubCalls.push(['updateReview', payload]),
+            },
+          };
+        }
+        get paginate() {
+          return { iterator: async function* () { yield { data: [{ filename: 'src/index.js', patch: '@@ -1,1 +1,1 @@\n+eval(input)\n' }] }; } };
+        }
+      },
+    };
+
+    let insertedRows = [];
+    supabaseAdminMock = createSupabaseMock({
+      'pr_reviews.select.maybeSingle': async () => ({
+        data: {
+          id: 'review-1',
+          repo_id: 'repo-1',
+          pr_number: 42,
+          pr_head_sha: 'head',
+          status: 'ready',
+          findings_json: [
+            { id: 'f1', severity: 'critical', file_path: 'src/index.js', line_number: 1, rule_id: 'js_eval', message: 'Avoid eval.' },
+            { id: 'f2', severity: 'medium', file_path: 'src/routes.js', line_number: null, rule_id: 'missing_auth', message: 'Missing auth.' },
+          ],
+          severity_counts: { critical: 1, high: 0, medium: 1, low: 0 },
+        },
+        error: null,
+      }),
+      'repositories.select.maybeSingle': async () => ({
+        data: { id: 'repo-1', user_id: 'owner-user', full_name: 'owner/repo', source: 'github', pr_review_block_on_severity: 'critical' },
+        error: null,
+      }),
+      'pr_review_comments.select.many': async () => ({
+        data: [
+          { review_id: 'old-review', github_comment_id: 6001, file_path: 'src/index.js', line_number: 1, kind: 'inline' },
+          { review_id: 'old-review', github_comment_id: 6002, file_path: null, line_number: null, kind: 'summary' },
+        ],
+        error: null,
+      }),
+      'pr_review_comments.insert.many': async (state) => {
+        insertedRows = state.payload;
+        return { data: state.payload, error: null };
+      },
+    });
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+    globalThis.__CODELENS_SUPABASE_ANON__ = supabaseAdminMock;
+
+    const reviewController = await import('../src/controllers/reviewController.js');
+    const app = express();
+    app.use(express.json());
+    app.post('/api/repos/:repoId/reviews/:reviewId/publish', (req, _res, next) => { req.user = { id: 'user-1' }; next(); }, reviewController.publishPrReviewEndpoint);
+
+    const res = await request(app)
+      .post('/api/repos/repo-1/reviews/review-1/publish')
+      .expect(200);
+
+    expect(res.body).toEqual(expect.objectContaining({ ok: true, github_review_id: 9001, event: 'REQUEST_CHANGES', inline_comments: 1, summary_items: 1 }));
+    const createPayload = githubCalls.find(([name]) => name === 'createReview')[1];
+    expect(createPayload.comments).toHaveLength(1);
+    expect(createPayload.comments[0]).toEqual(expect.objectContaining({ path: 'src/index.js', line: 1, side: 'RIGHT' }));
+    expect(createPayload.comments[0].body).toContain('Rule: `js_eval`');
+    expect(createPayload.comments[0].body).toContain('/repo/repo-1?tab=pulls&review=review-1');
+    expect(createPayload.body).toContain('Missing auth.');
+    expect(githubCalls.map(([name]) => name)).not.toContain('listReviewComments');
+    expect(githubCalls.map(([name]) => name)).toEqual(expect.arrayContaining(['updateReviewComment', 'updateReview', 'createReview', 'listCommentsForReview']));
+    expect(githubCalls.find(([name]) => name === 'listCommentsForReview')[1]).toEqual(expect.objectContaining({ review_id: 9001 }));
+    expect(insertedRows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ github_comment_id: 9001, kind: 'summary' }),
+      expect.objectContaining({ github_comment_id: 7001, kind: 'inline', file_path: 'src/index.js', line_number: 1 }),
+    ]));
+  });
+
+  it('PR review publish maps GitHub 422 after retrying once', async () => {
+    let createAttempts = 0;
+    globalThis.__CODELENS_GITHUB_TOKEN__ = 'owner-token';
+    globalThis.__CODELENS_OCTOKIT__ = {
+      Octokit: class {
+        get rest() {
+          return {
+            pulls: {
+              createReview: async () => {
+                createAttempts += 1;
+                const err = new Error('Validation Failed');
+                err.status = 422;
+                throw err;
+              },
+            },
+          };
+        }
+        get paginate() {
+          return { iterator: async function* () {} };
+        }
+      },
+    };
+    supabaseAdminMock = createSupabaseMock({
+      'pr_reviews.select.maybeSingle': async () => ({
+        data: { id: 'review-1', repo_id: 'repo-1', pr_number: 42, status: 'ready', findings_json: [], severity_counts: {} },
+        error: null,
+      }),
+      'repositories.select.maybeSingle': async () => ({
+        data: { id: 'repo-1', user_id: 'owner-user', full_name: 'owner/repo', source: 'github', pr_review_block_on_severity: 'high' },
+        error: null,
+      }),
+      'pr_review_comments.select.many': async () => ({ data: [], error: null }),
+    });
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const reviewController = await import('../src/controllers/reviewController.js');
+    const app = express();
+    app.use(express.json());
+    app.post('/api/repos/:repoId/reviews/:reviewId/publish', (req, _res, next) => { req.user = { id: 'user-1' }; next(); }, reviewController.publishPrReviewEndpoint);
+
+    const res = await request(app)
+      .post('/api/repos/repo-1/reviews/review-1/publish')
+      .expect(422);
+
+    expect(createAttempts).toBe(2);
+    expect(res.body).toEqual(expect.objectContaining({ code: 'github_validation_failed' }));
+  });
+
+  it('PR review auto-publishes when enabled and keeps ready review usable when publish fails', async () => {
+    const sent = [];
+    let createAttempts = 0;
+    octokitMockState.pullsGetResult = { data: { head: { sha: 'head-auto' }, base: { sha: 'base-auto' } } };
+    octokitMockState.listFilesResult = { data: [] };
+    globalThis.__CODELENS_GITHUB_TOKEN__ = 'owner-token';
+    globalThis.__CODELENS_OCTOKIT__ = {
+      Octokit: class {
+        get rest() {
+          return {
+            pulls: {
+              get: async () => octokitMockState.pullsGetResult,
+              listFiles: async () => octokitMockState.listFilesResult,
+              createReview: async () => {
+                createAttempts += 1;
+                const err = new Error('Forbidden');
+                err.status = 403;
+                throw err;
+              },
+            },
+            repos: { getContent: async () => ({ data: { content: '', encoding: 'base64' } }) },
+          };
+        }
+        get paginate() {
+          return { iterator: async function* () { yield { data: [] }; } };
+        }
+      },
+    };
+    supabaseAdminMock = createSupabaseMock({
+      'issue_suppressions.select.many': async () => ({ data: [], error: null }),
+      'analysis_issues.select.many': async () => ({ data: [], error: null }),
+      'pr_reviews.upsert.maybeSingle': async (state) => ({ data: { id: 'review-auto', ...state.payload }, error: null }),
+      'pr_reviews.update.many': async () => ({ data: null, error: null }),
+      'repositories.select.maybeSingle': async (state) => {
+        if (String(state.columns).includes('pr_review_auto_publish')) return { data: { pr_review_auto_publish: true }, error: null };
+        return { data: { id: 'repo-1', user_id: 'owner-user', full_name: 'owner/repo', source: 'github', pr_review_block_on_severity: 'critical' }, error: null };
+      },
+      'pr_reviews.select.maybeSingle': async () => ({
+        data: { id: 'review-auto', repo_id: 'repo-1', pr_number: 42, status: 'ready', findings_json: [], severity_counts: {} },
+        error: null,
+      }),
+      'pr_review_comments.select.many': async () => ({ data: [], error: null }),
+    });
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const { runPrReviewBackground } = await import('../src/controllers/reviewController.js');
+    const result = await runPrReviewBackground({
+      repoId: 'repo-1',
+      prNumber: 42,
+      owner: 'owner',
+      repo: 'repo',
+      githubToken: 'gh-token',
+      userId: 'user-1',
+      send: (event) => sent.push(event),
+    });
+
+    expect(result.reviewId).toBe('review-auto');
+    expect(createAttempts).toBe(1);
+    expect(sent).toContainEqual(expect.objectContaining({ type: 'done', review_id: 'review-auto' }));
+  });
+
+  it('GitHub pull_request webhook queues PR reviews without requiring a push ref', async () => {
+    const { queue } = require('../src/services/queue');
+    const queueSpy = vi.spyOn(queue, 'add').mockImplementation(() => {});
+    const secret = 'webhook-secret';
+    const payload = {
+      action: 'opened',
+      repository: { full_name: 'owner/repo', name: 'repo', owner: { login: 'owner' } },
+      pull_request: { number: 42 },
+    };
+    const raw = JSON.stringify(payload);
+    const signature = `sha256=${crypto.createHmac('sha256', secret).update(Buffer.from(raw)).digest('hex')}`;
+
+    supabaseAdminMock = createSupabaseMock({
+      'repositories.select.maybeSingle': async () => ({
+        data: {
+          id: 'repo-1',
+          user_id: 'user-1',
+          webhook_secret: secret,
+          default_branch: 'main',
+          full_name: 'owner/repo',
+          name: 'repo',
+          source: 'github',
+          pr_review_enabled: true,
+        },
+        error: null,
+      }),
+      'profiles.select.single': async () => ({ data: { github_token_secret_id: 'secret-1' }, error: null }),
+      'rpc.get_github_token_secret': async () => ({ data: 'gh-token', error: null }),
+    });
+
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const webhookController = (await import('../src/controllers/webhookController.js')).default || await import('../src/controllers/webhookController.js');
+    const app = express();
+    app.post('/api/webhooks/github', express.raw({ type: '*/*' }), webhookController.handleGitHubPush);
+
+    await request(app)
+      .post('/api/webhooks/github')
+      .set('content-type', 'application/json')
+      .set('x-github-event', 'pull_request')
+      .set('x-hub-signature-256', signature)
+      .send(raw)
+      .expect(200);
+
+    expect(queueSpy).toHaveBeenCalledWith('pr-review', expect.objectContaining({
+      repoId: 'repo-1',
+      prId: 42,
+      owner: 'owner',
+      name: 'repo',
+      token: 'gh-token',
+      userId: 'user-1',
+    }), expect.any(Object));
+    queueSpy.mockRestore();
+  });
+
+  it('GitHub pull_request webhook skips disabled repos', async () => {
+    const { queue } = require('../src/services/queue');
+    const queueSpy = vi.spyOn(queue, 'add').mockImplementation(() => {});
+    const secret = 'webhook-secret';
+    const payload = {
+      action: 'opened',
+      repository: { full_name: 'owner/repo', name: 'repo', owner: { login: 'owner' } },
+      pull_request: { number: 42 },
+    };
+    const raw = JSON.stringify(payload);
+    const signature = `sha256=${crypto.createHmac('sha256', secret).update(Buffer.from(raw)).digest('hex')}`;
+
+    supabaseAdminMock = createSupabaseMock({
+      'repositories.select.maybeSingle': async () => ({
+        data: {
+          id: 'repo-1',
+          user_id: 'user-1',
+          webhook_secret: secret,
+          default_branch: 'main',
+          full_name: 'owner/repo',
+          name: 'repo',
+          source: 'github',
+          pr_review_enabled: false,
+        },
+        error: null,
+      }),
+      'profiles.select.single': async () => ({ data: { github_token_secret_id: 'secret-1' }, error: null }),
+      'rpc.get_github_token_secret': async () => ({ data: 'gh-token', error: null }),
+    });
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const webhookController = (await import('../src/controllers/webhookController.js')).default || await import('../src/controllers/webhookController.js');
+    const app = express();
+    app.post('/api/webhooks/github', express.raw({ type: '*/*' }), webhookController.handleGitHubPush);
+
+    await request(app)
+      .post('/api/webhooks/github')
+      .set('content-type', 'application/json')
+      .set('x-github-event', 'pull_request')
+      .set('x-hub-signature-256', signature)
+      .send(raw)
+      .expect(200);
+
+    expect(queueSpy).not.toHaveBeenCalled();
+    queueSpy.mockRestore();
+  });
+
+  it('GitHub push webhook keeps default-branch indexing behavior with repo name', async () => {
+    const { queue } = require('../src/services/queue');
+    const queueSpy = vi.spyOn(queue, 'add').mockImplementation(() => {});
+    const secret = 'webhook-secret';
+    let selectedColumns = '';
+    const payload = {
+      ref: 'refs/heads/main',
+      repository: { full_name: 'owner/repo', name: 'repo', owner: { login: 'owner' } },
+      commits: [{ id: 'commit-1' }],
+    };
+    const raw = JSON.stringify(payload);
+    const signature = `sha256=${crypto.createHmac('sha256', secret).update(Buffer.from(raw)).digest('hex')}`;
+
+    supabaseAdminMock = createSupabaseMock({
+      'repositories.select.maybeSingle': async (state) => {
+        selectedColumns = state.columns;
+        return {
+          data: {
+            id: 'repo-1',
+            user_id: 'user-1',
+            webhook_secret: secret,
+            default_branch: 'main',
+            full_name: 'owner/repo',
+            name: 'repo',
+            source: 'github',
+            pr_review_enabled: false,
+          },
+          error: null,
+        };
+      },
+      'profiles.select.single': async () => ({ data: { github_token_secret_id: 'secret-1' }, error: null }),
+      'rpc.get_github_token_secret': async () => ({ data: 'gh-token', error: null }),
+    });
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const webhookController = (await import('../src/controllers/webhookController.js')).default || await import('../src/controllers/webhookController.js');
+    const app = express();
+    app.post('/api/webhooks/github', express.raw({ type: '*/*' }), webhookController.handleGitHubPush);
+
+    await request(app)
+      .post('/api/webhooks/github')
+      .set('content-type', 'application/json')
+      .set('x-github-event', 'push')
+      .set('x-hub-signature-256', signature)
+      .send(raw)
+      .expect(200);
+
+    expect(selectedColumns).toContain('name');
+    expect(queueSpy).toHaveBeenCalledWith(expect.any(Function));
+    queueSpy.mockRestore();
+  });
+
+  it('US-072 schema keeps PR review persistence aligned with acceptance criteria', () => {
+    const schema = readFileSync(new URL('../../scripts/schema.sql', import.meta.url), 'utf8');
+
+    expect(schema).toContain("findings_json  JSONB NOT NULL DEFAULT '[]'::jsonb");
+    expect(schema).toContain("CREATE TYPE pr_review_status AS ENUM ('pending', 'analyzing', 'ready', 'failed', 'stale')");
+    expect(schema).toContain('pr_review_auto_publish BOOLEAN NOT NULL DEFAULT true');
+    expect(schema).toContain("pr_review_block_on_severity TEXT NOT NULL DEFAULT 'critical'");
+    expect(schema).toContain("CHECK (pr_review_block_on_severity IN ('critical', 'high'))");
+    expect(schema).toContain('UNIQUE (repo_id, pr_number, pr_head_sha)');
+    expect(schema).toContain('pr_reviews_repo_pr_created_idx ON pr_reviews (repo_id, pr_number, created_at DESC)');
+    expect(schema).toContain("kind              TEXT NOT NULL CHECK (kind IN ('inline','summary'))");
+    expect(schema).not.toContain("'off'");
+    expect(schema).not.toContain("'review_event'");
+    expect(schema).toContain('USING (can_access_repo(repo_id, auth.uid()))');
+    expect(schema).toContain('ON pr_review_comments FOR ALL');
+    expect(schema).toContain('AND can_access_repo(pr.repo_id, auth.uid())');
+    expect(schema).toContain('WITH CHECK (\n    EXISTS (\n      SELECT 1 FROM pr_reviews pr');
   });
 });

@@ -8,12 +8,13 @@ import { apiUrl } from '../lib/api';
 import { getSyntaxLanguage } from '../lib/constants';
 import Modal from './ui/Modal';
 import { Button, Badge } from './ui/Primitives';
+import IssueCard, { getBadgeStyles } from './IssueCard';
 import ProposalPanel from './ProposalPanel';
 import {
   Package, Lock, ShieldAlert, GitMerge,
   FileWarning, Link2, FileX, Search,
   ChevronDown, ChevronUp, CheckCircle2, AlertTriangle, TrendingUp,
-  Copy, Sparkles, GitBranch,
+  Copy, Sparkles,
 } from './ui/Icons';
 
 // Phase 4.1: virtualize groups above this size. Below the threshold, virtuoso's
@@ -33,15 +34,6 @@ const GROUP_ORDER = [
   { type: 'dead_code',             label: 'Dead Code',                         Icon: FileX         },
   { type: 'refactoring_candidate', label: 'Refactoring Candidates',            Icon: TrendingUp    },
 ];
-
-function getBadgeStyles(severity) {
-  switch (severity?.toLowerCase()) {
-    case 'high':    return 'bg-red-500/20 text-red-400 ring-1 ring-inset ring-red-500/30';
-    case 'medium':  return 'bg-orange-500/20 text-orange-400 ring-1 ring-inset ring-orange-500/30';
-    case 'low':     return 'bg-yellow-500/20 text-yellow-400 ring-1 ring-inset ring-yellow-500/30';
-    default:        return 'bg-gray-500/20 text-gray-400 ring-1 ring-inset ring-gray-500/30';
-  }
-}
 
 // ── IssueGroup ────────────────────────────────────────────────────────────────
 const IssueGroup = memo(function IssueGroup({ type, label, Icon, issues, nodeMap, onIssueClick, onSuppress, onDisableRule, onProposeFix, actionsDisabled, scrollParent, proposalsByIssue }) {
@@ -121,104 +113,6 @@ const IssueGroup = memo(function IssueGroup({ type, label, Icon, issues, nodeMap
           </div>
         )
       )}
-    </div>
-  );
-});
-
-// ── IssueCard ─────────────────────────────────────────────────────────────────
-const IssueCard = memo(function IssueCard({ issue, type, onIssueClick, onSuppress, onDisableRule, onProposeFix, actionsDisabled, appliedProposal }) {
-  const hasPrOpen = appliedProposal?.status === 'applied' && appliedProposal?.pr_url;
-  return (
-    <div
-      onClick={() => onIssueClick(issue)}
-      className="flex flex-col bg-gray-900/50 hover:bg-gray-800/80 border border-gray-800 hover:border-gray-700 rounded-xl p-5 cursor-pointer transition-all duration-200 hover:-translate-y-px hover:shadow-lg group"
-    >
-      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium uppercase tracking-wider ${getBadgeStyles(issue.severity)}`}>
-            {issue.severity || 'UNKNOWN'}
-          </span>
-          {hasPrOpen && (
-            <a
-              href={appliedProposal.pr_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(e) => e.stopPropagation()}
-              className="inline-flex items-center gap-1 rounded-md bg-emerald-500/10 px-2 py-1 text-xs font-medium text-emerald-300 ring-1 ring-inset ring-emerald-500/30 hover:bg-emerald-500/20 transition-colors"
-              title="View the draft PR opened from a CodeLens proposal"
-            >
-              <GitBranch className="h-3 w-3" />
-              PR opened
-            </a>
-          )}
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); onProposeFix(issue); }}
-            disabled={actionsDisabled}
-            className="inline-flex items-center gap-1.5 rounded-md border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-1 text-xs font-medium text-indigo-200 transition-colors hover:bg-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <Sparkles className="h-3.5 w-3.5" />
-            {hasPrOpen ? 'Open proposal' : 'Propose fix'}
-          </button>
-
-          {/* Suppress button for secrets */}
-          {type === 'hardcoded_secret' && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onSuppress(e, issue); }}
-              disabled={actionsDisabled}
-              className="text-xs text-gray-500 hover:text-gray-200 underline transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              Mark as false positive
-            </button>
-          )}
-
-          {/* Suppress button for unauthenticated routes */}
-          {type === 'missing_auth' && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onSuppress(e, issue); }}
-              disabled={actionsDisabled}
-              className="text-xs text-gray-500 hover:text-gray-200 underline transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              Mark as intentionally public
-            </button>
-          )}
-
-          {/* Disable rule button for insecure patterns */}
-          {type === 'insecure_pattern' && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onDisableRule(e, issue); }}
-              disabled={actionsDisabled}
-              className="text-xs text-gray-500 hover:text-gray-200 underline transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              Disable this rule
-            </button>
-          )}
-        </div>
-      </div>
-
-      <p className="text-gray-300 text-sm mb-4 leading-relaxed whitespace-pre-wrap">
-        {issue.description || 'No description available.'}
-      </p>
-
-      <div className="mt-auto flex flex-wrap gap-x-2 gap-y-1 rounded-lg border border-gray-800 bg-gray-950/50 p-3">
-        {issue.file_paths.map((fp, i) => (
-          <span key={fp} className="flex items-center gap-1.5">
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                // Only open file for non-dependency issues
-              }}
-              title={fp}
-              className="font-mono text-xs text-gray-400 leading-loose break-all text-left hover:text-indigo-300 transition-colors cursor-pointer"
-            >
-              {fp}
-            </button>
-          </span>
-        ))}
-      </div>
     </div>
   );
 });

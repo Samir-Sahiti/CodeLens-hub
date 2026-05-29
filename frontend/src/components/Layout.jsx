@@ -9,7 +9,7 @@ import { Badge, IconButton } from './ui/Primitives';
 
 import {
   LayoutDashboard, GitGraph, BarChart3, FolderTree,
-  Package, ShieldAlert, Sparkles, Code2, Settings,
+  Package, ShieldAlert, Sparkles, Code2, Settings, GitBranch,
   LogOut, Info, ChevronLeft, ChevronRight, ArrowLeft,
   Star,
 } from './ui/Icons';
@@ -94,6 +94,7 @@ export default function Layout() {
     { label: 'Metrics',      tab: 'metrics',      Icon: BarChart3    },
     { label: 'Files',        tab: 'files',        Icon: FolderTree   },
     { label: 'Dependencies', tab: 'dependencies', Icon: Package      },
+    { label: 'Pull Requests', tab: 'pulls',       Icon: GitBranch    },
     { label: 'Issues',       tab: 'issues',       Icon: ShieldAlert  },
     { label: 'Agent',        tab: 'agent',        Icon: Sparkles     },
     { label: 'Tours',        tab: 'tours',        Icon: Star         },

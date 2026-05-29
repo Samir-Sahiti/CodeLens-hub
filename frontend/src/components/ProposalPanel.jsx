@@ -160,8 +160,11 @@ export default function ProposalPanel({ repoId, issue, token, open, onClose, onA
   const closeButtonRef = useRef(null);
 
   const proposalEndpoint = useMemo(() => (
-    repoId && issue?.id ? `/api/review/${repoId}/issues/${issue.id}/proposals` : null
-  ), [repoId, issue?.id]);
+    issue?.proposalEndpoint || (repoId && issue?.id ? `/api/review/${repoId}/issues/${issue.id}/proposals` : null)
+  ), [issue?.proposalEndpoint, repoId, issue?.id]);
+  const proposalApplyEndpoint = issue?.proposalApplyBase && proposal.id
+    ? `${issue.proposalApplyBase}/${proposal.id}/apply`
+    : issue?.proposalApplyEndpoint || (repoId && proposal.id ? `/api/review/${repoId}/proposals/${proposal.id}/apply` : null);
 
   const allDiffs = useMemo(() => (
     (proposal.changes || []).map((change) => change.diff).filter(Boolean).join('\n\n')
@@ -263,7 +266,11 @@ export default function ProposalPanel({ repoId, issue, token, open, onClose, onA
     try {
       const res = await fetch(apiUrl(`${proposalEndpoint}${regenerate ? '?regenerate=true' : ''}`), {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
+        headers: {
+          ...(issue?.proposalPayload ? { 'Content-Type': 'application/json' } : {}),
+          Authorization: `Bearer ${token}`,
+        },
+        body: issue?.proposalPayload ? JSON.stringify({ ...issue.proposalPayload, regenerate }) : undefined,
         signal: controller.signal,
       });
 
@@ -292,7 +299,7 @@ export default function ProposalPanel({ repoId, issue, token, open, onClose, onA
       setIsStreaming(false);
       abortRef.current = null;
     }
-  }, [abortActiveStream, proposalEndpoint, readSse, token]);
+  }, [abortActiveStream, issue?.proposalPayload, proposalEndpoint, readSse, token]);
 
   useEffect(() => {
     if (!open || !issue) return undefined;
@@ -364,11 +371,11 @@ export default function ProposalPanel({ repoId, issue, token, open, onClose, onA
   };
 
   const handleApply = async () => {
-    if (!repoId || !proposal.id || !token || isApplying) return;
+    if (!proposalApplyEndpoint || !proposal.id || !token || isApplying) return;
     setIsApplying(true);
     setError(null);
     try {
-      const res = await fetch(apiUrl(`/api/review/${repoId}/proposals/${proposal.id}/apply`), {
+      const res = await fetch(apiUrl(proposalApplyEndpoint), {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });

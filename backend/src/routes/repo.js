@@ -58,6 +58,9 @@ router.get('/:repoId/diff', requireAuth, repoController.getDiff);
 
 // PR review run (deterministic-only pipeline) — US-073
 const reviewController = require('../controllers/reviewController');
+router.get('/:repoId/pulls', requireAuth, reviewController.listPullRequests);
+router.get('/:repoId/pulls/:number/reviews', requireAuth, reviewController.listPullRequestReviews);
 router.post('/:repoId/pulls/:number/reviews', requireAuth, reviewController.runPrReview);
+router.post('/:repoId/reviews/:reviewId/publish', requireAuth, reviewController.publishPrReviewEndpoint);
 
 module.exports = router;

@@ -16,6 +16,7 @@ const CodeReviewPanel      = lazy(() => import('../components/CodeReviewPanel'))
 const FileChatPanel        = lazy(() => import('../components/FileChatPanel'));
 const FileBrowser          = lazy(() => import('../components/FileBrowser'));
 const DependenciesPanel    = lazy(() => import('../components/DependenciesPanel'));
+const PullRequestsPanel    = lazy(() => import('../components/PullRequestsPanel'));
 const MetricsPanel         = lazy(() => import('../components/MetricsPanel'));
 const IssuesPanel          = lazy(() => import('../components/IssuesPanel'));
 const SettingsPanel        = lazy(() => import('../components/SettingsPanel'));
@@ -845,6 +846,16 @@ export default function RepoView() {
               {/* Dependencies tab — package vulnerability scanning (US-045) */}
               <div className={activeTab === 'dependencies' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
                 <DependenciesPanel repoId={repoId} refreshKey={depsRefreshKey} />
+              </div>
+
+              {/* Pull Requests tab — PR review viewer (US-075) */}
+              <div className={activeTab === 'pulls' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
+                <PullRequestsPanel
+                  repoId={repoId}
+                  repo={repo}
+                  active={activeTab === 'pulls'}
+                  onRepoUpdated={fetchRepo}
+                />
               </div>
             </div>
           </Suspense>
