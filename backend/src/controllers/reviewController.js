@@ -903,12 +903,16 @@ const runPrReview = async (req, res) => {
     res.end();
   } catch (err) {
     console.error('[pr-review] error:', err);
-    try { send({ type: 'error', message: 'PR review failed to complete.' }); } catch {};
+    try {
+      send({ type: 'error', message: 'PR review failed to complete.' });
+    } catch {
+      // Ignore stream write errors during cleanup.
+    }
     res.end();
   }
-};
+}
 
-async function runPrReviewBackground({ repoId, prNumber, owner, repo, githubToken, userId, send = () => {}, res = null }) {
+async function runPrReviewBackground({ repoId, prNumber, owner, repo, githubToken, userId, send = () => {}, _res = null }) {
   const octokit = getOctokit(githubToken);
   const pr = await octokit.rest.pulls.get({ owner, repo, pull_number: prNumber });
   const headSha = pr.data.head.sha;
@@ -1058,7 +1062,7 @@ async function runPrReviewBackground({ repoId, prNumber, owner, repo, githubToke
   send({ type: 'summary', total_files: capped.length, total_findings: filtered.length, severity_counts: severityCounts });
   send({ type: 'done', review_id: reviewRow.id });
   return { reviewId: reviewRow.id };
-};
+}
 
 // ─── US-064: Refactor proposal generation ─────────────────────────────────────
 
