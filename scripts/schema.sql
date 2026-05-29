@@ -87,7 +87,7 @@ AS $$
   );
 $$;
 
-GRANT EXECUTE ON FUNCTION can_access_repo(UUID, UUID) TO service_role;
+GRANT EXECUTE ON FUNCTION can_access_repo(UUID, UUID) TO authenticated, service_role;
 
 -- =============================================================================
 -- FUNCTIONS — Vector search (US-041)
@@ -166,7 +166,8 @@ CREATE TABLE IF NOT EXISTS repositories (
   auto_sync_enabled BOOLEAN     NOT NULL DEFAULT false,
   has_coverage_files BOOLEAN    NOT NULL DEFAULT false,
   language_stats    JSONB       DEFAULT '[]',
-  sast_disabled_rules TEXT[]    DEFAULT '{}'
+  sast_disabled_rules TEXT[]    DEFAULT '{}',
+  latest_indexed_sha TEXT
 );
 
 -- Columns added in later sprints — safe to re-run
@@ -175,6 +176,7 @@ ALTER TABLE repositories ADD COLUMN IF NOT EXISTS auto_sync_enabled  BOOLEAN NOT
 ALTER TABLE repositories ADD COLUMN IF NOT EXISTS has_coverage_files BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE repositories ADD COLUMN IF NOT EXISTS language_stats JSONB DEFAULT '[]';
 ALTER TABLE repositories ADD COLUMN IF NOT EXISTS sast_disabled_rules TEXT[] DEFAULT '{}';
+ALTER TABLE repositories ADD COLUMN IF NOT EXISTS latest_indexed_sha TEXT;
 
 ALTER TABLE repositories ENABLE ROW LEVEL SECURITY;
 
@@ -514,6 +516,11 @@ CREATE POLICY "Team members can view team repositories"
 
 -- Per-repo opt-in for PR review pipeline
 ALTER TABLE repositories ADD COLUMN IF NOT EXISTS pr_review_enabled BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE repositories ADD COLUMN IF NOT EXISTS pr_review_auto_publish BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE repositories ADD COLUMN IF NOT EXISTS pr_review_block_on_severity TEXT NOT NULL DEFAULT 'critical';
+ALTER TABLE repositories DROP CONSTRAINT IF EXISTS repositories_pr_review_block_on_severity_check;
+ALTER TABLE repositories ADD CONSTRAINT repositories_pr_review_block_on_severity_check
+  CHECK (pr_review_block_on_severity IN ('critical', 'high'));
 
 -- PR review status enum
 DO $$ BEGIN
@@ -529,7 +536,7 @@ CREATE TABLE IF NOT EXISTS pr_reviews (
   pr_base_sha    TEXT,
   user_id        UUID REFERENCES auth.users(id) ON DELETE SET NULL,
   status         pr_review_status NOT NULL DEFAULT 'pending',
-  findings_json  JSONB NOT NULL DEFAULT '{}'::jsonb,
+  findings_json  JSONB NOT NULL DEFAULT '[]'::jsonb,
   summary        TEXT,
   total_findings INT  NOT NULL DEFAULT 0,
   severity_counts JSONB NOT NULL DEFAULT ('{"critical":0,"high":0,"medium":0,"low":0}'::jsonb),
@@ -546,16 +553,8 @@ ALTER TABLE pr_reviews ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "Users can access pr_reviews for their repos" ON pr_reviews;
 CREATE POLICY "Users can access pr_reviews for their repos"
   ON pr_reviews FOR ALL
-  USING (
-    repo_id IN (
-      SELECT id FROM repositories
-      WHERE user_id = auth.uid()
-      OR id IN (
-        SELECT repo_id FROM team_repositories
-        WHERE team_id IN (SELECT team_id FROM team_members WHERE user_id = auth.uid())
-      )
-    )
-  );
+  USING (can_access_repo(repo_id, auth.uid()))
+  WITH CHECK (can_access_repo(repo_id, auth.uid()));
 
 -- pr_review_comments — stores GitHub comment ids for idempotent publishes
 CREATE TABLE IF NOT EXISTS pr_review_comments (
@@ -564,7 +563,7 @@ CREATE TABLE IF NOT EXISTS pr_review_comments (
   github_comment_id BIGINT,
   file_path         TEXT,
   line_number       INT,
-  kind              TEXT NOT NULL CHECK (kind IN ('inline','summary','review_event')),
+  kind              TEXT NOT NULL CHECK (kind IN ('inline','summary')),
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -574,19 +573,19 @@ ALTER TABLE pr_review_comments ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Users can access pr_review_comments for their repos" ON pr_review_comments;
 CREATE POLICY "Users can access pr_review_comments for their repos"
-  ON pr_review_comments FOR SELECT
+  ON pr_review_comments FOR ALL
   USING (
     EXISTS (
       SELECT 1 FROM pr_reviews pr
-      JOIN repositories r ON r.id = pr.repo_id
       WHERE pr.id = pr_review_comments.review_id
-        AND (
-          r.user_id = auth.uid()
-          OR r.id IN (
-            SELECT repo_id FROM team_repositories
-            WHERE team_id IN (SELECT team_id FROM team_members WHERE user_id = auth.uid())
-          )
-        )
+        AND can_access_repo(pr.repo_id, auth.uid())
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM pr_reviews pr
+      WHERE pr.id = pr_review_comments.review_id
+        AND can_access_repo(pr.repo_id, auth.uid())
     )
   );
 
@@ -1347,6 +1346,42 @@ CREATE INDEX IF NOT EXISTS analysis_issues_repo_type_idx
 
 CREATE INDEX IF NOT EXISTS issue_proposals_issue_user_status_idx
   ON issue_proposals (issue_id, user_id, status, created_at DESC);
+
+-- US-075: proposals generated from PR review findings. These intentionally do
+-- not reference analysis_issues because PR findings can exist only inside a
+-- persisted pr_reviews.findings_json payload.
+CREATE TABLE IF NOT EXISTS pr_finding_proposals (
+  id                UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
+  review_id         UUID            NOT NULL REFERENCES pr_reviews(id) ON DELETE CASCADE,
+  finding_id        TEXT            NOT NULL,
+  user_id           UUID            NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  status            proposal_status NOT NULL DEFAULT 'pending',
+  proposal_json     JSONB           NOT NULL,
+  branch_name       TEXT,
+  pr_url            TEXT,
+  prompt_tokens     INTEGER         NOT NULL DEFAULT 0,
+  completion_tokens INTEGER         NOT NULL DEFAULT 0,
+  created_at        TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ     NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS pr_finding_proposals_review_finding_created_idx
+  ON pr_finding_proposals (review_id, finding_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS pr_finding_proposals_user_created_idx
+  ON pr_finding_proposals (user_id, created_at DESC);
+
+ALTER TABLE pr_finding_proposals ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users access only their own PR finding proposals" ON pr_finding_proposals;
+CREATE POLICY "Users access only their own PR finding proposals"
+  ON pr_finding_proposals FOR ALL
+  USING (auth.uid() = user_id)
+  WITH CHECK (auth.uid() = user_id);
+
+DROP TRIGGER IF EXISTS pr_finding_proposals_set_updated_at ON pr_finding_proposals;
+CREATE TRIGGER pr_finding_proposals_set_updated_at
+  BEFORE UPDATE ON pr_finding_proposals
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- =============================================================================
 -- US-067: AI Repo Agent — conversation persistence
