@@ -16,11 +16,26 @@ const VALID_EXTENSIONS = new Set(['.js', '.jsx', '.ts', '.tsx', '.py', '.cs']);
  */
 const { indexRepository } = require('./indexerService');
 
+async function resolveDefaultBranchSha(owner, name, token) {
+  try {
+    const { Octokit } = globalThis.__CODELENS_OCTOKIT__ || require('octokit');
+    const octokit = new Octokit({ auth: token });
+    const { data: repoMeta } = await octokit.rest.repos.get({ owner, repo: name });
+    const branch = repoMeta.default_branch || 'main';
+    const { data: ref } = await octokit.rest.git.getRef({ owner, repo: name, ref: `heads/${branch}` });
+    return ref?.object?.sha || null;
+  } catch (err) {
+    console.warn(`[Indexer] Could not resolve latest indexed SHA for ${owner}/${name}:`, err.message);
+    return null;
+  }
+}
+
 const startGitHubIndexing = async (repoId, githubToken, repoFullName, options = {}) => {
   const [owner, name] = repoFullName.split('/');
   // The service handles marking it ready or failed, and the full try/catch pipeline.
   // We wrap it again here to ensure unhandled rejections never reach the main process.
   try {
+    const latestIndexedSha = options.latestIndexedSha || await resolveDefaultBranchSha(owner, name, githubToken);
     await indexRepository({
       repoId,
       owner,
@@ -28,6 +43,7 @@ const startGitHubIndexing = async (repoId, githubToken, repoFullName, options = 
       token: githubToken,
       source: 'github',
       incrementalChurnCommits: options.incrementalChurnCommits,
+      latestIndexedSha,
     });
   } catch (err) {
     console.error(`[Indexer] Top-level fallback error for ${repoFullName}:`, err.message);

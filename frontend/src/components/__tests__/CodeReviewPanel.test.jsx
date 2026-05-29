@@ -4,11 +4,23 @@ import userEvent from '@testing-library/user-event';
 
 import CodeReviewPanel from '../CodeReviewPanel';
 
+const routerMock = vi.hoisted(() => ({
+  searchParams: new URLSearchParams(),
+}));
+
+vi.mock('react-router-dom', () => ({
+  useSearchParams: () => [routerMock.searchParams, vi.fn()],
+}));
+
 vi.mock('../../context/AuthContext', () => {
   return {
     useAuth: () => ({ session: { access_token: 'test-token' } }),
   };
 });
+
+vi.mock('../Toast', () => ({
+  useToast: () => ({ success: vi.fn(), error: vi.fn() }),
+}));
 
 function makeSseResponse(events) {
   const encoder = new TextEncoder();
@@ -27,6 +39,7 @@ describe('CodeReviewPanel', () => {
   const originalFetch = globalThis.fetch;
 
   beforeEach(() => {
+    routerMock.searchParams = new URLSearchParams();
     globalThis.fetch = vi.fn(async () => makeSseResponse([
       { type: 'sources', sources: [] },
       { type: 'chunk', text: 'Looks good.' },
@@ -64,6 +77,26 @@ describe('CodeReviewPanel', () => {
 
     await user.click(screen.getByRole('button', { name: /review code/i }));
     expect(await screen.findByText(/looks good/i)).toBeInTheDocument();
+  });
+
+  it('exposes manual GitHub publish for linked PR reviews', async () => {
+    const user = userEvent.setup();
+    routerMock.searchParams = new URLSearchParams('review=review-1');
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      event: 'COMMENT',
+      inline_comments: 1,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    render(<CodeReviewPanel repoId="repo-1" />);
+
+    await user.click(screen.getByRole('button', { name: /publish to github/i }));
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(expect.stringContaining('/api/repos/repo-1/reviews/review-1/publish'), expect.objectContaining({
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token' },
+    }));
+    expect(await screen.findByText(/published as comment/i)).toBeInTheDocument();
   });
 
   it('sends security_audit mode and renders structured findings', async () => {

@@ -4,22 +4,31 @@
  * Extracted from inline SettingsPanel in RepoView.jsx.
  * Handles auto-sync toggle and webhook URL generation.
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { apiUrl } from '../lib/api';
-import { RefreshCw, Copy, Check, Zap, Webhook } from './ui/Icons';
-import { Banner, Button, EmptyState, Panel, Switch } from './ui/Primitives';
+import { useToast } from './Toast';
+import { RefreshCw, Copy, Check, Zap, Webhook, MessageSquare } from './ui/Icons';
+import { Banner, Button, EmptyState, Panel, Select, Switch } from './ui/Primitives';
 
 export default function SettingsPanel({ repo, session, onRepoUpdated }) {
   const [autoSync,     setAutoSync]     = useState(repo?.auto_sync_enabled ?? false);
+  const [autoPublish,  setAutoPublish]  = useState(repo?.pr_review_auto_publish ?? true);
+  const [blockSeverity, setBlockSeverity] = useState(repo?.pr_review_block_on_severity || 'critical');
   const [isSaving,     setIsSaving]     = useState(false);
   const [webhookInfo,  setWebhookInfo]  = useState(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [copied,       setCopied]       = useState('');
+  const toast = useToast();
 
   const isGitHub = repo?.source === 'github';
 
-  const handleAutoSyncToggle = async () => {
-    const next = !autoSync;
+  useEffect(() => {
+    setAutoSync(repo?.auto_sync_enabled ?? false);
+    setAutoPublish(repo?.pr_review_auto_publish ?? true);
+    setBlockSeverity(repo?.pr_review_block_on_severity || 'critical');
+  }, [repo?.auto_sync_enabled, repo?.pr_review_auto_publish, repo?.pr_review_block_on_severity]);
+
+  const saveRepoSettings = async (updates) => {
     setIsSaving(true);
     try {
       const res = await fetch(apiUrl(`/api/repos/${repo.id}`), {
@@ -28,16 +37,35 @@ export default function SettingsPanel({ repo, session, onRepoUpdated }) {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${session.access_token}`,
         },
-        body: JSON.stringify({ auto_sync_enabled: next }),
+        body: JSON.stringify(updates),
       });
       if (!res.ok) throw new Error('Failed to update setting');
-      setAutoSync(next);
-      onRepoUpdated();
+      await onRepoUpdated?.();
+      toast.success('Repository settings updated');
     } catch (err) {
       console.error(err);
+      toast.error(err.message || 'Failed to update setting');
     } finally {
       setIsSaving(false);
     }
+  };
+
+  const handleAutoSyncToggle = async () => {
+    const next = !autoSync;
+    setAutoSync(next);
+    await saveRepoSettings({ auto_sync_enabled: next });
+  };
+
+  const handleAutoPublishToggle = async () => {
+    const next = !autoPublish;
+    setAutoPublish(next);
+    await saveRepoSettings({ pr_review_auto_publish: next });
+  };
+
+  const handleBlockSeverityChange = async (event) => {
+    const next = event.target.value;
+    setBlockSeverity(next);
+    await saveRepoSettings({ pr_review_block_on_severity: next });
   };
 
   const handleGenerateWebhook = async () => {
@@ -102,6 +130,39 @@ export default function SettingsPanel({ repo, session, onRepoUpdated }) {
             Auto-sync is enabled. Make sure a webhook is configured in your GitHub repository settings below.
           </p>
         )}
+      </Panel>
+
+      <Panel>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex min-w-0 items-start gap-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 border border-emerald-500/20">
+              <MessageSquare className="h-4 w-4 text-emerald-400" />
+            </div>
+            <div className="min-w-0">
+              <h3 className="text-base font-semibold text-white">Auto-publish PR reviews</h3>
+              <p className="mt-1 text-sm text-gray-400 leading-relaxed">
+                Automatically post CodeLens PR findings to GitHub after deterministic review completes.
+              </p>
+            </div>
+          </div>
+          <Switch checked={autoPublish} disabled={isSaving} label="Toggle auto-publish PR reviews" onChange={handleAutoPublishToggle} />
+        </div>
+        {!autoPublish && (
+          <Banner tone="warning" className="mt-4">
+            Auto-publish is disabled. PR findings will stay in CodeLens until you publish them manually.
+          </Banner>
+        )}
+        <Select
+          id="pr-review-block-severity"
+          label="Request changes on"
+          className="mt-4 sm:max-w-xs"
+          value={blockSeverity}
+          disabled={isSaving}
+          onChange={handleBlockSeverityChange}
+        >
+          <option value="critical">Critical findings</option>
+          <option value="high">High or critical findings</option>
+        </Select>
       </Panel>
 
       {/* Webhook URL generation */}

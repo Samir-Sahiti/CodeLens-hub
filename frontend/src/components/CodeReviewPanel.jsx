@@ -6,11 +6,13 @@
  */
 
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { apiUrl } from '../lib/api';
+import { apiUrl, publishPrReview } from '../lib/api';
+import { useToast } from './Toast';
 import { AnswerBlock, SourceCard } from './SharedAnswerComponents';
-import { Badge, Button, EmptyState, SegmentedControl } from './ui/Primitives';
-import { AlertTriangle, Clock, Code2, FileCode, ShieldAlert, Sparkles, StopCircle } from './ui/Icons';
+import { Badge, Banner, Button, EmptyState, SegmentedControl } from './ui/Primitives';
+import { AlertTriangle, Clock, Code2, FileCode, MessageSquare, ShieldAlert, Sparkles, StopCircle } from './ui/Icons';
 
 // ---------------------------------------------------------------------------
 // Main CodeReviewPanel
@@ -59,6 +61,9 @@ function FindingCard({ finding, index }) {
 
 export default function CodeReviewPanel({ repoId, prefill }) {
   const { session } = useAuth();
+  const toast = useToast();
+  const [searchParams] = useSearchParams();
+  const linkedReviewId = searchParams.get('review');
 
   // State — same pattern as SearchPanel
   const [snippet,            setSnippet]            = useState('');
@@ -75,6 +80,8 @@ export default function CodeReviewPanel({ repoId, prefill }) {
   const [auditSummary,       setAuditSummary]       = useState(null);
   const [auditHistory,       setAuditHistory]       = useState([]);
   const [prefillLabel,       setPrefillLabel]       = useState(null);
+  const [isPublishing,       setIsPublishing]       = useState(false);
+  const [publishResult,      setPublishResult]      = useState(null);
 
   const answerRef = useRef(null);
   const abortRef  = useRef(null);
@@ -283,6 +290,21 @@ export default function CodeReviewPanel({ repoId, prefill }) {
     }
   }, [handleSseEvent, isStreaming, repoId, session?.access_token]);
 
+  const handlePublishLinkedReview = useCallback(async () => {
+    if (!linkedReviewId || !session?.access_token || isPublishing) return;
+    setIsPublishing(true);
+    setPublishResult(null);
+    try {
+      const result = await publishPrReview({ repoId, reviewId: linkedReviewId, token: session.access_token });
+      setPublishResult(result);
+      toast.success('PR review published to GitHub');
+    } catch (err) {
+      toast.error(err.message || 'Failed to publish the PR review');
+    } finally {
+      setIsPublishing(false);
+    }
+  }, [isPublishing, linkedReviewId, repoId, session?.access_token, toast]);
+
   // Derived: line count for badge
   const lineCount      = snippet ? snippet.split('\n').length : 0;
   const lineLimit      = reviewMode === 'security' ? 1000 : 200;
@@ -299,6 +321,30 @@ export default function CodeReviewPanel({ repoId, prefill }) {
 
       {/* Input area */}
       <div className="shrink-0 rounded-xl border border-surface-800 bg-surface-900/70 p-3 shadow-panel">
+        {linkedReviewId && (
+          <Banner tone="accent" className="mb-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="font-medium text-surface-100">PR review ready for GitHub</p>
+                <p className="mt-1 text-xs text-surface-300">Publish this persisted review as grouped GitHub PR review comments.</p>
+                {publishResult && (
+                  <p className="mt-1 text-xs text-emerald-200">
+                    Published as {publishResult.event} with {publishResult.inline_comments || 0} inline comment{publishResult.inline_comments === 1 ? '' : 's'}.
+                  </p>
+                )}
+              </div>
+              <Button
+                onClick={handlePublishLinkedReview}
+                disabled={isPublishing}
+                loading={isPublishing}
+                icon={MessageSquare}
+                className="w-full sm:w-auto"
+              >
+                Publish to GitHub
+              </Button>
+            </div>
+          </Banner>
+        )}
         <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <SegmentedControl
             label="Mode"

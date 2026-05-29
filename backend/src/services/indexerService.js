@@ -30,22 +30,25 @@ function sha256(content) {
   return crypto.createHash('sha256').update(content).digest('hex');
 }
 
-async function markRepoReady({ repoId, fileCount, hasCoverageFiles, finalNodes }) {
+async function markRepoReady({ repoId, fileCount, hasCoverageFiles, finalNodes, latestIndexedSha = null }) {
+  const updates = {
+    status: 'ready',
+    indexed_at: new Date().toISOString(),
+    file_count: fileCount,
+    has_coverage_files: hasCoverageFiles,
+    language_stats: Object.entries(
+      finalNodes.reduce((acc, n) => {
+        const lang = n.language || 'unknown';
+        acc[lang] = (acc[lang] || 0) + 1;
+        return acc;
+      }, {})
+    ).map(([language, count]) => ({ language, count })).sort((a, b) => b.count - a.count),
+  };
+  if (latestIndexedSha) updates.latest_indexed_sha = latestIndexedSha;
+
   await supabaseAdmin
     .from('repositories')
-    .update({
-      status: 'ready',
-      indexed_at: new Date().toISOString(),
-      file_count: fileCount,
-      has_coverage_files: hasCoverageFiles,
-      language_stats: Object.entries(
-        finalNodes.reduce((acc, n) => {
-          const lang = n.language || 'unknown';
-          acc[lang] = (acc[lang] || 0) + 1;
-          return acc;
-        }, {})
-      ).map(([language, count]) => ({ language, count })).sort((a, b) => b.count - a.count),
-    })
+    .update(updates)
     .eq('id', repoId);
 }
 
@@ -113,7 +116,7 @@ async function fetchLocalFiles(dir, baseDir = dir, results = []) {
  * @param {string} [params.extractPath] - Path to extracted local zip
  * @param {string} params.source - 'github' or 'upload'
  */
-const indexRepository = async ({ repoId, owner, name, token, extractPath, source, incrementalChurnCommits }) => {
+const indexRepository = async ({ repoId, owner, name, token, extractPath, source, incrementalChurnCommits, latestIndexedSha = null }) => {
   let zipTempDir = null;
   try {
     console.log(`[indexer] Starting indexing for repoId: ${repoId} (source: ${source})`);
@@ -702,7 +705,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     // Core analysis is now usable. Mark the repo ready before slower best-effort
     // enrichment so the UI does not stay on the loading skeleton while optional
     // chunking, duplicate detection, or churn work finishes.
-    await markRepoReady({ repoId, fileCount, hasCoverageFiles, finalNodes });
+    await markRepoReady({ repoId, fileCount, hasCoverageFiles, finalNodes, latestIndexedSha });
 
     // 10. Store full file contents (US-043) — only for changed/new files
     // Unchanged files already have their content rows in the DB.

@@ -333,15 +333,27 @@ const getAnalysisData = async (req, res) => {
 };
 
 /**
- * PATCH /api/repos/:repoId — update mutable repo fields (auto_sync_enabled, sast_disabled_rules)
+ * PATCH /api/repos/:repoId — update mutable repo fields (auto_sync_enabled, sast_disabled_rules, PR review settings)
  */
 const updateRepo = async (req, res) => {
   const { repoId } = req.params;
-  const { auto_sync_enabled, sast_disabled_rules } = req.body;
+  const { auto_sync_enabled, sast_disabled_rules, pr_review_enabled, pr_review_auto_publish, pr_review_block_on_severity } = req.body;
 
   const updates = {};
   if (typeof auto_sync_enabled === 'boolean') updates.auto_sync_enabled = auto_sync_enabled;
   if (Array.isArray(sast_disabled_rules)) updates.sast_disabled_rules = sast_disabled_rules;
+  if (typeof pr_review_enabled === 'boolean') updates.pr_review_enabled = pr_review_enabled;
+  if (pr_review_enabled !== undefined && typeof pr_review_enabled !== 'boolean') {
+    return res.status(400).json({ error: 'pr_review_enabled must be a boolean' });
+  }
+  if (typeof pr_review_auto_publish === 'boolean') updates.pr_review_auto_publish = pr_review_auto_publish;
+  if (pr_review_auto_publish !== undefined && typeof pr_review_auto_publish !== 'boolean') {
+    return res.status(400).json({ error: 'pr_review_auto_publish must be a boolean' });
+  }
+  if (pr_review_block_on_severity !== undefined && !['critical', 'high'].includes(pr_review_block_on_severity)) {
+    return res.status(400).json({ error: 'pr_review_block_on_severity must be critical or high' });
+  }
+  if (['critical', 'high'].includes(pr_review_block_on_severity)) updates.pr_review_block_on_severity = pr_review_block_on_severity;
 
   if (Object.keys(updates).length === 0) {
     return res.status(400).json({ error: 'No valid fields to update' });
