@@ -3,14 +3,23 @@
  */
 
 const path              = require('path');
-const { Octokit }       = require('octokit');
 const { OpenAI }        = require('openai');
 const Anthropic         = require('@anthropic-ai/sdk');
 const { supabaseAdmin } = require('../db/supabase');
 const { recordUsage }   = require('../services/usageTracker');
+
+function getOctokit(githubToken) {
+  const { Octokit } = globalThis.__CODELENS_OCTOKIT__ || require('octokit');
+  return new Octokit({ auth: githubToken });
+}
 const { bindRequestAbort, isAbortError } = require('../lib/sseAbort');
 const { withSupabaseRetry } = require('../lib/dbHelpers');
 const { getGithubTokenForUser } = require('../lib/githubAuth');
+const { scanFileForSecrets } = require('../services/secretScanner');
+const { scanFileForInsecurePatterns } = require('../services/sastEngine');
+const { scanFileForMissingAuth } = require('../services/authCoverageScanner');
+const { isManifestFile, parseManifest } = require('../services/manifestParser');
+const { scanDependencies } = require('../services/osvScanner');
 
 const MODEL = 'claude-sonnet-4-20250514';
 const MAX_DAILY_TOKENS = parseInt(process.env.MAX_DAILY_TOKENS_PER_USER || '500000', 10);
@@ -408,6 +417,76 @@ async function fetchDeterministicIssues(repoId, filePaths) {
   return (data || []).filter((issue) => (issue.file_paths || []).some((path) => wanted.has(path)));
 }
 
+function normalizeReviewFilePath(filePath) {
+  return String(filePath || '').trim();
+}
+
+function buildAnalysisIssueKey(filePath, type, line, description) {
+  const normalizedFile = normalizeReviewFilePath(filePath);
+  const normalizedType = String(type || '').toLowerCase();
+  const normalizedLine = line != null ? String(line) : '';
+  const normalizedDesc = String(description || '').trim().slice(0, 120);
+  return `${normalizedFile}::${normalizedType}::${normalizedLine}::${normalizedDesc}`;
+}
+
+function buildAnalysisIssueKeySet(issues = []) {
+  const keys = new Set();
+  for (const issue of issues) {
+    const type = issue.type || '';
+    const line = extractLineNumber(issue.description || '');
+    const description = issue.description || '';
+    for (const filePath of issue.file_paths || []) {
+      keys.add(buildAnalysisIssueKey(filePath, type, line, description));
+      keys.add(buildAnalysisIssueKey(filePath, type, '', description));
+    }
+  }
+  return keys;
+}
+
+function findingMatchesExistingIssue(finding, existingIssueKeys) {
+  const filePath = normalizeReviewFilePath(finding.file_path || (Array.isArray(finding.file_paths) ? finding.file_paths[0] : ''));
+  if (!filePath) return false;
+  const type = finding.type || String(finding.category || '').toLowerCase();
+  const line = finding._meta?.line_number || extractLineNumber(finding.description || '');
+  const description = finding.description || '';
+  const exactKey = buildAnalysisIssueKey(filePath, type, line, description);
+  const fallbackKey = buildAnalysisIssueKey(filePath, type, '', description);
+  return existingIssueKeys.has(exactKey) || existingIssueKeys.has(fallbackKey);
+}
+
+async function fetchFileContentAtRef(octokit, owner, repo, filePath, ref) {
+  try {
+    const blob = await octokit.rest.repos.getContent({ owner, repo, path: filePath, ref });
+    if (blob && blob.data && blob.data.content) {
+      return Buffer.from(blob.data.content, blob.data.encoding || 'base64').toString('utf8');
+    }
+  } catch (err) {
+    return null;
+  }
+  return null;
+}
+
+async function parseManifestDependenciesFromRef(octokit, owner, repo, filePath, ref) {
+  const content = await fetchFileContentAtRef(octokit, owner, repo, filePath, ref);
+  if (!content) return [];
+  return parseManifest(filePath, content);
+}
+
+async function scanManifestDiffForVulnerableDeps(octokit, owner, repo, filePath, baseRef, headRef, repoId) {
+  const headDeps = await parseManifestDependenciesFromRef(octokit, owner, repo, filePath, headRef);
+  if (!headDeps.length) return [];
+  const baseDeps = await parseManifestDependenciesFromRef(octokit, owner, repo, filePath, baseRef);
+  const baseKeys = new Set(baseDeps.map((dep) => `${dep.ecosystem}::${dep.name}::${dep.version}`));
+  const changedDeps = headDeps.filter((dep) => !baseKeys.has(`${dep.ecosystem}::${dep.name}::${dep.version}`));
+  if (!changedDeps.length) return [];
+
+  const { issues } = await scanDependencies(changedDeps, repoId);
+  return issues.map((issue) => ({
+    ...issue,
+    _meta: { rule_id: 'vulnerable_dependency', line_number: 0 },
+  }));
+}
+
 async function fetchAuditTargets(repoId) {
   const { data, error } = await supabaseAdmin.rpc('get_security_audit_targets', {
     p_repo_id: repoId,
@@ -775,6 +854,215 @@ const duplicationRefactor = async (req, res) => {
     }
   }
 };
+
+// POST /api/repos/:repoId/pulls/:number/reviews
+const runPrReview = async (req, res) => {
+  const { repoId, number } = req.params;
+  const prNumber = Number(number);
+
+  const allowed = await canAccessRepo(repoId, req.user.id);
+  if (!allowed) return res.status(404).json({ error: 'Repository not found or unauthorized' });
+
+  openSse(res);
+  const send = sendFactory(res);
+
+  try {
+    const githubToken = await getGithubTokenForUser(req.user.id);
+    if (!githubToken) {
+      send({ type: 'error', message: 'No GitHub token available for this user; unable to fetch PR details.' });
+      return res.end();
+    }
+
+    const { data: repoRec } = await supabaseAdmin
+      .from('repositories')
+      .select('full_name')
+      .eq('id', repoId)
+      .maybeSingle();
+    if (!repoRec || !repoRec.full_name) {
+      send({ type: 'error', message: 'Repository metadata missing full_name' });
+      return res.end();
+    }
+
+    const [owner, repo] = repoRec.full_name.split('/');
+    const result = await runPrReviewBackground({
+      repoId,
+      prNumber,
+      owner,
+      repo,
+      githubToken,
+      userId: req.user.id,
+      send,
+      res,
+    });
+
+    if (!result || !result.reviewId) {
+      res.end();
+      return;
+    }
+
+    res.end();
+  } catch (err) {
+    console.error('[pr-review] error:', err);
+    try {
+      send({ type: 'error', message: 'PR review failed to complete.' });
+    } catch {
+      // Ignore stream write errors during cleanup.
+    }
+    res.end();
+  }
+}
+
+async function runPrReviewBackground({ repoId, prNumber, owner, repo, githubToken, userId, send = () => {}, _res = null }) {
+  const octokit = getOctokit(githubToken);
+  const pr = await octokit.rest.pulls.get({ owner, repo, pull_number: prNumber });
+  const headSha = pr.data.head.sha;
+  const baseSha = pr.data.base.sha;
+
+  await supabaseAdmin
+    .from('pr_reviews')
+    .update({ status: 'stale' })
+    .eq('repo_id', repoId)
+    .eq('pr_number', prNumber)
+    .neq('pr_head_sha', headSha)
+    .in('status', ['pending', 'analyzing', 'ready']);
+
+  const createRes = await supabaseAdmin
+    .from('pr_reviews')
+    .insert({
+      repo_id: repoId,
+      pr_number: prNumber,
+      pr_head_sha: headSha,
+      pr_base_sha: baseSha,
+      user_id: userId,
+      status: 'analyzing',
+    })
+    .onConflict('repo_id,pr_number,pr_head_sha')
+    .merge({ status: 'analyzing', pr_base_sha: baseSha })
+    .select()
+    .maybeSingle();
+
+  if (createRes.error || !createRes.data) {
+    send({ type: 'error', message: 'Failed to create PR review record' });
+    return null;
+  }
+
+  const reviewRow = createRes.data;
+  send({ type: 'created', review_id: reviewRow.id });
+
+  const files = [];
+  for await (const response of octokit.paginate.iterator(octokit.rest.pulls.listFiles, { owner, repo, pull_number: prNumber, per_page: 100 })) {
+    for (const f of response.data) files.push(f);
+  }
+
+  if (!files.length) {
+    await supabaseAdmin.from('pr_reviews').update({ status: 'ready', findings_json: [] }).eq('id', reviewRow.id);
+    send({ type: 'summary', total_files: 0, total_findings: 0, severity_counts: { critical: 0, high: 0, medium: 0, low: 0 } });
+    send({ type: 'done', review_id: reviewRow.id });
+    return { reviewId: reviewRow.id };
+  }
+
+  const capped = files.sort((a, b) => (b.additions || 0) - (a.additions || 0)).slice(0, 50);
+  const aggregatedFindings = [];
+
+  for (const f of capped) {
+    send({ type: 'analyzing_file', file: f.filename });
+    const patch = f.patch || '';
+    const addedLines = [];
+    for (const line of patch.split(/\r?\n/)) {
+      if (line.startsWith('+') && !line.startsWith('+++') && !line.startsWith('@@')) {
+        addedLines.push(line.slice(1));
+      }
+    }
+
+    try {
+      const secrets = await scanFileForSecrets(f.filename, addedLines.join('\n'));
+      for (const s of secrets) {
+        aggregatedFindings.push({ ...s, file_path: f.filename });
+        send({ type: 'finding', finding: { ...s, file_path: f.filename } });
+      }
+    } catch (err) {
+      console.warn('[pr-review] secret scan failed for', f.filename, err.message);
+    }
+
+    let newContent = null;
+    try {
+      newContent = await fetchFileContentAtRef(octokit, owner, repo, f.filename, headSha);
+    } catch (_) {
+      newContent = null;
+    }
+
+    if (isManifestFile(f.filename)) {
+      try {
+        const scaFindings = await scanManifestDiffForVulnerableDeps(octokit, owner, repo, f.filename, baseSha, headSha, repoId);
+        for (const issue of scaFindings) {
+          aggregatedFindings.push(issue);
+          send({ type: 'finding', finding: issue });
+        }
+      } catch (err) {
+        console.warn('[pr-review] SCA manifest scan failed for', f.filename, err.message);
+      }
+    }
+
+    if (newContent) {
+      try {
+        const sastFindings = await scanFileForInsecurePatterns(f.filename, newContent, []);
+        for (const sf of sastFindings) {
+          aggregatedFindings.push({ ...sf, file_path: f.filename });
+          send({ type: 'finding', finding: { ...sf, file_path: f.filename } });
+        }
+      } catch (err) {
+        console.warn('[pr-review] SAST failed for', f.filename, err.message);
+      }
+
+      try {
+        const authIssues = scanFileForMissingAuth(f.filename, newContent, []);
+        for (const a of authIssues) {
+          aggregatedFindings.push({ ...a, file_path: f.filename });
+          send({ type: 'finding', finding: { ...a, file_path: f.filename } });
+        }
+      } catch (err) {
+        console.warn('[pr-review] auth coverage scan failed for', f.filename, err.message);
+      }
+    }
+  }
+
+  const { data: suppressions } = await supabaseAdmin
+    .from('issue_suppressions')
+    .select('file_path, rule_id, line_number')
+    .eq('repo_id', repoId);
+  const suppressedSet = new Set((suppressions || []).map((s) => `${s.file_path}::${s.rule_id}::${s.line_number}`));
+
+  const previousIssues = await fetchDeterministicIssues(repoId, capped.map((f) => f.filename));
+  const existingIssueKeys = buildAnalysisIssueKeySet(previousIssues);
+
+  const filtered = aggregatedFindings.filter((fg) => {
+    const ruleId = fg._meta?.rule_id || fg.rule?.id || '';
+    const line = fg._meta?.line_number || extractLineNumber(fg.description || '') || '';
+    const path = fg.file_path || (Array.isArray(fg.file_paths) ? fg.file_paths[0] : '');
+    const suppressionKey = `${path}::${ruleId}::${line}`;
+    if (suppressedSet.has(suppressionKey)) return false;
+    if (findingMatchesExistingIssue(fg, existingIssueKeys)) return false;
+    return true;
+  });
+
+  const severityCounts = { critical: 0, high: 0, medium: 0, low: 0 };
+  for (const f of filtered) {
+    if (['critical', 'high', 'medium', 'low'].includes(f.severity)) {
+      severityCounts[f.severity] += 1;
+    }
+  }
+
+  await supabaseAdmin.from('pr_reviews').update({
+    findings_json: filtered,
+    status: 'ready',
+    total_findings: filtered.length,
+    severity_counts: severityCounts,
+  }).eq('id', reviewRow.id);
+
+  send({ type: 'summary', total_files: capped.length, total_findings: filtered.length, severity_counts: severityCounts });
+  send({ type: 'done', review_id: reviewRow.id });
+  return { reviewId: reviewRow.id };
+}
 
 // ─── US-064: Refactor proposal generation ─────────────────────────────────────
 
@@ -1397,7 +1685,7 @@ const applyProposalAsPr = async (req, res) => {
   }
 
   const [owner, repoName] = repoRow.full_name.split('/');
-  const octokit = new Octokit({ auth: githubToken });
+  const octokit = getOctokit(githubToken);
   const issue = proposal.analysis_issues;
   const primaryPath = Array.isArray(issue.file_paths) ? issue.file_paths[0] : null;
   const slug = buildBranchSlug(issue.type, primaryPath);
@@ -1605,6 +1893,8 @@ const updateProposalStatus = async (req, res) => {
 module.exports = {
   review,
   runSecurityAudit,
+  runPrReview,
+  runPrReviewBackground,
   listSecurityAudits,
   getSecurityAudit,
   duplicationRefactor,

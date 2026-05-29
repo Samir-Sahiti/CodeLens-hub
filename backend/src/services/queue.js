@@ -61,4 +61,26 @@ queue.process('pr-diff', async (job) => {
   await computeArchDiff(job.data);
 });
 
+queue.process('pr-review', async (job) => {
+  const { repoId, prId, owner, name, token, userId } = job.data;
+  if (!token) {
+    console.error('[Queue] PR review job missing GitHub token; skipping');
+    return;
+  }
+  try {
+    const { runPrReviewBackground } = require('../controllers/reviewController');
+    await runPrReviewBackground({
+      repoId,
+      prNumber: prId,
+      owner,
+      repo: name,
+      githubToken: token,
+      userId,
+      send: () => {},
+    });
+  } catch (err) {
+    console.error('[Queue] PR review job failed:', err.message || err);
+  }
+});
+
 module.exports = { queue };
