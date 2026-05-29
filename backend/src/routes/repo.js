@@ -56,4 +56,8 @@ router.get('/:repoId/branches', requireAuth, repoController.getBranches);
 // Compute or retrieve cached architectural diff between two refs (US-051)
 router.get('/:repoId/diff', requireAuth, repoController.getDiff);
 
+// PR review run (deterministic-only pipeline) — US-073
+const reviewController = require('../controllers/reviewController');
+router.post('/:repoId/pulls/:number/reviews', requireAuth, reviewController.runPrReview);
+
 module.exports = router;

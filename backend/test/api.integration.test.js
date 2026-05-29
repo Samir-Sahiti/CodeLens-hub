@@ -2,6 +2,12 @@ import express from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const octokitMockState = {
+  pullsGetResult: { data: { head: { sha: 'headsha123' }, base: { sha: 'basesha123' } } },
+  listFilesResult: { data: [{ filename: 'src/index.js', additions: 2, patch: '+const a = 1\n' }] },
+  getContentResult: { data: { content: Buffer.from('const a = 1;\n').toString('base64'), encoding: 'base64' } },
+};
+
 let supabaseAdminMock;
 let indexerMock;
 let supabaseCallLog;
@@ -59,8 +65,19 @@ function createSupabaseMock(handlers) {
       this.payload = payload;
       return this;
     }
+    onConflict() {
+      return this;
+    }
+    merge(payload) {
+      this.payload = payload;
+      return this;
+    }
     eq(column, value) {
       this.filters.push({ op: 'eq', column, value });
+      return this;
+    }
+    neq(column, value) {
+      this.filters.push({ op: 'neq', column, value });
       return this;
     }
     gte(column, value) {
@@ -844,5 +861,60 @@ describe('Backend API integration (mocked)', () => {
     expect(linked[0].matching_analysis_issues.map((issue) => issue.id)).toEqual(['near']);
     expect(linked[0].matching_analysis_issues[0].match_reason.category_match).toBe(true);
     expect(linked[0].matching_analysis_issues[0].match_reason.line_proximity).toBe(2);
+  });
+
+  it('POST /api/repos/:repoId/pulls/:number/reviews stores a PR review and streams findings', async () => {
+    octokitMockState.pullsGetResult = { data: { head: { sha: 'headsha123' }, base: { sha: 'basesha123' } } };
+    octokitMockState.listFilesResult = { data: [{ filename: 'src/index.js', additions: 2, patch: '+const a = 1\n' }] };
+    octokitMockState.getContentResult = { data: { content: Buffer.from('const a = 1;\n').toString('base64'), encoding: 'base64' } };
+    globalThis.__CODELENS_OCTOKIT__ = {
+      Octokit: class {
+        constructor() {}
+        get rest() {
+          return {
+            pulls: {
+              get: async () => octokitMockState.pullsGetResult,
+              listFiles: async () => octokitMockState.listFilesResult,
+            },
+            repos: {
+              getContent: async () => octokitMockState.getContentResult,
+            },
+          };
+        }
+        get paginate() {
+          return {
+            iterator: async function* () {
+              yield { data: octokitMockState.listFilesResult.data };
+            },
+          };
+        }
+      },
+    };
+    globalThis.__CODELENS_GITHUB_TOKEN__ = 'gh-token';
+
+    supabaseAdminMock = createSupabaseMock({
+      'repositories.select.maybeSingle': async () => ({ data: { id: 'repo-1', full_name: 'owner/repo' }, error: null }),
+      'repositories.select.single': async () => ({ data: { full_name: 'owner/repo' }, error: null }),
+      'issue_suppressions.select.many': async () => ({ data: [], error: null }),
+      'pr_reviews.insert.maybeSingle': async (state) => ({ data: { id: 'review-1', ...state.payload }, error: null }),
+      'pr_reviews.update.maybeSingle': async (state) => ({ data: { id: 'review-1', ...state.payload }, error: null }),
+    });
+
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+    globalThis.__CODELENS_SUPABASE_ANON__ = supabaseAdminMock;
+
+    const reviewController = (await import('../src/controllers/reviewController.js')).runPrReview;
+    const app = express();
+    app.use(express.json());
+    app.post('/api/repos/:repoId/pulls/:number/reviews', (req, _res, next) => { req.user = { id: 'user-1' }; next(); }, reviewController);
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message || 'error' }));
+
+    const res = await request(app)
+      .post('/api/repos/repo-1/pulls/42/reviews')
+      .expect(200);
+
+    expect(res.text).toContain('data:');
+    expect(res.text).toContain('review_id');
+    expect(supabaseCallLog).toContain('pr_reviews.insert.maybeSingle');
   });
 });

@@ -40,18 +40,17 @@ const handleGitHubPush = async (req, res) => {
     return res.status(400).json({ error: 'Missing repository.full_name or ref in payload' });
   }
 
-  // Look up the repo by name (stored as "owner/repo") with auto_sync_enabled = true
+  // Look up the repo by name (stored as "owner/repo")
   const { data: repo, error: fetchError } = await supabaseAdmin
     .from('repositories')
-    .select('id, user_id, webhook_secret, default_branch, name, source')
-    .eq('name', fullName)
-    .eq('auto_sync_enabled', true)
+    .select('id, user_id, webhook_secret, default_branch, full_name, source, auto_sync_enabled, pr_review_enabled')
+    .eq('full_name', fullName)
     .eq('source', 'github')
     .maybeSingle();
 
   if (fetchError || !repo) {
     // Return 200 to avoid GitHub marking the webhook as failed
-    return res.status(200).json({ ok: true, skipped: 'repo not found or auto-sync disabled' });
+    return res.status(200).json({ ok: true, skipped: 'repo not found' });
   }
 
   // Validate the HMAC-SHA256 signature
@@ -97,24 +96,31 @@ const handleGitHubPush = async (req, res) => {
 
   if (event === 'pull_request') {
     const action = payload.action;
-    if (!['opened', 'synchronize'].includes(action)) {
+    if (!['opened', 'synchronize', 'reopened'].includes(action)) {
       return res.status(200).json({ ok: true, skipped: 'ignored PR action' });
     }
-    
-    console.log(`[webhook] Queuing PR diff for repo ${repo.id} PR #${payload.pull_request.number}`);
-    
-    // Enqueue the PR Diff Job (US-051)
-    queue.add('pr-diff', {
+
+    if (!repo.pr_review_enabled) {
+      return res.status(200).json({ ok: true, skipped: 'PR review not enabled for this repo' });
+    }
+
+    const repoName = repo.full_name || payload.repository.full_name || payload.repository.name;
+    if (!repoName) {
+      return res.status(200).json({ ok: true, skipped: 'repository metadata missing name' });
+    }
+
+    console.log(`[webhook] Queuing PR review for repo ${repo.id} PR #${payload.pull_request.number}`);
+
+    queue.add('pr-review', {
       repoId: repo.id,
       prId: payload.pull_request.number,
       owner: payload.repository.owner.login,
-      name: payload.repository.name,
-      baseRef: payload.pull_request.base.sha,
-      headRef: payload.pull_request.head.sha,
-      token: githubToken
+      name: repoName,
+      token: githubToken,
+      userId: repo.user_id,
     }, { timeout: 5 * 60 * 1000 });
-    
-    return res.status(200).send("OK");
+
+    return res.status(200).send('OK');
   }
 
   // Only re-index pushes to the default branch

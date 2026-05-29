@@ -507,6 +507,96 @@ CREATE POLICY "Team members can view team repositories"
   USING (team_id IN (SELECT team_id FROM team_members WHERE user_id = auth.uid()));
 
 -- =============================================================================
+-- US-072 / US-073: PR review persistence schema and repo flag
+-- Idempotent additions: new repo column, pr_reviews table, pr_review_comments,
+-- indexes, RLS policies, and updated_at trigger binding.
+-- =============================================================================
+
+-- Per-repo opt-in for PR review pipeline
+ALTER TABLE repositories ADD COLUMN IF NOT EXISTS pr_review_enabled BOOLEAN NOT NULL DEFAULT false;
+
+-- PR review status enum
+DO $$ BEGIN
+  CREATE TYPE pr_review_status AS ENUM ('pending', 'analyzing', 'ready', 'failed', 'stale');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- pr_reviews table — stores deterministic review results per PR head
+CREATE TABLE IF NOT EXISTS pr_reviews (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  repo_id        UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+  pr_number      INT  NOT NULL,
+  pr_head_sha    TEXT NOT NULL,
+  pr_base_sha    TEXT,
+  user_id        UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+  status         pr_review_status NOT NULL DEFAULT 'pending',
+  findings_json  JSONB NOT NULL DEFAULT '{}'::jsonb,
+  summary        TEXT,
+  total_findings INT  NOT NULL DEFAULT 0,
+  severity_counts JSONB NOT NULL DEFAULT ('{"critical":0,"high":0,"medium":0,"low":0}'::jsonb),
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (repo_id, pr_number, pr_head_sha)
+);
+
+CREATE INDEX IF NOT EXISTS pr_reviews_repo_pr_created_idx ON pr_reviews (repo_id, pr_number, created_at DESC);
+CREATE INDEX IF NOT EXISTS pr_reviews_repo_id_idx ON pr_reviews (repo_id);
+
+ALTER TABLE pr_reviews ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can access pr_reviews for their repos" ON pr_reviews;
+CREATE POLICY "Users can access pr_reviews for their repos"
+  ON pr_reviews FOR ALL
+  USING (
+    repo_id IN (
+      SELECT id FROM repositories
+      WHERE user_id = auth.uid()
+      OR id IN (
+        SELECT repo_id FROM team_repositories
+        WHERE team_id IN (SELECT team_id FROM team_members WHERE user_id = auth.uid())
+      )
+    )
+  );
+
+-- pr_review_comments — stores GitHub comment ids for idempotent publishes
+CREATE TABLE IF NOT EXISTS pr_review_comments (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  review_id         UUID NOT NULL REFERENCES pr_reviews(id) ON DELETE CASCADE,
+  github_comment_id BIGINT,
+  file_path         TEXT,
+  line_number       INT,
+  kind              TEXT NOT NULL CHECK (kind IN ('inline','summary','review_event')),
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS pr_review_comments_review_idx ON pr_review_comments (review_id);
+
+ALTER TABLE pr_review_comments ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can access pr_review_comments for their repos" ON pr_review_comments;
+CREATE POLICY "Users can access pr_review_comments for their repos"
+  ON pr_review_comments FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM pr_reviews pr
+      JOIN repositories r ON r.id = pr.repo_id
+      WHERE pr.id = pr_review_comments.review_id
+        AND (
+          r.user_id = auth.uid()
+          OR r.id IN (
+            SELECT repo_id FROM team_repositories
+            WHERE team_id IN (SELECT team_id FROM team_members WHERE user_id = auth.uid())
+          )
+        )
+    )
+  );
+
+-- Bind updated_at trigger using existing set_updated_at() function
+DROP TRIGGER IF EXISTS pr_reviews_set_updated_at ON pr_reviews;
+CREATE TRIGGER pr_reviews_set_updated_at BEFORE UPDATE ON pr_reviews
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+
+-- =============================================================================
 -- API USAGE (US-042)
 -- Records per-request token consumption for rate limiting and cost control.
 -- =============================================================================

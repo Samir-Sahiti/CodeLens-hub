@@ -8,6 +8,7 @@ const { supabaseAdmin } = require('../db/supabase');
 
 async function getGithubTokenForUser(userId) {
   if (!userId) return null;
+  if (globalThis.__CODELENS_GITHUB_TOKEN__) return globalThis.__CODELENS_GITHUB_TOKEN__;
 
   const { data: profile, error: profileErr } = await supabaseAdmin
     .from('profiles')
