@@ -1623,5 +1623,7 @@ module.exports = {
     normalizeProposal,
     extractStreamingSummary,
     buildContextForIssue,
+    fetchAnalysisIssue,
+    streamClaude,
   },
 };

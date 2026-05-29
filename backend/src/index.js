@@ -17,6 +17,7 @@ const fileChatRoutes = require('./routes/fileChat');
 const usageRoutes    = require('./routes/usage');
 const adminRoutes    = require('./routes/admin');
 const toursRoutes    = require('./routes/tours');
+const agentRoutes    = require('./routes/agent');
 const errorHandler   = require('./middleware/errorHandler');
 const { requestTimingMiddleware } = require('./observability/requestStore');
 
@@ -80,6 +81,7 @@ app.use('/api/file-chat', fileChatRoutes);
 app.use('/api/usage',     usageRoutes);
 app.use('/api/admin',     adminRoutes);
 app.use('/api/repos',    toursRoutes);
+app.use('/api',           agentRoutes);
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 

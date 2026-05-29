@@ -81,7 +81,7 @@ CodeLens-hub/
 │   │   ├── ProposalPanel.jsx         # AI refactor proposal review + Apply via PR (US-065, US-066)
 │   │   ├── ImpactAnalysisPanel.jsx   # Blast-radius panel
 │   │   ├── MetricsPanel.jsx
-│   │   ├── SearchPanel.jsx
+│   │   ├── AgentPanel.jsx            # AI Repo Agent chat + tool-call cards + history rail (US-070, US-071)
 │   │   └── ui/                       # Primitives, Icons (lucide-react re-exports), Toast
 │   ├── pages/              # Login, AuthCallback, Dashboard, RepoView, Search
 │   ├── context/            # AuthContext
@@ -91,7 +91,7 @@ CodeLens-hub/
 │
 ├── backend/src/
 │   ├── index.js            # Express setup + all route mounting + global token-redacting console
-│   ├── routes/             # auth, repo, search, analysis, review, webhooks, teams, fileChat, usage, admin, tours
+│   ├── routes/             # auth, repo, search, analysis, review, webhooks, teams, fileChat, usage, admin, tours, agent
 │   ├── controllers/        # Request handlers
 │   │   ├── analysisController.js     # Issues, suppress, impact
 │   │   ├── reviewController.js       # AI review + security audit + refactor proposals + apply-via-PR (US-048, US-064–US-066)
@@ -102,6 +102,7 @@ CodeLens-hub/
 │   │   ├── usageController.js        # /api/usage/today
 │   │   ├── webhookController.js      # GitHub push → auto-reindex
 │   │   ├── authController.js         # GitHub OAuth handshake
+│   │   ├── agentController.js        # AI Repo Agent tool-use loop + history (US-069 – US-071)
 │   │   └── searchController.js       # RAG search
 │   ├── services/           # Business logic
 │   │   ├── indexer.js                # Top-level indexing entry
@@ -118,6 +119,9 @@ CodeLens-hub/
 │   │   ├── issueDetection.js         # Circular dep / god file / coupling / dead code
 │   │   ├── startHereTourService.js   # Auto-generated "Start Here" tour
 │   │   ├── testCoverageService.js    # Test/coverage file detection
+│   │   ├── graphService.js           # BFS/DFS over graph_edges + Tarjan cycle count (US-068)
+│   │   ├── fileService.js            # Indexed file read (file_contents + code_chunks fallback)
+│   │   ├── agentTools.js             # Anthropic-schema tools + handlers for the agent (US-068)
 │   │   ├── queue.js                  # Indexing job queue
 │   │   └── usageTracker.js           # Daily token budget (US-042)
 │   ├── sast/
@@ -126,7 +130,7 @@ CodeLens-hub/
 │   ├── parsers/            # Tree-sitter AST parsing per language
 │   │   ├── parserPool.js             # Piscina worker pool singleton (Phase 5.1)
 │   │   └── parser-worker.js          # Worker entry — JSON-safe parsed result
-│   ├── lib/                # Shared helpers — dbHelpers, sseAbort, githubAuth
+│   ├── lib/                # Shared helpers — dbHelpers, sseAbort, githubAuth, repoAccess
 │   ├── observability/      # AsyncLocalStorage request ledger (Phase 0)
 │   ├── ai/                 # ragService.js (RAG pipeline)
 │   ├── db/                 # Supabase admin client (instrumented fetch)
@@ -138,6 +142,8 @@ CodeLens-hub/
 │   ├── us048_security_audits.sql             # security_audits table + RLS
 │   ├── us051_arch_diff.sql                   # Architectural diff (US-051) support
 │   ├── us063_proposals.sql                   # issue_proposals table + RLS + stale-detection (US-063)
+│   ├── us067_agent.sql                       # agent_conversations + agent_messages tables + RLS (US-067)
+│   ├── graph_indexes_cleanup.sql             # Drops redundant single-column indexes on graph_edges
 │   ├── perf_reindex_migration.sql            # prepare_repo_reindex RPC migration
 │   ├── maintenance_truncate_api_usage.sql    # Monthly — prune raw api_usage > 30 days
 │   └── maintenance_evict_embedding_cache.sql # Quarterly — evict embedding_cache idle > 90 days
@@ -175,6 +181,10 @@ CodeLens-hub/
 | `GET` | `/api/review/:id/proposals/summary` | Latest proposal per issue for IssueCard badges (US-066) |
 | `POST` | `/api/review/:id/proposals/:proposalId/apply` | Apply a proposal as a GitHub draft PR via single-commit Git Data API (US-066) |
 | `POST` | `/api/file-chat/:id` | Per-file AI chat |
+| `POST` | `/api/repos/:id/agent/chat` | SSE: AI Repo Agent tool-use loop (US-069). Body `{ conversation_id?, message }` |
+| `GET` | `/api/repos/:id/agent/conversations` | Paginated conversation list (US-071) |
+| `GET` | `/api/repos/:id/agent/suggestions` | 4 repo-tailored example prompts for the empty state (US-070) |
+| `GET\|PATCH\|DELETE` | `/api/agent/conversations/:id` | Load / rename / delete a single conversation (US-071) |
 | `*` | `/api/tours/*` | Generate/list/update/fork/delete AI-authored code tours (US-060, US-061) |
 | `*` | `/api/teams/*` | Create teams, add repos to teams, list team repos |
 | `GET` | `/api/usage/today` | Today's per-user token usage (US-042) |
@@ -204,8 +214,10 @@ Tables (all with RLS):
 - `duplication_candidates` — output of the cosine-similarity clustering pass over `code_chunks`; rendered as the "Duplication" section in IssuesPanel and as the source for `POST /api/review/:id/duplication-refactor`
 - `tours` — AI-authored code tours (US-060, US-061): ordered steps with file/line anchors and prose; supports forking with a `forked_from` lineage column used by the share-impact endpoint
 - `teams`, `team_members`, `team_repositories` — team-based repo sharing; access checks centralised in the `can_access_repo(repo_id, user_id)` Postgres RPC
+- `agent_conversations` — AI Repo Agent chats (US-067): `{ id, repo_id, user_id, title, total_tokens, created_at, updated_at }`. `title` is auto-generated by a one-shot Haiku call after the first assistant turn.
+- `agent_messages` — full tool-call trace for the agent (US-067). `role` enum `user | assistant | tool_use | tool_result`; `content_json` is polymorphic by role (`{ text }` for user/assistant, `{ tool_name, input, tool_use_id }` for tool_use, `{ tool_use_id, output, is_error }` for tool_result). `tool_use_id` matches Anthropic's protocol id so traces replay verbatim.
 
-**Schema migration:** `scripts/schema.sql` is idempotent and safe to re-run. Apply via Supabase SQL Editor. Auxiliary migrations applied separately on top: `us048_security_audits.sql`, `us051_arch_diff.sql`, `us063_proposals.sql`, `perf_reindex_migration.sql`.
+**Schema migration:** `scripts/schema.sql` is idempotent and safe to re-run. Apply via Supabase SQL Editor. Auxiliary migrations applied separately on top: `us048_security_audits.sql`, `us051_arch_diff.sql`, `us063_proposals.sql`, `us067_agent.sql`, `perf_reindex_migration.sql`.
 
 **Indexer-side RPCs** (also in `scripts/schema.sql`):
 - `prepare_repo_reindex(repo_id, unchanged_paths, changed_or_deleted_paths, preserve_churn)` — single PL/pgSQL call that stale-marks pending proposals, deletes non-preservable issues (preserves `hardcoded_secret` / `insecure_pattern` / `missing_auth` whose `file_paths` are entirely in `unchanged_paths`), wipes derived tables, and partial-purges nodes/chunks/file_contents for changed-or-deleted files
@@ -227,6 +239,8 @@ ANTHROPIC_API_KEY     # for AI code review + security audit + refactor proposals
 NODE_ENV, PORT
 FRONTEND_URL          # base URL used in CORS + as the deep-link host in Apply-via-PR PR bodies (US-066)
 MAX_DAILY_TOKENS_PER_USER   # optional, default 500000 (US-042)
+AGENT_MAX_ITERATIONS        # max tool-use iterations per agent turn, default 15 (US-069)
+AGENT_TOKEN_CAP             # per-conversation cumulative token cap, default 50000 (US-069)
 
 # Performance / observability knobs (all optional)
 SLOW_REQUEST_MS             # WARN threshold for the request-timing middleware, default 500
@@ -405,6 +419,47 @@ A one-click "Propose fix" path on every issue card. The model receives the issue
 
 ---
 
+## AI Repo Agent (US-067 – US-071)
+
+A conversational surface that drives an Anthropic tool-use loop over CodeLens's deterministic analysis. Replaces the old "Search" tab — the existing RAG retrieval is now one tool (`search_code`) among many. Conversations and the full tool-call trace persist so investigations resume across sessions and are auditable.
+
+**Schema (US-067):** `agent_conversations` + `agent_messages` (see Database Schema above). `content_json` is polymorphic by role; `tool_use_id` matches Anthropic's protocol id so traces replay verbatim.
+
+**Tool surface (US-068)** — `backend/src/services/agentTools.js` exports `{ tools, toolHandlers, isReadOnlyTool }`. 12 tools:
+- `get_graph_overview` — `{ nodeCount, edgeCount, topHubs, topSinks, cyclicComponentCount }` (counts strongly-connected components containing a cycle — a 10-file cycle is one component, not 10 cycles)
+- `list_issues({ type?, severity?, file? })` — sorted high → low by severity in JS (Supabase string ordering would put `medium` before `low`)
+- `get_file_metrics({ path })`, `get_blast_radius({ path, depth? })` — `direct` (depth 1) and `transitive` (depth ≥ 2) are DISJOINT arrays so the count is `direct.length + transitive.length`; matches the Impact Analysis panel exactly, `get_dependents`, `get_imports`
+- `find_paths({ from_path, to_path })`, `get_attack_paths({ source?, sink? })`
+- `search_code({ query, top_k? })` — wraps `ragService.embedQuery` + `retrieveChunks`; returns raw chunks, no synthesis
+- `read_file({ path, start_line?, end_line? })` — via `fileService.readFile`
+- `get_vulns({ severity? })` — wraps `repoController.getStoredDependenciesWithIssues`
+- `propose_fix({ issue_id })` — only write-side tool. Calls `reviewController._private` (`fetchAnalysisIssue`, `buildContextForIssue`, `streamClaude`, `parseProposalJson`, `normalizeProposal`) non-HTTP and inserts into `issue_proposals`. Returns `{ proposal_id, summary, change_count, risk_count }`.
+
+Every handler gates on `canAccessRepo(repoId, userId)` first (per-call — a crafted prompt could swap repo ids between turns). Failures return `{ is_error: true, message }`; collection-returning tools cap at 50 rows with a `truncated` flag.
+
+**Shared graph helpers (`backend/src/services/graphService.js`):** `getGraphOverview`, `getBlastRadius` (head-pointer BFS over the REVERSE import edges — change propagates to files that import the target; returns disjoint `direct` / `transitive` sets), `findPaths` (DFS), `getAttackPaths` (DFS from `source/both` nodes to `sink/both` nodes; records paths but keeps exploring past intermediate sinks to match the on-graph visualisation), `countCycles` (iterative Tarjan's SCC — recursive variant blew the stack on repos with ~10K-node SCCs). `buildAdjacency` accepts an optional valid-node Set so phantom edge targets (`'react'`, `'fs'`, unresolved relative imports) are filtered out of all traversals. Loaders (`loadEdges`, `loadNodes`) are memoised per-request via `AsyncLocalStorage` ([observability/requestStore.js](backend/src/observability/requestStore.js)) so multiple agent tools in one Anthropic iteration share a single Supabase fetch. Also wires the previously stubbed analysis routes (`/graph`, `/metrics`, `/impact/:filePath`) to real implementations — the `/impact/:filePath` endpoint is now the single source of truth for blast radius and is consumed by the frontend Impact panel via [RepoView.jsx](frontend/src/pages/RepoView.jsx) `useEffect`.
+
+**Loop endpoint (US-069)** — `backend/src/controllers/agentController.js::chat` (`POST /api/repos/:repoId/agent/chat`, `requireAuth` + `aiRateLimit`):
+- Streams SSE events: `conversation_created`, `text_delta`, `tool_use`, `tool_result`, `finish`, `budget_stopped`, `error`.
+- Persistence-as-you-go: every `assistant` text, `tool_use`, and `tool_result` is INSERTed into `agent_messages` before the next Anthropic call. A dropped connection leaves the conversation resumable.
+- Each iteration reads `agent_conversations.total_tokens` fresh; if `>= AGENT_TOKEN_CAP` (default 50 000) emits `budget_stopped` and ends.
+- Loop bound by `AGENT_MAX_ITERATIONS` (default 15). Read-only tools run in `Promise.all`; `propose_fix` runs sequentially.
+- Rehydration (`_private.rehydrateMessages`): consecutive `assistant` + `tool_use` rows fold into one Anthropic assistant message; consecutive `tool_result` rows fold into one user message.
+- Title generation: fire-and-forget Haiku (`claude-haiku-4-5-20251001`) call after the first assistant turn completes; only updates `title` if it is still null.
+- Suggestions (`GET /api/repos/:repoId/agent/suggestions`) computes 4 repo-tailored example prompts based on what `analysis_issues` actually contain, with generic fallbacks. `requireAuth` only, no `aiRateLimit`.
+
+**History (US-071):** `GET /api/repos/:repoId/agent/conversations` (20/page), `GET /api/agent/conversations/:id`, `PATCH /api/agent/conversations/:id`, `DELETE /api/agent/conversations/:id`. RLS enforces user ownership.
+
+**Frontend (`frontend/src/components/AgentPanel.jsx`):**
+- Streaming markdown rendered with the existing `AnswerBlock` from `SharedAnswerComponents`.
+- Collapsible `ToolCallCard` per tool call with verb-mapped header (`Computing blast radius of \`auth.js\``); raw input/output JSON visible on expand.
+- `text_delta` arriving AFTER any completed tool call in the current bubble starts a fresh assistant bubble — that way iterations are visually separated even when a single iteration emits multiple tool_uses.
+- `propose_fix` tool_result renders a `ProposalPreviewCard` with summary + `View in Issues` button that switches the tab via `onSwitchTab` callback from `RepoView`. IssuesPanel's existing `proposals/summary` fetch then surfaces the freshly-applied proposal on the matching issue card.
+- Conversation rail with inline rename (click pencil) and delete-with-confirm (click trash).
+- Cancel button during streaming aborts the `fetch` via `AbortController`.
+
+---
+
 ## Duplication Detection
 
 `backend/src/services/duplicationScanner.js` — cosine-similarity clustering over `code_chunks` embeddings, persisted to `duplication_candidates`.
@@ -528,7 +583,7 @@ ESLint in both `frontend/` and `backend/`. No Prettier, no commit hooks. Run `np
 
 - Tree-sitter native modules require build tools (python3, make, g++) — `backend/Dockerfile.dev` handles this
 - `docker-compose.yml` runs `npm install` on every container start for `backend` and `frontend` so new dependencies in `package.json` are picked up without a manual rebuild — the anonymous `/app/node_modules` volume otherwise persists across `docker compose build` and silently hides them
-- Apply `scripts/schema.sql` then the auxiliary migrations (`us048_security_audits.sql`, `us051_arch_diff.sql`, `us063_proposals.sql`, `perf_reindex_migration.sql`) via the Supabase SQL Editor before first run
+- Apply `scripts/schema.sql` then the auxiliary migrations (`us048_security_audits.sql`, `us051_arch_diff.sql`, `us063_proposals.sql`, `us067_agent.sql`, `perf_reindex_migration.sql`) via the Supabase SQL Editor before first run
 - Frontend Vite proxy (`/api/*` → port 3001) configured in `frontend/vite.config.js`
 - Attack surface toggle forces `clusteringEnabled = false` — clustering uses cluster-level edge IDs incompatible with individual-node path IDs
 - `issue_suppressions` is rule-agnostic: `rule_id` is a free-text string, `line_number: 0` is the convention for file-level suppressions (used by `missing_auth`)

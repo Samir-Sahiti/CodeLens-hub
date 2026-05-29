@@ -1,16 +1,29 @@
 const { supabase, supabaseAdmin } = require('../db/supabase');
 const { SAFE_FETCH_CEILING, warnIfCeilingHit } = require('../lib/dbHelpers');
+const graphService = require('../services/graphService');
 
-/** GET /api/analysis/:repoId/graph — dependency graph nodes + edges */
+/** GET /api/analysis/:repoId/graph — dependency graph overview (counts + top hubs/sinks + cycle count) */
 const getDependencyGraph = async (req, res) => {
-  // TODO: Sprint 2 — query graph_nodes + graph_edges for req.params.repoId
-  res.status(501).json({ error: 'Not implemented' });
+  try {
+    const overview = await graphService.getGraphOverview(req.params.repoId);
+    res.json(overview);
+  } catch (err) {
+    console.error('[getDependencyGraph]', err);
+    res.status(500).json({ error: 'Failed to fetch graph overview' });
+  }
 };
 
 /** GET /api/analysis/:repoId/metrics — per-file complexity metrics */
 const getMetrics = async (req, res) => {
-  // TODO: Sprint 3 — aggregate complexity_score, incoming_count, outgoing_count
-  res.status(501).json({ error: 'Not implemented' });
+  const { repoId } = req.params;
+  const { data, error } = await supabaseAdmin
+    .from('graph_nodes')
+    .select('file_path, language, line_count, complexity_score, incoming_count, outgoing_count, node_classification, is_test_file')
+    .eq('repo_id', repoId)
+    .range(0, SAFE_FETCH_CEILING - 1);
+  if (error) return res.status(500).json({ error: error.message });
+  warnIfCeilingHit('analysisController.getMetrics', data);
+  res.json(data);
 };
 
 /** GET /api/analysis/:repoId/issues — architectural issues (circular deps, god files, etc.) */
@@ -56,8 +69,14 @@ const suppressIssue = async (req, res) => {
 
 /** GET /api/analysis/:repoId/impact/:filePath — blast-radius BFS from a file */
 const getImpact = async (req, res) => {
-  // TODO: Sprint 4 — BFS/DFS over graph_edges to compute downstream dependents
-  res.status(501).json({ error: 'Not implemented' });
+  try {
+    const { repoId, filePath } = req.params;
+    const result = await graphService.getBlastRadius(repoId, filePath);
+    res.json(result);
+  } catch (err) {
+    console.error('[getImpact]', err);
+    res.status(500).json({ error: 'Failed to compute blast radius' });
+  }
 };
 
 module.exports = { getDependencyGraph, getMetrics, getIssues, suppressIssue, getImpact };
