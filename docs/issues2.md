@@ -1,6 +1,6 @@
 # CodeLens — Next Issues: PR Review, CI, Notifications, Risk, Trends, Dep Auto-PR, Onboarding
 
-These stories extend `issues.md` with the next wave of epics. They focus on closing the gap between CodeLens's analysis core and where developers actually work — pull requests, CI, notifications, and dashboards that show change over time. Numbering continues from US-070.
+These stories extend `issues.md` with the next wave of epics. They focus on closing the gap between CodeLens's analysis core and where developers actually work — pull requests, CI, notifications, and dashboards that show change over time. Numbering continues from US-071.
 
 Build order rationale: **PR Review** ships first because it's the highest-leverage product surface and reuses everything that already exists (Octokit, Vault tokens, branch/diff endpoint, scanners, suppression model). **CI Check** rides alongside it since it's a thin wrapper over the same endpoints. **Notifications** and **Risk Prioritization** then turn CodeLens from a place developers visit into a tool that surfaces signal to them. **Trends** and **Dep Auto-PR** land last because they're enhancements rather than foundations. **Onboarding** is small polish that can slot in anywhere.
 
@@ -12,7 +12,7 @@ A pull-request review surface that runs CodeLens's existing deterministic scanne
 
 ---
 
-### US-071: PR review persistence schema
+### US-072: PR review persistence schema
 
 **Labels:** `epic/pr-review` `database`
 **Milestone:** Sprint 16 — Weeks 31–32
@@ -43,7 +43,7 @@ A pull-request review surface that runs CodeLens's existing deterministic scanne
 
 ---
 
-### US-072: PR review analysis pipeline
+### US-073: PR review analysis pipeline
 
 **Labels:** `epic/pr-review` `epic/ai`
 **Milestone:** Sprint 16 — Weeks 31–32
@@ -82,7 +82,7 @@ A pull-request review surface that runs CodeLens's existing deterministic scanne
 
 ---
 
-### US-073: Post PR findings as GitHub comments
+### US-074: Post PR findings as GitHub comments
 
 **Labels:** `epic/pr-review` `epic/infra`
 **Milestone:** Sprint 16 — Weeks 31–32
@@ -119,7 +119,7 @@ A pull-request review surface that runs CodeLens's existing deterministic scanne
 
 ---
 
-### US-074: PR review viewer UI in CodeLens
+### US-075: PR review viewer UI in CodeLens
 
 **Labels:** `epic/pr-review` `epic/dashboard`
 **Milestone:** Sprint 16 — Weeks 31–32
@@ -163,7 +163,7 @@ A GitHub Action that calls CodeLens's PR review endpoints from inside CI and rep
 
 ---
 
-### US-075: GitHub Action and PR status check
+### US-076: GitHub Action and PR status check
 
 **Labels:** `epic/pr-review` `epic/infra`
 **Milestone:** Sprint 16 — Weeks 31–32
@@ -205,7 +205,7 @@ Surfaces signal to users without making them open the app. In-app feed first (fr
 
 ---
 
-### US-076: Notification schema, event emission, and in-app feed
+### US-077: Notification schema, event emission, and in-app feed
 
 **Labels:** `epic/notifications` `database` `epic/dashboard`
 **Milestone:** Sprint 17 — Weeks 33–34
@@ -253,7 +253,7 @@ Surfaces signal to users without making them open the app. In-app feed first (fr
 
 ---
 
-### US-077: Email digest and per-user preferences
+### US-078: Email digest and per-user preferences
 
 **Labels:** `epic/notifications` `epic/infra`
 **Milestone:** Sprint 17 — Weeks 33–34
@@ -296,7 +296,7 @@ CodeLens already computes severity, blast radius, churn, complexity, and incomin
 
 ---
 
-### US-078: Composite risk score and risk-sorted surfaces
+### US-079: Composite risk score and risk-sorted surfaces
 
 **Labels:** `epic/analytics` `epic/dashboard`
 **Milestone:** Sprint 17 — Weeks 33–34
@@ -351,7 +351,7 @@ The existing static onboarding guide is outdated. This story brings it current w
 
 ---
 
-### US-079: Finalize the static onboarding guide
+### US-080: Finalize the static onboarding guide
 
 **Labels:** `epic/dashboard` `documentation`
 **Milestone:** Sprint 17 — Weeks 33–34
@@ -400,7 +400,7 @@ Today every CodeLens screen is a snapshot. Snapshotting daily lets the product s
 
 ---
 
-### US-080: Daily metrics snapshot table and rollup job
+### US-081: Daily metrics snapshot table and rollup job
 
 **Labels:** `epic/analytics` `database`
 **Milestone:** Sprint 18 — Weeks 35–36
@@ -435,7 +435,7 @@ Today every CodeLens screen is a snapshot. Snapshotting daily lets the product s
 
 ---
 
-### US-081: Trends tab UI
+### US-082: Trends tab UI
 
 **Labels:** `epic/analytics` `epic/dashboard`
 **Milestone:** Sprint 18 — Weeks 35–36
@@ -478,7 +478,7 @@ Today the `vulnerable_dependency` propose_fix path generates a diff via Claude b
 
 ---
 
-### US-082: npm dependency-fixer service
+### US-083: npm dependency-fixer service
 
 **Labels:** `epic/refactor` `epic/security` `epic/infra`
 **Milestone:** Sprint 18 — Weeks 35–36
@@ -521,7 +521,7 @@ Today the `vulnerable_dependency` propose_fix path generates a diff via Claude b
 
 ---
 
-### US-083: Vulnerable-dependency proposals use auto-PR with batching
+### US-084: Vulnerable-dependency proposals use auto-PR with batching
 
 **Labels:** `epic/refactor` `epic/security`
 **Milestone:** Sprint 18 — Weeks 35–36
