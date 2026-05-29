@@ -8,8 +8,81 @@ const MAX_ZOOM = 4;
 // CPU spend at first paint.
 const PRETICK_FULL = 140;
 const PRETICK_CLUSTERED = 100;
+// Seed the simulation's PRNG so the layout is reproducible. D3's default
+// random source is Math.random, which means coincident initial positions
+// (every node starts at the canvas centre) get jittered apart differently
+// on every mount — making the graph drift after tab switches, hotspot/
+// coverage toggles, and even simple re-renders. d3.randomLcg(seed) gives
+// a deterministic stream; same nodes/edges → same layout, every time.
+const LAYOUT_SEED = 0.4242;
+// sessionStorage cache for converged node positions. Re-mounts (tab
+// switches, cluster ↔ flat transitions) skip the 100-140 tick pretick when
+// the same topology has been computed before in this tab.
+const LAYOUT_CACHE_PREFIX = 'codelens:graph-layout:';
+const LAYOUT_CACHE_MAX_ENTRIES = 10;
 const TOUR_VIOLET = '#a78bfa';
 const TOUR_VIOLET_RGBA = 'rgba(167, 139, 250, 0.95)';
+
+/**
+ * Stable fast hash of the sorted graphId list, scoped to the current canvas
+ * dimensions. The topology key drops cluster-mode and flat-mode into
+ * separate cache slots automatically (because the graphIds differ — cluster
+ * nodes use `cluster:<dir>` IDs) and forces a recompute when the canvas
+ * resizes (otherwise positions cached at width=1200 would render off-centre
+ * at width=1600 because we skip the pretick on cache hit). Dimensions are
+ * bucketed to 40px so trivial ResizeObserver jitter doesn't invalidate.
+ */
+function topologyKey(graphNodes, width, height) {
+  let h = 5381;
+  const ids = graphNodes.map((n) => n.graphId).sort();
+  for (const id of ids) {
+    for (let i = 0; i < id.length; i += 1) {
+      h = ((h << 5) + h + id.charCodeAt(i)) | 0;
+    }
+    h = (h + 0x9e3779b1) | 0;
+  }
+  const wBucket = Math.round((width || 0) / 40);
+  const hBucket = Math.round((height || 0) / 40);
+  return `${ids.length}:${(h >>> 0).toString(36)}:${wBucket}x${hBucket}`;
+}
+
+function loadLayoutFromCache(key) {
+  try {
+    const raw = sessionStorage.getItem(LAYOUT_CACHE_PREFIX + key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && parsed.positions ? parsed.positions : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveLayoutToCache(key, positions) {
+  try {
+    sessionStorage.setItem(
+      LAYOUT_CACHE_PREFIX + key,
+      JSON.stringify({ positions, savedAt: Date.now() }),
+    );
+    // FIFO eviction: scan our prefix, drop oldest if we exceed the cap.
+    const ours = [];
+    for (let i = 0; i < sessionStorage.length; i += 1) {
+      const k = sessionStorage.key(i);
+      if (k && k.startsWith(LAYOUT_CACHE_PREFIX)) ours.push(k);
+    }
+    if (ours.length > LAYOUT_CACHE_MAX_ENTRIES) {
+      const oldest = ours
+        .map((k) => {
+          try { return { k, savedAt: JSON.parse(sessionStorage.getItem(k) || '{}').savedAt || 0 }; }
+          catch { return { k, savedAt: 0 }; }
+        })
+        .sort((a, b) => a.savedAt - b.savedAt)
+        .slice(0, ours.length - LAYOUT_CACHE_MAX_ENTRIES);
+      for (const { k } of oldest) sessionStorage.removeItem(k);
+    }
+  } catch {
+    // QuotaExceeded or sessionStorage disabled — skip caching silently.
+  }
+}
 
 function getNodeAtPoint(nodes, point) {
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
@@ -64,6 +137,19 @@ export function useGraphSimulation({
   const canvasTransformRef = useRef(d3.zoomIdentity);
   const resetViewRef = useRef(() => {});
   const tourPulseRef = useRef({ activeStepIndex: null, startedAt: 0 });
+
+  // Pan-on-focus is for *external* navigation (tour step, search next match,
+  // cross-tab "open in graph" deep-link) — NOT for clicking a node on the
+  // canvas, since the user already aimed at it. We track:
+  //   userClickedNodeRef — set in the canvas/SVG click handlers right before
+  //     dispatching onNodeClick. The next draw effect run sees focusNodeId
+  //     match this ref and SKIPS the pan.
+  //   lastFocusRef — graphId of the node we last panned the camera to.
+  //     Prevents re-panning on draw-effect re-runs that fire for unrelated
+  //     reasons (Coverage/Hotspot toggle, impact-analysis fetch resolving,
+  //     attack-surface mode change…) while focusNodeId is unchanged.
+  const userClickedNodeRef = useRef(null);
+  const lastFocusRef = useRef(null);
 
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [isGraphVisible, setIsGraphVisible] = useState(true);
@@ -129,14 +215,16 @@ export function useGraphSimulation({
     return () => observer.disconnect();
   }, [containerRef]);
 
+  // Visibility tracking remains so future drag/animation features can opt in,
+  // but we intentionally do NOT call `alphaTarget(0.3).restart()` here. The
+  // pretick loop below produces the final settled layout; restarting would
+  // (a) preserve residual velocities → cumulative drift across remounts (the
+  // clockwise rotation users saw when spam-clicking Coverage/Hotspots), and
+  // (b) keep the simulation forever ticking with no benefit because no drag
+  // handlers consume alpha.
   useEffect(() => {
     if (!simulation) return;
-
-    if (isGraphVisible) {
-      simulation.alphaTarget(0.3).restart(); // resume
-    } else {
-      simulation.alphaTarget(0); // pause
-    }
+    simulation.stop();
   }, [isGraphVisible, simulation]);
 
   const layoutCacheRef = useRef(null);
@@ -157,17 +245,26 @@ export function useGraphSimulation({
       return undefined;
     }
 
-    const localNodes = nodes.map((node) => ({
-      ...node,
-      x: width / 2,
-      y: height / 2,
-    }));
+    // Topology cache hit? Seed positions from sessionStorage and skip pretick.
+    // Same topology AND canvas dimensions in the same tab → instant layout.
+    const cacheKey = topologyKey(nodes, width, height);
+    const cached = loadLayoutFromCache(cacheKey);
+
+    const localNodes = nodes.map((node) => {
+      const fromCache = cached?.[node.graphId];
+      return {
+        ...node,
+        x: fromCache ? fromCache[0] : width / 2,
+        y: fromCache ? fromCache[1] : height / 2,
+      };
+    });
     const localLinks = edges.map((edge) => ({ ...edge }));
     const maxIncoming = Math.max(1, ...nodes.map((n) => n.incoming_count || 0));
 
     const pretickCount = nodes.length < 100 ? PRETICK_CLUSTERED : PRETICK_FULL;
 
     const simulation = d3.forceSimulation(localNodes)
+      .randomSource(d3.randomLcg(LAYOUT_SEED))
       .force('link', d3.forceLink(localLinks).id((node) => node.graphId).distance((link) => {
         const targetRadius = typeof link.target === 'object' ? link.target.radius : 14;
         return Math.max(40, 50 + targetRadius);
@@ -179,8 +276,35 @@ export function useGraphSimulation({
       ;
     setSimulation(simulation);
 
-    for (let tick = 0; tick < pretickCount; tick += 1) {
-      simulation.tick();
+    // Pretick only on cache miss. On hit, positions are already seeded above
+    // and D3 resolves link source/target string IDs at force-registration time,
+    // so the draw effect can use the cached positions immediately.
+    if (!cached) {
+      for (let tick = 0; tick < pretickCount; tick += 1) {
+        simulation.tick();
+      }
+    }
+
+    // Critical: zero out residual velocities and halt the simulation. Without
+    // this the visibility/topology effects below would call .restart() on a
+    // sim whose nodes still have vx/vy from the last pretick — those forces
+    // would continue to act, producing the cumulative clockwise drift users
+    // saw when spam-clicking Coverage/Hotspots. With velocities zeroed and
+    // the sim stopped, the layout is frozen at its pretick equilibrium.
+    for (const n of localNodes) {
+      n.vx = 0;
+      n.vy = 0;
+    }
+    simulation.stop();
+
+    // Persist the converged positions for future re-mounts of the same
+    // topology. Cheap — N nodes × 2 floats, < 50 KB for typical repos.
+    if (!cached) {
+      const positions = {};
+      for (const n of localNodes) {
+        positions[n.graphId] = [Math.round(n.x * 100) / 100, Math.round(n.y * 100) / 100];
+      }
+      saveLayoutToCache(cacheKey, positions);
     }
 
     layoutCacheRef.current = {
@@ -578,14 +702,30 @@ export function useGraphSimulation({
       };
 
       if (focusNode) {
-        const currentTransform = canvasTransformRef.current || d3.zoomIdentity;
-        const scale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, currentTransform.k || 1));
-        const nextTransform = d3.zoomIdentity
-          .translate(width / 2, height / 2)
-          .scale(scale)
-          .translate(-focusNode.x, -focusNode.y);
-        const target = isTourActive ? canvasSelection.transition().duration(600) : canvasSelection;
-        target.call(zoomBehavior.transform, nextTransform);
+        const wasUserCanvasClick = userClickedNodeRef.current === focusNode.graphId;
+        const isFocusChange = lastFocusRef.current !== focusNode.graphId;
+        const shouldPan = isFocusChange && !wasUserCanvasClick;
+
+        if (shouldPan) {
+          const currentTransform = canvasTransformRef.current || d3.zoomIdentity;
+          const scale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, currentTransform.k || 1));
+          const nextTransform = d3.zoomIdentity
+            .translate(width / 2, height / 2)
+            .scale(scale)
+            .translate(-focusNode.x, -focusNode.y);
+          // Always animate. Tour gets a slower glide; everything else gets a
+          // quick ease so the camera move is perceived, not snapped.
+          const duration = isTourActive ? 600 : 280;
+          canvasSelection.transition().duration(duration).ease(d3.easeCubicOut)
+            .call(zoomBehavior.transform, nextTransform);
+        } else if (canvasTransformRef.current) {
+          // No pan: preserve the user's current camera position. Re-applying
+          // the same transform here keeps the zoom behaviour's internal state
+          // consistent across draw-effect re-runs.
+          canvasSelection.call(zoomBehavior.transform, canvasTransformRef.current);
+        }
+        lastFocusRef.current = focusNode.graphId;
+        if (wasUserCanvasClick) userClickedNodeRef.current = null;
       } else if (!canvasTransformRef.current || canvasTransformRef.current === d3.zoomIdentity) {
         const xs = localNodes.map((n) => n.x);
         const ys = localNodes.map((n) => n.y);
@@ -602,8 +742,10 @@ export function useGraphSimulation({
         const fitTransform = d3.zoomIdentity.translate(width / 2, height / 2).scale(scale).translate(-midX, -midY);
         canvasTransformRef.current = fitTransform;
         canvasSelection.call(zoomBehavior.transform, fitTransform);
+        lastFocusRef.current = null;
       } else {
         canvasSelection.call(zoomBehavior.transform, canvasTransformRef.current);
+        lastFocusRef.current = null;
       }
 
       if (hasFlowEdges || isTourPulseActive()) {
@@ -631,6 +773,10 @@ export function useGraphSimulation({
           return;
         }
 
+        // Mark this so the focus-pan block (below, in the same draw effect
+        // cycle) knows the upcoming focusNodeId change came from a canvas
+        // click, not external navigation — and therefore suppresses the pan.
+        userClickedNodeRef.current = hitNode.graphId;
         onNodeClick(hitNode);
         lastClickedNodeId = hitNode.graphId;
         lastClickAt = now;
@@ -848,6 +994,9 @@ export function useGraphSimulation({
     const nodeSelection = nodeGroups;
 
     nodeSelection.on('click', (_event, node) => {
+      // See userClickedNodeRef comment at the top of the hook — this
+      // suppresses the focus-pan when the user clicks a node directly.
+      userClickedNodeRef.current = node.graphId;
       onNodeClick(node);
     });
 
@@ -880,14 +1029,22 @@ export function useGraphSimulation({
     };
 
     if (focusNode) {
-      const currentTransform = d3.zoomTransform(svg.node()) || d3.zoomIdentity;
-      const scale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, currentTransform.k || 1));
-      const nextTransform = d3.zoomIdentity
-        .translate(width / 2, height / 2)
-        .scale(scale)
-        .translate(-focusNode.x, -focusNode.y);
-      const target = isTourActive ? svg.transition().duration(600) : svg;
-      target.call(zoomBehavior.transform, nextTransform);
+      const wasUserCanvasClick = userClickedNodeRef.current === focusNode.graphId;
+      const isFocusChange = lastFocusRef.current !== focusNode.graphId;
+      const shouldPan = isFocusChange && !wasUserCanvasClick;
+      if (shouldPan) {
+        const currentTransform = d3.zoomTransform(svg.node()) || d3.zoomIdentity;
+        const scale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, currentTransform.k || 1));
+        const nextTransform = d3.zoomIdentity
+          .translate(width / 2, height / 2)
+          .scale(scale)
+          .translate(-focusNode.x, -focusNode.y);
+        const duration = isTourActive ? 600 : 280;
+        svg.transition().duration(duration).ease(d3.easeCubicOut)
+          .call(zoomBehavior.transform, nextTransform);
+      }
+      lastFocusRef.current = focusNode.graphId;
+      if (wasUserCanvasClick) userClickedNodeRef.current = null;
     } else {
       const xs = localNodes.map((n) => n.x);
       const ys = localNodes.map((n) => n.y);
@@ -909,6 +1066,7 @@ export function useGraphSimulation({
         .scale(scale)
         .translate(-midX, -midY);
       svg.call(zoomBehavior.transform, fitTransform);
+      lastFocusRef.current = null;
     }
 
     return () => {

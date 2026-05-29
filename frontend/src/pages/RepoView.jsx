@@ -11,7 +11,7 @@ import { RefreshCw, ArrowLeft, Home, GitCompare } from '../components/ui/Icons';
 import ArchDiffModal        from '../components/ArchDiffModal';
 
 const DependencyGraph      = lazy(() => import('../components/DependencyGraph'));
-const SearchPanel          = lazy(() => import('../components/SearchPanel'));
+const AgentPanel           = lazy(() => import('../components/AgentPanel'));
 const CodeReviewPanel      = lazy(() => import('../components/CodeReviewPanel'));
 const FileChatPanel        = lazy(() => import('../components/FileChatPanel'));
 const FileBrowser          = lazy(() => import('../components/FileBrowser'));
@@ -64,45 +64,26 @@ function getTourKey(tour) {
   return `${title}:${stepKey}`;
 }
 
-function buildImpactAnalysis(sourcePath, nodes, edges) {
-  if (!sourcePath) return null;
-
+/**
+ * Resolve a server-side blast-radius response into the panel/overlay shape.
+ * Server returns `{ direct: file_path[], transitive: file_path[] }` already
+ * disjoint (US-068 graphService.getBlastRadius). We resolve graph IDs from
+ * the in-memory node list for the highlight overlay.
+ *
+ * The response carries the source path it was fetched for; if it doesn't
+ * match the currently-selected path we return null. Without this guard,
+ * spam-clicking files could flash a previous file's blast radius under the
+ * new file's name when responses arrive out of order.
+ */
+function deriveImpactAnalysis(sourcePath, response, nodes) {
+  if (!sourcePath || !response) return null;
+  if (response.sourcePath && response.sourcePath !== sourcePath) return null;
   const nodeByPath = new Map(nodes.map((node) => [node.file_path, node]));
   const sourceNode = nodeByPath.get(sourcePath);
   if (!sourceNode) return null;
-
-  const reverseAdjacency = new Map();
-  edges.forEach((edge) => {
-    if (!edge.from_path || !edge.to_path) return;
-    if (!reverseAdjacency.has(edge.to_path)) {
-      reverseAdjacency.set(edge.to_path, new Set());
-    }
-    reverseAdjacency.get(edge.to_path).add(edge.from_path);
-  });
-
-  const visited = new Set([sourcePath]);
-  const queue = [{ path: sourcePath, depth: 0 }];
-  const direct = [];
-  const transitive = [];
-
-  while (queue.length > 0) {
-    const current = queue.shift();
-    const dependents = reverseAdjacency.get(current.path) || new Set();
-
-    dependents.forEach((dependentPath) => {
-      if (visited.has(dependentPath)) return;
-      visited.add(dependentPath);
-
-      const nextDepth = current.depth + 1;
-      if (nextDepth === 1) direct.push(dependentPath);
-      else transitive.push(dependentPath);
-
-      queue.push({ path: dependentPath, depth: nextDepth });
-    });
-  }
-
+  const direct = response.direct || [];
+  const transitive = response.transitive || [];
   const getGraphId = (path) => nodeByPath.get(path)?.id || path;
-
   return {
     sourceId: sourceNode.id || sourceNode.file_path,
     sourcePath: sourceNode.file_path,
@@ -169,9 +150,49 @@ export default function RepoView() {
     return analysisData.nodes.find((node) => (node.id || node.file_path) === selectedNodeId) || null;
   }, [analysisData.nodes, selectedNodeId]);
 
+  // Blast-radius is now computed server-side via /api/analysis/:repoId/impact/:filePath
+  // (a single source of truth shared with the agent's get_blast_radius tool — see
+  // backend/src/services/graphService.js::getBlastRadius). We fetch on path change
+  // and derive the panel/overlay shape from the response.
+  const [impactResponse, setImpactResponse] = useState(null);
+  useEffect(() => {
+    if (!impactSourcePath || !session?.access_token) {
+      setImpactResponse(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    const requestedPath = impactSourcePath;
+    (async () => {
+      try {
+        const res = await fetch(
+          apiUrl(`/api/analysis/${repoId}/impact/${encodeURIComponent(requestedPath)}`),
+          {
+            headers: { Authorization: `Bearer ${session.access_token}` },
+            signal: controller.signal,
+          },
+        );
+        if (!res.ok) {
+          setImpactResponse({ sourcePath: requestedPath, direct: [], transitive: [] });
+          return;
+        }
+        const data = await res.json();
+        setImpactResponse({
+          sourcePath: requestedPath,
+          direct: data.direct || [],
+          transitive: data.transitive || [],
+        });
+      } catch (err) {
+        if (err.name !== 'AbortError') {
+          setImpactResponse({ sourcePath: requestedPath, direct: [], transitive: [] });
+        }
+      }
+    })();
+    return () => controller.abort();
+  }, [impactSourcePath, repoId, session?.access_token]);
+
   const impactAnalysis = useMemo(
-    () => buildImpactAnalysis(impactSourcePath, analysisData.nodes, analysisData.edges),
-    [analysisData.edges, analysisData.nodes, impactSourcePath]
+    () => deriveImpactAnalysis(impactSourcePath, impactResponse, analysisData.nodes),
+    [analysisData.nodes, impactResponse, impactSourcePath],
   );
 
   const tourMode = useMemo(() => {
@@ -526,6 +547,14 @@ export default function RepoView() {
     }, { replace: true });
   }, [setSearchParams]);
 
+  const handleSwitchTab = useCallback((tab) => {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.set('tab', tab);
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
+
   const handleAuditFile = useCallback(async (filePath) => {
     if (!session?.access_token || !filePath) return;
     try {
@@ -775,8 +804,8 @@ export default function RepoView() {
                 />
               </div>
 
-              <div className={activeTab === 'search' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
-                <SearchPanel repoId={repoId} />
+              <div className={activeTab === 'agent' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
+                <AgentPanel repoId={repoId} onOpenFile={handleOpenFile} onSwitchTab={handleSwitchTab} />
               </div>
 
               <div className={activeTab === 'tours' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
