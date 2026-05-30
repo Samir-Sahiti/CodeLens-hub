@@ -7,6 +7,9 @@ CodeLens is a full-stack web app that helps developers understand large, unfamil
 - Architectural issue detection (circular deps, god files, dead code, high coupling)
 - Security scanning: secret detection, SAST pattern matching, dependency vulnerability scanning, attack surface mapping, auth coverage checking
 - AI security audit mode with whole-repo auditing and structured findings
+- **PR review workflow** — deterministic scanners + blast radius run on a PR diff, persisted, viewable in-app, and posted back as inline GitHub review comments (US-072–US-075)
+- **CI status check** — a GitHub Action + per-repo CI API token that runs the PR review from CI and reports a pass/fail check (US-076)
+- **In-app notifications** — bell + feed for index/issue/vulnerability/PR-review/tour events, with 30-day dedup (US-077)
 - **AI refactor proposals** with one-click "Apply via PR" producing a draft GitHub PR in a single commit (US-063–US-066)
 - AI-generated code tours / guided walkthroughs (US-060, US-061), with fork + share-impact
 - Duplicate-code clustering + AI shared-utility refactor suggestion
@@ -78,12 +81,16 @@ CodeLens-hub/
 │   │   ├── DependencyGraph.jsx       # D3 graph + attack surface overlay (US-047)
 │   │   ├── CodeReviewPanel.jsx       # AI review + security audit mode (US-048)
 │   │   ├── IssuesPanel.jsx           # All issue types + duplication + "PR opened" badges (US-066)
+│   │   ├── IssueCard.jsx             # Shared issue/finding card (reused by Issues + PR review — US-075)
 │   │   ├── ProposalPanel.jsx         # AI refactor proposal review + Apply via PR (US-065, US-066)
+│   │   ├── PullRequestsPanel.jsx     # PR review viewer: list + full-page detail + findings (US-075)
+│   │   ├── NotificationBell.jsx      # Sidebar bell + dropdown feed; exports shared type meta (US-077)
+│   │   ├── SettingsPanel.jsx         # Auto-sync, auto-publish, PR-review severity, CI token gen (US-073/076)
 │   │   ├── ImpactAnalysisPanel.jsx   # Blast-radius panel
 │   │   ├── MetricsPanel.jsx
 │   │   ├── AgentPanel.jsx            # AI Repo Agent chat + tool-call cards + history rail (US-070, US-071)
 │   │   └── ui/                       # Primitives, Icons (lucide-react re-exports), Toast
-│   ├── pages/              # Login, AuthCallback, Dashboard, RepoView, Search
+│   ├── pages/              # Login, AuthCallback, Dashboard, RepoView, NotificationsPage (US-077)
 │   ├── context/            # AuthContext
 │   ├── hooks/
 │   │   └── useGraphSimulation.js     # D3 physics + visual modes (selection/impact/attack surface)
@@ -91,16 +98,18 @@ CodeLens-hub/
 │
 ├── backend/src/
 │   ├── index.js            # Express setup + all route mounting + global token-redacting console
-│   ├── routes/             # auth, repo, search, analysis, review, webhooks, teams, fileChat, usage, admin, tours, agent
+│   ├── routes/             # auth, repo, search, analysis, review, reviews, webhooks, teams, fileChat, usage, admin, tours, agent, notifications
 │   ├── controllers/        # Request handlers
 │   │   ├── analysisController.js     # Issues, suppress, impact
-│   │   ├── reviewController.js       # AI review + security audit + refactor proposals + apply-via-PR (US-048, US-064–US-066)
+│   │   ├── reviewController.js       # AI review + security audit + refactor proposals + apply-via-PR + PR review pipeline/publish/ci-check (US-048, US-064–US-066, US-072–US-076)
 │   │   ├── repoController.js         # Connect, upload, status, reindex, churn, duplication, branches, diff, dependencies
+│   │   ├── ciTokenController.js      # Per-repo CI API token generate/list/revoke (US-076)
+│   │   ├── notificationsController.js # In-app notification feed endpoints (US-077)
 │   │   ├── teamController.js         # Team CRUD + repo sharing
 │   │   ├── fileChatController.js     # Per-file AI chat
-│   │   ├── toursController.js        # Code-tour generation/edit/fork (US-060, US-061)
+│   │   ├── toursController.js        # Code-tour generation/edit/fork + tour_shared notify (US-060, US-061, US-077)
 │   │   ├── usageController.js        # /api/usage/today
-│   │   ├── webhookController.js      # GitHub push → auto-reindex
+│   │   ├── webhookController.js      # GitHub push → auto-reindex (gated on auto_sync_enabled); pull_request → PR review (US-073)
 │   │   ├── authController.js         # GitHub OAuth handshake
 │   │   ├── agentController.js        # AI Repo Agent tool-use loop + history (US-069 – US-071)
 │   │   └── searchController.js       # RAG search
@@ -122,7 +131,9 @@ CodeLens-hub/
 │   │   ├── graphService.js           # BFS/DFS over graph_edges + Tarjan cycle count (US-068)
 │   │   ├── fileService.js            # Indexed file read (file_contents + code_chunks fallback)
 │   │   ├── agentTools.js             # Anthropic-schema tools + handlers for the agent (US-068)
-│   │   ├── queue.js                  # Indexing job queue
+│   │   ├── notificationEvents.js     # In-process EventEmitter (pr_review.ready) — test-observable (US-073)
+│   │   ├── notifications.js          # enqueueNotification (30-day dedup) + recipientsForRepo (US-077)
+│   │   ├── queue.js                  # Indexing + pr-review job queue
 │   │   └── usageTracker.js           # Daily token budget (US-042)
 │   ├── sast/
 │   │   ├── secret-rules.json         # Regex rules for secret scanning
@@ -134,7 +145,10 @@ CodeLens-hub/
 │   ├── observability/      # AsyncLocalStorage request ledger (Phase 0)
 │   ├── ai/                 # ragService.js (RAG pipeline)
 │   ├── db/                 # Supabase admin client (instrumented fetch)
-│   └── middleware/         # Auth, error handling, AI rate limiting
+│   └── middleware/         # Auth (requireAuth), ciTokenAuth (US-076), error handling, AI rate limiting
+│
+├── .github/actions/codelens-review/   # Zero-dep Node 20 GitHub Action for CI status check (US-076)
+├── docs/ci-integration.md             # CI integration guide + copy-paste workflow YAML (US-076)
 │
 ├── scripts/
 │   ├── setup.sh                              # Idempotent bootstrap
@@ -180,6 +194,18 @@ CodeLens-hub/
 | `PATCH` | `/api/review/:id/issues/:issueId/proposals/:proposalId` | Update proposal status (discard) |
 | `GET` | `/api/review/:id/proposals/summary` | Latest proposal per issue for IssueCard badges (US-066) |
 | `POST` | `/api/review/:id/proposals/:proposalId/apply` | Apply a proposal as a GitHub draft PR via single-commit Git Data API (US-066) |
+| `POST` | `/api/review/:id/pr-findings/proposals` | SSE: AI fix proposal for a PR-review finding (US-075) |
+| `PATCH` | `/api/review/:id/pr-findings/proposals/:proposalId` | Update PR-finding proposal status (discard) (US-075) |
+| `POST` | `/api/review/:id/pr-findings/proposals/:proposalId/apply` | Apply a PR-finding proposal as a draft PR (US-075) |
+| `GET` | `/api/repos/:id/pulls` | List PRs (Octokit) with their latest review (US-075) |
+| `GET\|POST` | `/api/repos/:id/pulls/:number/reviews` | List PR review history / run a deterministic PR review (SSE) (US-073) |
+| `POST` | `/api/repos/:id/pulls/:number/reviews/ci-check` | CI-token-auth: blocks until review ready, returns pass/fail (US-076) |
+| `POST` | `/api/repos/:id/reviews/:reviewId/publish` | Post the review to GitHub as inline comments (US-074) |
+| `GET` | `/api/reviews/:reviewId` | Full PR review detail incl. stale-index banner data (US-075) |
+| `POST\|GET\|DELETE` | `/api/repos/:id/ci-tokens[/:tokenId]` | Generate (once) / list / revoke per-repo CI API tokens (US-076) |
+| `GET` | `/api/notifications` | Cursor-paginated feed `?limit&before` (US-077) |
+| `GET` | `/api/notifications/unread-count` | Unread badge count (US-077) |
+| `POST` | `/api/notifications/:id/read` \| `/api/notifications/mark-all-read` | Mark one / all read (US-077) |
 | `POST` | `/api/file-chat/:id` | Per-file AI chat |
 | `POST` | `/api/repos/:id/agent/chat` | SSE: AI Repo Agent tool-use loop (US-069). Body `{ conversation_id?, message }` |
 | `GET` | `/api/repos/:id/agent/conversations` | Paginated conversation list (US-071) |
@@ -188,7 +214,7 @@ CodeLens-hub/
 | `*` | `/api/tours/*` | Generate/list/update/fork/delete AI-authored code tours (US-060, US-061) |
 | `*` | `/api/teams/*` | Create teams, add repos to teams, list team repos |
 | `GET` | `/api/usage/today` | Today's per-user token usage (US-042) |
-| `POST` | `/api/webhooks/github` | GitHub push webhook → auto-reindex when `auto_sync_enabled` is set |
+| `POST` | `/api/webhooks/github` | GitHub webhook → push auto-reindex (when `auto_sync_enabled`); `pull_request` → PR review (when `pr_review_enabled`) |
 | `*` | `/api/admin/*` | Internal/ops endpoints |
 
 ---
@@ -197,7 +223,7 @@ CodeLens-hub/
 
 Tables (all with RLS):
 - `profiles` — user metadata + `github_token_secret_id` (UUID referencing Supabase Vault; tokens never stored plaintext — US-039)
-- `repositories` — connected repos: `status` (`pending | indexing | ready | failed`), `full_name` (`owner/repo`), `default_branch`, `source` (`github | upload`), `auto_sync_enabled`, `sast_disabled_rules TEXT[]` for per-repo SAST rule opt-outs (US-046), `webhook_secret`
+- `repositories` — connected repos: `status` (`pending | indexing | ready | failed`), `full_name` (`owner/repo`), `default_branch`, `source` (`github | upload`), `auto_sync_enabled`, `sast_disabled_rules TEXT[]` for per-repo SAST rule opt-outs (US-046), `webhook_secret`, `latest_indexed_sha` (drives PR-review stale-index banner), and PR-review flags `pr_review_enabled` / `pr_review_auto_publish` / `pr_review_block_on_severity` (`critical | high`) (US-073/074)
 - `graph_nodes` — files with metrics: `line_count`, `complexity_score` (true cyclomatic via Tree-sitter), `incoming_count`, `outgoing_count`, `content_hash`, `node_classification` (`source | sink | both | null` — US-047)
 - `graph_edges` — dependency edges (`from_path → to_path`); `symbols TEXT[]` carries per-importer symbol list (US-064)
 - `code_chunks` — chunked source with 1536-dim pgvector embeddings (HNSW index m=16, ef_construction=64)
@@ -216,8 +242,13 @@ Tables (all with RLS):
 - `teams`, `team_members`, `team_repositories` — team-based repo sharing; access checks centralised in the `can_access_repo(repo_id, user_id)` Postgres RPC
 - `agent_conversations` — AI Repo Agent chats (US-067): `{ id, repo_id, user_id, title, total_tokens, created_at, updated_at }`. `title` is auto-generated by a one-shot Haiku call after the first assistant turn.
 - `agent_messages` — full tool-call trace for the agent (US-067). `role` enum `user | assistant | tool_use | tool_result`; `content_json` is polymorphic by role (`{ text }` for user/assistant, `{ tool_name, input, tool_use_id }` for tool_use, `{ tool_use_id, output, is_error }` for tool_result). `tool_use_id` matches Anthropic's protocol id so traces replay verbatim.
+- `pr_reviews` — per-PR-head deterministic review (US-072): `{ id, repo_id, pr_number, pr_head_sha, pr_base_sha, user_id, status (pending|analyzing|ready|failed|stale), findings_json, summary, total_findings, severity_counts }`. Unique `(repo_id, pr_number, pr_head_sha)`; a re-push marks the prior review `stale`. `findings_json` mirrors `analysis_issues` shape so `IssueCard` renders either source
+- `pr_review_comments` — GitHub comment ids for idempotent (re-)publishing (US-074): `{ review_id, github_comment_id, file_path, line_number, kind (inline|summary) }`
+- `pr_finding_proposals` — AI fix proposals for PR-review findings (US-075), mirrors `issue_proposals` but keyed by `(review_id, finding_id)`; `status`, `proposal_json`, `branch_name`, `pr_url`
+- `repo_api_tokens` — per-repo CI API tokens (US-076): `{ id, repo_id, token_hash, name, created_by, created_at, last_used_at, revoked_at }`. Stored as HMAC-SHA256(`CI_TOKEN_HMAC_SECRET`, token); plaintext shown once
+- `notifications` — in-app feed (US-077): `{ id, user_id, repo_id, type, severity (info|warning|critical), payload_json, link_url, read_at, created_at }`. `type` enum `new_critical_issue | new_vulnerability | index_ready | index_failed | pr_review_ready | proposal_shared | tour_shared | webhook_paused`. Indexes on `(user_id, read_at, created_at DESC)` and `(user_id, repo_id, type, created_at DESC)` (the latter powers 30-day dedup)
 
-**Schema migration:** `scripts/schema.sql` is idempotent and safe to re-run. Apply via Supabase SQL Editor. Auxiliary migrations applied separately on top: `us048_security_audits.sql`, `us051_arch_diff.sql`, `us063_proposals.sql`, `us067_agent.sql`, `perf_reindex_migration.sql`.
+**Schema migration:** `scripts/schema.sql` is idempotent and safe to re-run. Apply via Supabase SQL Editor. The PR-review (US-072), CI-token (US-076), and notifications (US-077) tables are appended to `scripts/schema.sql` directly. Auxiliary migrations applied separately on top: `us048_security_audits.sql`, `us051_arch_diff.sql`, `us063_proposals.sql`, `us067_agent.sql`, `perf_reindex_migration.sql`.
 
 **Indexer-side RPCs** (also in `scripts/schema.sql`):
 - `prepare_repo_reindex(repo_id, unchanged_paths, changed_or_deleted_paths, preserve_churn)` — single PL/pgSQL call that stale-marks pending proposals, deletes non-preservable issues (preserves `hardcoded_secret` / `insecure_pattern` / `missing_auth` whose `file_paths` are entirely in `unchanged_paths`), wipes derived tables, and partial-purges nodes/chunks/file_contents for changed-or-deleted files
@@ -241,6 +272,7 @@ FRONTEND_URL          # base URL used in CORS + as the deep-link host in Apply-v
 MAX_DAILY_TOKENS_PER_USER   # optional, default 500000 (US-042)
 AGENT_MAX_ITERATIONS        # max tool-use iterations per agent turn, default 15 (US-069)
 AGENT_TOKEN_CAP             # per-conversation cumulative token cap, default 50000 (US-069)
+CI_TOKEN_HMAC_SECRET        # server secret used to HMAC-hash per-repo CI API tokens (US-076)
 
 # Performance / observability knobs (all optional)
 SLOW_REQUEST_MS             # WARN threshold for the request-timing middleware, default 500
@@ -498,7 +530,41 @@ Every handler gates on `canAccessRepo(repoId, userId)` first (per-call — a cra
 
 - `POST /api/webhooks/github` runs before `express.json()` (mounted via `express.raw({ type: 'application/json' })`) so the HMAC signature validator sees the original request bytes.
 - Each repo has a `webhook_secret` generated via `GET /api/repos/:id/webhook`.
-- On `push` events for repos with `auto_sync_enabled = true`, the backend kicks an incremental re-index; the global Vault-stored PAT is reused for the GitHub fetch.
+- On `push` events for repos with `auto_sync_enabled = true`, the backend kicks an incremental re-index; the global Vault-stored PAT is reused for the GitHub fetch. (The repo lookup no longer filters on `auto_sync_enabled` — `pull_request` events have their own opt-in — so the push branch re-checks the flag explicitly before re-indexing.)
+- On `pull_request` events (`opened | synchronize | reopened`) for repos with `pr_review_enabled = true`, the backend enqueues a `pr-review` job (US-073).
+
+---
+
+## PR Review Workflow (US-072 – US-075)
+
+Deterministic-only review of a PR diff (no AI tokens in the pipeline), persisted and viewable in-app, optionally posted to GitHub as inline review comments.
+
+- **Pipeline** (`reviewController.runPrReviewBackground`): fetch the PR (Octokit), stale-mark prior reviews for the PR, upsert a `pr_reviews` row, cap to the 50 files with the most additions (emit `truncated`), then per file run secret scan (added lines), SAST (full new content, only findings on added lines AND absent from base), auth-coverage (new vs base), and SCA on changed manifests. Blast radius is attached from the most recent index. Findings are filtered against `issue_suppressions` and pre-PR `analysis_issues`, then written to `findings_json`. SSE events: `analyzing_file | finding | truncated | summary | done | error`.
+- **Triggers**: `POST /api/repos/:id/pulls/:number/reviews` (SSE, `requireAuth`) or the `pull_request` webhook → `pr-review` queue job.
+- **Publish (US-074)**: `POST /api/repos/:id/reviews/:reviewId/publish` posts a single `pulls.createReview` (`COMMENT`, or `REQUEST_CHANGES` per `pr_review_block_on_severity`); inline findings → per-line comments, file-level → summary body; comment ids saved to `pr_review_comments`. Idempotent across re-pushes (cleans prior comments) and re-publishes of the same review (`resetCurrentReviewComments`). On 422, out-of-diff comments are dropped and it retries once. Auto-publishes when `pr_review_auto_publish`. Errors mapped (401/403/404/422/5xx) with no raw GitHub text.
+- **Viewer (US-075)**: "Pull Requests" tab → `PullRequestsPanel` (list with status/severity, filters, 30s poll) → full-page detail (`GET /api/reviews/:reviewId`) reusing `IssueCard`, with "Generate fix" (`pr_finding_proposals`) and "Suppress". Stale-index banner when `latest_indexed_sha != pr_head_sha`.
+
+---
+
+## CI Status Check (US-076)
+
+A GitHub Action that runs the PR review from CI and reports a status check.
+
+- **Per-repo CI tokens**: `repo_api_tokens`, format `codelens_pat_<hex>`, stored as HMAC-SHA256(`CI_TOKEN_HMAC_SECRET`, token). Managed via `POST|GET|DELETE /api/repos/:id/ci-tokens[/:tokenId]` (`requireAuth` + `can_access_repo`); generated in Settings → CI Integration (shown once).
+- **`ciTokenAuth` middleware** (`requireCiToken`): resolves `Authorization: Bearer codelens_pat_...` to a single repo via indexed hash lookup, enforces it matches `:repoId`, bumps `last_used_at`.
+- **CI-check endpoint**: `POST /api/repos/:id/pulls/:number/reviews/ci-check` (CI-token auth) resolves the PR head SHA, reuses a `ready` review or **auto-triggers `runPrReviewBackground` and polls** until ready/timeout (default 300s, fail-closed), returns `{ status: 'pass'|'fail', severity_counts, summary_markdown, codelens_url }` based on `fail_on_severity` (default `critical,high`).
+- **Action**: zero-dependency Node 20 action at `.github/actions/codelens-review/` (`action.yml` + `index.js`) — POSTs to ci-check, writes a check run via the GitHub checks API. See `docs/ci-integration.md`.
+
+---
+
+## Notifications (US-077)
+
+In-app notification feed (no email/preferences — that's US-078).
+
+- **Service** `backend/src/services/notifications.js`: `enqueueNotification({ user_ids, repo_id, type, severity, payload, link_url, dedup_key })` inserts one row per recipient; `dedup_key` skips users notified for the same `(repo, type, key)` in the last 30 days (prevents re-index spam). `recipientsForRepo(repoId)` = owner ∪ team members.
+- **Emission** (all best-effort, wrapped in try/catch): indexer → `index_ready` (owner+team) / `index_failed` (owner) / per newly-surfaced critical-or-high issue → `new_critical_issue` or `new_vulnerability`; PR review → `pr_review_ready`; tour fork → `tour_shared` (original author). The legacy `notificationEvents.js` EventEmitter remains for test observability.
+- **Endpoints** (`/api/notifications`, `requireAuth`, all user-scoped): `GET /` (`?limit&before` cursor), `GET /unread-count`, `POST /:id/read`, `POST /mark-all-read`.
+- **Frontend**: `NotificationBell` in the `Layout` sidebar footer (60s badge poll, 30s dropdown poll, grouped by day, mark-all-read, click-outside) + `/notifications` full feed page (paginated 50). Shared type/severity meta + `notificationText` are exported from `NotificationBell.jsx`.
 
 ---
 

@@ -131,6 +131,13 @@ const handleGitHubPush = async (req, res) => {
     return res.status(200).json({ ok: true, skipped: 'push not to default branch' });
   }
 
+  // Auto-sync is opt-in per repo (US-028). Pushes only re-index when enabled.
+  // PR-review events above have their own opt-in (pr_review_enabled), which is
+  // why the repo lookup no longer filters on auto_sync_enabled.
+  if (!repo.auto_sync_enabled) {
+    return res.status(200).json({ ok: true, skipped: 'auto-sync disabled' });
+  }
+
   // Fire-and-forget re-index (US-028). For US-050, hand the payload's commit
   // SHAs to the indexer so the churn phase updates only changed files instead
   // of re-fetching the full 12-month history.

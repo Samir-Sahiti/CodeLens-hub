@@ -23,6 +23,7 @@ const { isManifestFile, parseManifest } = require('../services/manifestParser');
 const { scanDependencies } = require('../services/osvScanner');
 const { getBlastRadius } = require('../services/graphService');
 const { emitPrReviewReady } = require('../services/notificationEvents');
+const { enqueueNotification, recipientsForRepo } = require('../services/notifications');
 
 const MODEL = 'claude-sonnet-4-20250514';
 const MAX_DAILY_TOKENS = parseInt(process.env.MAX_DAILY_TOKENS_PER_USER || '500000', 10);
@@ -1324,9 +1325,20 @@ async function runPrReviewBackground({ repoId, prNumber, owner, repo, githubToke
       }
     }
 
+    const { data: repoIndexState } = await supabaseAdmin
+      .from('repositories')
+      .select('latest_indexed_sha')
+      .eq('id', repoId)
+      .maybeSingle();
+    const indexedSha = repoIndexState?.latest_indexed_sha || null;
+    const stalenessNote = !indexedSha
+      ? 'Index staleness: unknown; this repository has no recorded indexed commit yet.'
+      : indexedSha === headSha
+        ? `Index is current with the PR head (${indexedSha.slice(0, 7)}).`
+        : `Index is at ${indexedSha.slice(0, 7)} while the PR head is ${headSha.slice(0, 7)}; blast-radius numbers may be slightly stale.`;
     const summary = [
       `PR review completed for #${prNumber} at ${headSha}.`,
-      'Index staleness: unknown; this repository does not currently store the latest indexed commit SHA.',
+      stalenessNote,
     ].join(' ');
 
     const updateRes = await supabaseAdmin.from('pr_reviews').update({
@@ -1341,6 +1353,23 @@ async function runPrReviewBackground({ repoId, prNumber, owner, repo, githubToke
     send({ type: 'summary', total_files: capped.length, total_findings: filtered.length, severity_counts: severityCounts, summary });
     send({ type: 'done', review_id: reviewRow.id });
     emitPrReviewReady({ review_id: reviewRow.id, repo_id: repoId, pr_number: prNumber, head_sha: headSha, total_findings: filtered.length, severity_counts: severityCounts });
+    // US-077: in-app notification for owner + team members.
+    try {
+      const recipients = await recipientsForRepo(repoId);
+      if (recipients.length > 0) {
+        await enqueueNotification({
+          user_ids: recipients,
+          repo_id: repoId,
+          type: 'pr_review_ready',
+          severity: (severityCounts.critical > 0 || severityCounts.high > 0) ? 'warning' : 'info',
+          payload: { review_id: reviewRow.id, pr_number: prNumber, total_findings: filtered.length, severity_counts: severityCounts },
+          link_url: `/repo/${repoId}?tab=pulls&pr=${prNumber}&review=${reviewRow.id}`,
+          dedup_key: `pr_review_ready::${prNumber}::${headSha}`,
+        });
+      }
+    } catch (notifyErr) {
+      console.warn('[pr-review] notification emission failed:', notifyErr?.message || notifyErr);
+    }
     try {
       const { data: repoSettings } = await supabaseAdmin
         .from('repositories')
@@ -1415,6 +1444,39 @@ async function cleanupPreviousPrReviewComments({ octokit, owner, repo, repoId, r
       }
     }
   }
+}
+
+// Idempotent re-publish of the SAME review (same head_sha keeps the same row):
+// delete the prior inline comments, mark the prior summary review outdated, and
+// clear the persisted rows so the upcoming publish does not duplicate them.
+async function resetCurrentReviewComments({ octokit, owner, repo, review }) {
+  const { data: rows } = await supabaseAdmin
+    .from('pr_review_comments')
+    .select('id, github_comment_id, kind')
+    .eq('review_id', review.id);
+  if (!rows || rows.length === 0) return;
+
+  for (const row of rows) {
+    if (!row.github_comment_id) continue;
+    try {
+      if (row.kind === 'inline') {
+        await octokit.rest.pulls.deleteReviewComment({ owner, repo, comment_id: row.github_comment_id });
+      } else if (row.kind === 'summary' && typeof octokit.rest.pulls.updateReview === 'function') {
+        await octokit.rest.pulls.updateReview({
+          owner,
+          repo,
+          pull_number: review.pr_number,
+          review_id: row.github_comment_id,
+          body: '[Outdated - see updated review below]',
+        });
+      }
+    } catch (err) {
+      if ((err?.status || err?.response?.status) !== 404) {
+        console.warn('[pr-review.publish] current review comment reset failed:', err?.message || err);
+      }
+    }
+  }
+  await supabaseAdmin.from('pr_review_comments').delete().eq('review_id', review.id);
 }
 
 async function fetchCreatedReviewInlineComments({ octokit, owner, repo, review, reviewData, inlineFindings }) {
@@ -1521,15 +1583,27 @@ async function publishPrReview({ repoId, reviewId, actorUserId = null, retry422 
   };
 
   await cleanupPreviousPrReviewComments({ octokit, owner, repo, repoId, review });
+  await resetCurrentReviewComments({ octokit, owner, repo, review });
 
   let response;
   try {
     response = await octokit.rest.pulls.createReview(payload);
   } catch (err) {
     if ((err?.status || err?.response?.status) === 422 && retry422) {
-      console.warn('[pr-review.publish] GitHub validation failed; retrying once:', err?.message || err);
+      console.warn('[pr-review.publish] GitHub validation failed; dropping out-of-diff comments and retrying once:', err?.message || err);
+      // A 422 usually means one or more inline comments target a line GitHub
+      // does not consider part of the diff. Rebuild the diff line index, keep
+      // only placeable comments, and retry once. Dropped findings remain in the
+      // summary table built by buildPrReviewBody, so nothing is lost.
+      let retryComments = payload.comments;
+      try {
+        const diffLineIndex = await fetchPrDiffLineIndex(octokit, owner, repo, review.pr_number);
+        retryComments = (payload.comments || []).filter((comment) => lineExistsInDiff(diffLineIndex, comment.path, comment.line));
+      } catch (diffErr) {
+        console.warn('[pr-review.publish] could not rebuild diff index for retry:', diffErr?.message || diffErr);
+      }
       await sleep(100);
-      response = await octokit.rest.pulls.createReview(payload);
+      response = await octokit.rest.pulls.createReview({ ...payload, comments: retryComments });
     } else {
       throw err;
     }
@@ -1562,6 +1636,118 @@ const publishPrReviewEndpoint = async (req, res) => {
     const mapped = mapPrPublishGithubError(err);
     console.error('[pr-review.publish] Failed:', err?.status || err?.response?.status, err?.message || err);
     return res.status(mapped.http).json({ error: mapped.message, code: mapped.code });
+  }
+};
+
+// ─── US-076: CI status check ──────────────────────────────────────────────────
+
+const CI_POLL_INTERVAL_MS = 3000;
+
+function parseFailOnSeverity(raw) {
+  const allowed = ['critical', 'high', 'medium', 'low'];
+  const parsed = String(raw || 'critical,high')
+    .split(',')
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => allowed.includes(value));
+  return new Set(parsed.length ? parsed : ['critical', 'high']);
+}
+
+async function fetchLatestReviewForHead(repoId, prNumber, headSha) {
+  const { data } = await supabaseAdmin
+    .from('pr_reviews')
+    .select('id, status, findings_json, severity_counts, total_findings, summary, pr_number, pr_head_sha')
+    .eq('repo_id', repoId)
+    .eq('pr_number', prNumber)
+    .eq('pr_head_sha', headSha)
+    .order('created_at', { ascending: false })
+    .maybeSingle();
+  return data || null;
+}
+
+// POST /api/repos/:repoId/pulls/:number/reviews/ci-check  (authenticated by a CI token).
+// Blocks until the latest review for the PR head is ready (auto-triggering one if
+// none exists), then returns pass/fail based on fail_on_severity.
+const ciCheckReview = async (req, res) => {
+  const repoId = req.ciAuth?.repoId || req.params.repoId;
+  const prNumber = Number(req.params.number);
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return res.status(400).json({ error: 'Valid pull request number is required' });
+  }
+
+  const failOn = parseFailOnSeverity(req.body?.fail_on_severity ?? req.query?.fail_on_severity);
+  const timeoutSeconds = Math.min(900, Math.max(30,
+    Number(req.body?.wait_timeout_seconds ?? req.query?.wait_timeout_seconds) || 300));
+  const deadline = Date.now() + timeoutSeconds * 1000;
+
+  try {
+    const { data: repoRow } = await supabaseAdmin
+      .from('repositories')
+      .select('id, user_id, full_name, name, source')
+      .eq('id', repoId)
+      .maybeSingle();
+    if (!repoRow) return res.status(404).json({ error: 'Repository not found' });
+    const fullName = repoRow.full_name || repoRow.name || '';
+    if (repoRow.source !== 'github' || !fullName.includes('/')) {
+      return res.status(400).json({ error: 'Only GitHub-connected repositories support CI checks' });
+    }
+
+    const githubToken = await getGithubTokenForUser(repoRow.user_id);
+    if (!githubToken) return res.status(401).json({ error: 'Repository owner GitHub token is unavailable' });
+
+    const [owner, repo] = fullName.split('/');
+    const octokit = getOctokit(githubToken);
+    const pr = await octokit.rest.pulls.get({ owner, repo, pull_number: prNumber });
+    const headSha = pr.data.head.sha;
+
+    let review = await fetchLatestReviewForHead(repoId, prNumber, headSha);
+
+    // Auto-trigger when no usable review exists for this head SHA (CI may run
+    // before the webhook fires, or webhooks may not be configured at all).
+    if (!review || review.status === 'failed') {
+      await runPrReviewBackground({ repoId, prNumber, owner, repo, githubToken, userId: repoRow.user_id, send: () => {} });
+      review = await fetchLatestReviewForHead(repoId, prNumber, headSha);
+    }
+
+    // Otherwise a webhook-triggered run may still be in flight — poll until terminal.
+    while (review && (review.status === 'analyzing' || review.status === 'pending')) {
+      if (Date.now() >= deadline) break;
+      await sleep(CI_POLL_INTERVAL_MS);
+      review = await fetchLatestReviewForHead(repoId, prNumber, headSha);
+    }
+
+    const reviewLink = review ? getCodeLensReviewLink(repoId, review.id) : getCodeLensReviewLink(repoId, '');
+
+    if (!review || review.status !== 'ready') {
+      // Fail closed: a guardrail check should block when it cannot confirm a clean review.
+      const summary = !review
+        ? 'CodeLens could not produce a review for this pull request.'
+        : review.status === 'failed'
+          ? 'CodeLens PR review failed to complete.'
+          : `CodeLens PR review did not finish within ${timeoutSeconds}s.`;
+      return res.status(200).json({
+        status: 'fail',
+        severity_counts: normalizeSeverityCounts(review?.severity_counts || {}),
+        summary_markdown: summary,
+        codelens_url: reviewLink,
+        timed_out: Boolean(review && review.status !== 'failed'),
+      });
+    }
+
+    const findings = Array.isArray(review.findings_json) ? review.findings_json : [];
+    const severityCounts = review.severity_counts && typeof review.severity_counts === 'object'
+      ? normalizeSeverityCounts(review.severity_counts)
+      : getSeverityCounts(findings);
+    const failed = [...failOn].some((severity) => Number(severityCounts[severity] || 0) > 0);
+
+    return res.status(200).json({
+      status: failed ? 'fail' : 'pass',
+      severity_counts: severityCounts,
+      summary_markdown: buildPrReviewBody({ review, findings, severityCounts, reviewLink }),
+      codelens_url: reviewLink,
+    });
+  } catch (err) {
+    console.error('[pr-review.ci-check] Failed:', err?.status || err?.response?.status, err?.message || err);
+    return res.status(502).json({ error: 'CI check failed to complete.' });
   }
 };
 
@@ -2979,6 +3165,7 @@ module.exports = {
   runPrReview,
   runPrReviewBackground,
   publishPrReviewEndpoint,
+  ciCheckReview,
   listPullRequests,
   listPullRequestReviews,
   getPrReviewDetail,
@@ -2986,6 +3173,8 @@ module.exports = {
   getSecurityAudit,
   duplicationRefactor,
   generatePrFindingProposal,
+  updatePrFindingProposalStatus,
+  applyPrFindingProposalAsPr,
   generateProposal,
   updateProposalStatus,
   applyProposalAsPr,

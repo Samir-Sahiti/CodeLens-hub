@@ -4,10 +4,11 @@
  * Extracted from inline SettingsPanel in RepoView.jsx.
  * Handles auto-sync toggle and webhook URL generation.
  */
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { apiUrl } from '../lib/api';
+import { formatDate } from '../lib/constants';
 import { useToast } from './Toast';
-import { RefreshCw, Copy, Check, Zap, Webhook, MessageSquare } from './ui/Icons';
+import { RefreshCw, Copy, Check, Zap, Webhook, MessageSquare, Terminal, Trash2 } from './ui/Icons';
 import { Banner, Button, EmptyState, Panel, Select, Switch } from './ui/Primitives';
 
 export default function SettingsPanel({ repo, session, onRepoUpdated }) {
@@ -18,9 +19,60 @@ export default function SettingsPanel({ repo, session, onRepoUpdated }) {
   const [webhookInfo,  setWebhookInfo]  = useState(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [copied,       setCopied]       = useState('');
+  const [ciTokens,     setCiTokens]     = useState([]);
+  const [newCiToken,   setNewCiToken]   = useState(null);
+  const [isGeneratingToken, setIsGeneratingToken] = useState(false);
   const toast = useToast();
 
   const isGitHub = repo?.source === 'github';
+
+  const fetchCiTokens = useCallback(async () => {
+    if (!repo?.id || !session?.access_token) return;
+    try {
+      const res = await fetch(apiUrl(`/api/repos/${repo.id}/ci-tokens`), {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      setCiTokens(data.tokens || []);
+    } catch { /* ignore */ }
+  }, [repo?.id, session?.access_token]);
+
+  useEffect(() => { fetchCiTokens(); }, [fetchCiTokens]);
+
+  const handleGenerateCiToken = async () => {
+    setIsGeneratingToken(true);
+    setNewCiToken(null);
+    try {
+      const res = await fetch(apiUrl(`/api/repos/${repo.id}/ci-tokens`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ name: 'CI token' }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Failed to generate CI token');
+      setNewCiToken(data.token);
+      await fetchCiTokens();
+    } catch (err) {
+      toast.error(err.message || 'Failed to generate CI token');
+    } finally {
+      setIsGeneratingToken(false);
+    }
+  };
+
+  const handleRevokeCiToken = async (tokenId) => {
+    try {
+      const res = await fetch(apiUrl(`/api/repos/${repo.id}/ci-tokens/${tokenId}`), {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) throw new Error('Failed to revoke token');
+      setCiTokens((prev) => prev.map((t) => (t.id === tokenId ? { ...t, revoked_at: new Date().toISOString() } : t)));
+      toast.success('CI token revoked');
+    } catch (err) {
+      toast.error(err.message || 'Failed to revoke token');
+    }
+  };
 
   useEffect(() => {
     setAutoSync(repo?.auto_sync_enabled ?? false);
@@ -214,6 +266,64 @@ export default function SettingsPanel({ repo, session, onRepoUpdated }) {
                     {copied === key ? 'Copied' : 'Copy'}
                   </Button>
                 </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Panel>
+
+      {/* CI Integration — per-repo API tokens (US-076) */}
+      <Panel>
+        <div className="flex items-start gap-3 mb-4">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-violet-500/10 border border-violet-500/20">
+            <Terminal className="h-4 w-4 text-violet-400" />
+          </div>
+          <div className="min-w-0">
+            <h3 className="text-base font-semibold text-white">CI Integration</h3>
+            <p className="mt-1 text-sm text-gray-400 leading-relaxed">
+              Generate a per-repo API token for the CodeLens GitHub Action so CI can run a PR
+              review and report a status check. The token is scoped to this repository and shown once.
+              See <code className="rounded bg-gray-800 px-1 py-0.5 text-xs text-gray-200">docs/ci-integration.md</code>.
+            </p>
+          </div>
+        </div>
+
+        <Button onClick={handleGenerateCiToken} disabled={isGeneratingToken} loading={isGeneratingToken} icon={Terminal}>
+          {isGeneratingToken ? 'Generating...' : 'Generate token'}
+        </Button>
+
+        {newCiToken && (
+          <div className="mt-4 space-y-2" style={{ animation: 'slideUp 200ms ease both' }}>
+            <Banner tone="warning">Copy this token now — it will not be shown again.</Banner>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <code className="flex-1 overflow-auto rounded-lg border border-gray-700 bg-gray-950 px-3 py-2.5 font-mono text-xs text-gray-200 break-all">
+                {newCiToken}
+              </code>
+              <Button onClick={() => handleCopy(newCiToken, 'ci-token')} size="sm" variant="outline" icon={copied === 'ci-token' ? Check : Copy}>
+                {copied === 'ci-token' ? 'Copied' : 'Copy'}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {ciTokens.length > 0 && (
+          <div className="mt-5 space-y-2">
+            <p className="text-xs uppercase tracking-widest text-gray-500">Existing tokens</p>
+            {ciTokens.map((token) => (
+              <div key={token.id} className="flex items-center justify-between gap-3 rounded-lg border border-gray-800 bg-gray-950/60 px-3 py-2 text-sm">
+                <div className="min-w-0">
+                  <span className={`block truncate ${token.revoked_at ? 'text-gray-500 line-through' : 'text-gray-200'}`}>{token.name || 'CI token'}</span>
+                  <span className="text-xs text-gray-500">
+                    Created {formatDate(token.created_at)}
+                    {token.last_used_at ? ` · last used ${formatDate(token.last_used_at)}` : ' · never used'}
+                    {token.revoked_at ? ' · revoked' : ''}
+                  </span>
+                </div>
+                {!token.revoked_at && (
+                  <Button onClick={() => handleRevokeCiToken(token.id)} size="sm" variant="outline" icon={Trash2}>
+                    Revoke
+                  </Button>
+                )}
               </div>
             ))}
           </div>

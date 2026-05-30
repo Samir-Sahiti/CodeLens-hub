@@ -4,6 +4,7 @@ import { useAuth }  from '../context/AuthContext';
 import { useRepo }  from '../context/RepoContext';
 import { apiUrl }   from '../lib/api';
 import OnboardingModal from './OnboardingModal';
+import NotificationBell from './NotificationBell';
 import Tooltip from './ui/Tooltip';
 import { Badge, IconButton } from './ui/Primitives';
 
@@ -245,6 +246,9 @@ export default function Layout() {
               </div>
             </div>
           )}
+
+          {/* Notifications (US-077) */}
+          <NotificationBell collapsed={collapsed} />
 
           {/* Show introduction */}
           <NavItem

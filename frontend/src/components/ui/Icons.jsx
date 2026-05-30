@@ -54,6 +54,8 @@ export {
   AlertCircle,
   XCircle,
   Info,
+  Bell,
+  CheckCheck,
 
   // Actions
   Search,
