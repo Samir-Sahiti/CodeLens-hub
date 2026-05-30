@@ -13,6 +13,7 @@ const { recordUsage } = require('./usageTracker'); // US-042
 const { isManifestFile, parseManifest } = require('./manifestParser'); // US-045
 const { scanDependencies } = require('./osvScanner'); // US-045
 const { generateStartHereTour } = require('./startHereTourService'); // US-059
+const { enqueueNotification, recipientsForRepo } = require('./notifications'); // US-077
 const { OpenAI } = require('openai');
 const { supabaseAdmin } = require('../db/supabase');
 const { SAFE_FETCH_CEILING, warnIfCeilingHit, withSupabaseRetry } = require('../lib/dbHelpers');
@@ -707,6 +708,45 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     // chunking, duplicate detection, or churn work finishes.
     await markRepoReady({ repoId, fileCount, hasCoverageFiles, finalNodes, latestIndexedSha });
 
+    // US-077: notify recipients that the index is ready and surface newly-introduced
+    // critical/high issues + vulnerabilities. Best-effort — never blocks the pipeline.
+    // The 30-day dedup_key prevents re-notifying for issues seen on a prior index.
+    try {
+      const recipients = await recipientsForRepo(repoId);
+      if (recipients.length > 0) {
+        await enqueueNotification({
+          user_ids: recipients,
+          repo_id: repoId,
+          type: 'index_ready',
+          severity: 'info',
+          payload: { file_count: fileCount },
+          link_url: `/repo/${repoId}`,
+        });
+
+        const { data: importantIssues } = await supabaseAdmin
+          .from('analysis_issues')
+          .select('id, type, severity, file_paths, description')
+          .eq('repo_id', repoId)
+          .in('severity', ['critical', 'high']);
+
+        for (const issue of importantIssues || []) {
+          const filePath = Array.isArray(issue.file_paths) ? issue.file_paths[0] : null;
+          const isVuln = issue.type === 'vulnerable_dependency';
+          await enqueueNotification({
+            user_ids: recipients,
+            repo_id: repoId,
+            type: isVuln ? 'new_vulnerability' : 'new_critical_issue',
+            severity: issue.severity === 'critical' ? 'critical' : 'warning',
+            payload: { issue_id: issue.id, file_path: filePath, rule_id: issue.type, message: issue.description },
+            link_url: `/repo/${repoId}/issues?issue=${issue.id}`,
+            dedup_key: `${issue.type}::${filePath || ''}::${(issue.description || '').slice(0, 80)}`,
+          });
+        }
+      }
+    } catch (notifyErr) {
+      console.warn('[indexer] notification emission failed:', notifyErr.message || notifyErr);
+    }
+
     // 10. Store full file contents (US-043) — only for changed/new files
     // Unchanged files already have their content rows in the DB.
     const FILE_SIZE_CAP = 1024 * 1024; // 1 MB
@@ -1056,6 +1096,27 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
           status: 'failed'
         })
         .eq('id', repoId);
+
+      // US-077: notify the repo owner that indexing failed (owner only).
+      try {
+        const { data: repoRow } = await supabaseAdmin
+          .from('repositories')
+          .select('user_id')
+          .eq('id', repoId)
+          .maybeSingle();
+        if (repoRow?.user_id) {
+          await enqueueNotification({
+            user_ids: [repoRow.user_id],
+            repo_id: repoId,
+            type: 'index_failed',
+            severity: 'warning',
+            payload: { message: error.message || 'Indexing failed' },
+            link_url: `/repo/${repoId}`,
+          });
+        }
+      } catch (notifyErr) {
+        console.warn('[indexer] index_failed notification emission failed:', notifyErr.message || notifyErr);
+      }
     }
 
     console.error(`[indexer] Failed pipeline for repoId ${repoId}:`, error.message);

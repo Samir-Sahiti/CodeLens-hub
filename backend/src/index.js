@@ -19,6 +19,7 @@ const usageRoutes    = require('./routes/usage');
 const adminRoutes    = require('./routes/admin');
 const toursRoutes    = require('./routes/tours');
 const agentRoutes    = require('./routes/agent');
+const notificationRoutes = require('./routes/notifications');
 const errorHandler   = require('./middleware/errorHandler');
 const { requestTimingMiddleware } = require('./observability/requestStore');
 
@@ -84,6 +85,7 @@ app.use('/api/usage',     usageRoutes);
 app.use('/api/admin',     adminRoutes);
 app.use('/api/repos',    toursRoutes);
 app.use('/api',           agentRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 

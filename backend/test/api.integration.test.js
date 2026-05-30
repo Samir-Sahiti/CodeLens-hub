@@ -94,6 +94,14 @@ function createSupabaseMock(handlers) {
       this.filters.push({ op: 'in', column, value });
       return this;
     }
+    is(column, value) {
+      this.filters.push({ op: 'is', column, value });
+      return this;
+    }
+    lt(column, value) {
+      this.filters.push({ op: 'lt', column, value });
+      return this;
+    }
     order(column, opts) {
       this.orderBy = { column, opts };
       return this;
@@ -1512,6 +1520,7 @@ describe('Backend API integration (mocked)', () => {
             full_name: 'owner/repo',
             name: 'repo',
             source: 'github',
+            auto_sync_enabled: true,
             pr_review_enabled: false,
           },
           error: null,
@@ -1539,8 +1548,58 @@ describe('Backend API integration (mocked)', () => {
     queueSpy.mockRestore();
   });
 
+  it('GitHub push webhook skips re-index when auto-sync is disabled', async () => {
+    const { queue } = require('../src/services/queue');
+    const queueSpy = vi.spyOn(queue, 'add').mockImplementation(() => {});
+    const secret = 'webhook-secret';
+    const payload = {
+      ref: 'refs/heads/main',
+      repository: { full_name: 'owner/repo', name: 'repo', owner: { login: 'owner' } },
+      commits: [{ id: 'commit-1' }],
+    };
+    const raw = JSON.stringify(payload);
+    const signature = `sha256=${crypto.createHmac('sha256', secret).update(Buffer.from(raw)).digest('hex')}`;
+
+    supabaseAdminMock = createSupabaseMock({
+      'repositories.select.maybeSingle': async () => ({
+        data: {
+          id: 'repo-1',
+          user_id: 'user-1',
+          webhook_secret: secret,
+          default_branch: 'main',
+          full_name: 'owner/repo',
+          name: 'repo',
+          source: 'github',
+          auto_sync_enabled: false,
+          pr_review_enabled: false,
+        },
+        error: null,
+      }),
+      'profiles.select.single': async () => ({ data: { github_token_secret_id: 'secret-1' }, error: null }),
+      'rpc.get_github_token_secret': async () => ({ data: 'gh-token', error: null }),
+    });
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const webhookController = (await import('../src/controllers/webhookController.js')).default || await import('../src/controllers/webhookController.js');
+    const app = express();
+    app.post('/api/webhooks/github', express.raw({ type: '*/*' }), webhookController.handleGitHubPush);
+
+    const res = await request(app)
+      .post('/api/webhooks/github')
+      .set('content-type', 'application/json')
+      .set('x-github-event', 'push')
+      .set('x-hub-signature-256', signature)
+      .send(raw)
+      .expect(200);
+
+    expect(res.body).toEqual(expect.objectContaining({ skipped: 'auto-sync disabled' }));
+    expect(queueSpy).not.toHaveBeenCalled();
+    queueSpy.mockRestore();
+  });
+
   it('US-072 schema keeps PR review persistence aligned with acceptance criteria', () => {
-    const schema = readFileSync(new URL('../../scripts/schema.sql', import.meta.url), 'utf8');
+    // Normalize CRLF so the multi-line assertions below match on Windows checkouts.
+    const schema = readFileSync(new URL('../../scripts/schema.sql', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 
     expect(schema).toContain("findings_json  JSONB NOT NULL DEFAULT '[]'::jsonb");
     expect(schema).toContain("CREATE TYPE pr_review_status AS ENUM ('pending', 'analyzing', 'ready', 'failed', 'stale')");
@@ -1556,5 +1615,183 @@ describe('Backend API integration (mocked)', () => {
     expect(schema).toContain('ON pr_review_comments FOR ALL');
     expect(schema).toContain('AND can_access_repo(pr.repo_id, auth.uid())');
     expect(schema).toContain('WITH CHECK (\n    EXISTS (\n      SELECT 1 FROM pr_reviews pr');
+  });
+
+  // ─── US-076: CI tokens + CI check ──────────────────────────────────────────
+
+  it('US-076 generates a CI token once and never returns the hash', async () => {
+    process.env.CI_TOKEN_HMAC_SECRET = 'test-secret';
+    supabaseAdminMock = createSupabaseMock({
+      'rpc.can_access_repo': async () => ({ data: true, error: null }),
+      'repo_api_tokens.insert.single': async (state) => ({
+        data: { id: 'tok-1', name: state.payload.name, created_at: '2026-01-01T00:00:00Z' },
+        error: null,
+      }),
+    });
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const ciTokenController = (await import('../src/controllers/ciTokenController.js')).default;
+    const app = express();
+    app.use(express.json());
+    app.post('/api/repos/:repoId/ci-tokens', (req, _res, next) => { req.user = { id: 'user-1' }; next(); }, wrap(ciTokenController.createCiToken));
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message || 'error' }));
+
+    const res = await request(app).post('/api/repos/repo-1/ci-tokens').send({ name: 'CI token' }).expect(201);
+    expect(res.body.token).toMatch(/^codelens_pat_/);
+    expect(res.body).not.toHaveProperty('token_hash');
+    expect(res.body.id).toBe('tok-1');
+  });
+
+  it('US-076 CI token middleware rejects a token scoped to a different repo', async () => {
+    process.env.CI_TOKEN_HMAC_SECRET = 'test-secret';
+    supabaseAdminMock = createSupabaseMock({
+      'repo_api_tokens.select.maybeSingle': async () => ({ data: { id: 'tok-1', repo_id: 'repo-OTHER', revoked_at: null }, error: null }),
+    });
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const { requireCiToken } = (await import('../src/middleware/ciTokenAuth.js')).default;
+    const app = express();
+    app.use(express.json());
+    app.post('/api/repos/:repoId/x', requireCiToken, (req, res) => res.json({ ok: true }));
+
+    await request(app)
+      .post('/api/repos/repo-1/x')
+      .set('Authorization', 'Bearer codelens_pat_abc')
+      .expect(403);
+  });
+
+  it('US-076 ci-check returns fail when blocking findings exist for the head SHA', async () => {
+    process.env.CI_TOKEN_HMAC_SECRET = 'test-secret';
+    globalThis.__CODELENS_GITHUB_TOKEN__ = 'owner-token';
+    globalThis.__CODELENS_OCTOKIT__ = {
+      Octokit: class {
+        get rest() {
+          return { pulls: { get: async () => ({ data: { head: { sha: 'headsha123' }, base: { sha: 'base' } } }) } };
+        }
+      },
+    };
+    supabaseAdminMock = createSupabaseMock({
+      'repo_api_tokens.select.maybeSingle': async () => ({ data: { id: 'tok-1', repo_id: 'repo-1', revoked_at: null }, error: null }),
+      'repositories.select.maybeSingle': async () => ({ data: { id: 'repo-1', user_id: 'owner-user', full_name: 'owner/repo', source: 'github' }, error: null }),
+      'pr_reviews.select.maybeSingle': async () => ({
+        data: { id: 'review-1', status: 'ready', pr_number: 42, pr_head_sha: 'headsha123', findings_json: [], severity_counts: { critical: 1, high: 0, medium: 0, low: 0 } },
+        error: null,
+      }),
+    });
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const reviewController = await import('../src/controllers/reviewController.js');
+    const { requireCiToken } = (await import('../src/middleware/ciTokenAuth.js')).default;
+    const app = express();
+    app.use(express.json());
+    app.post('/api/repos/:repoId/pulls/:number/reviews/ci-check', requireCiToken, wrap(reviewController.default.ciCheckReview));
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message || 'error' }));
+
+    const res = await request(app)
+      .post('/api/repos/repo-1/pulls/42/reviews/ci-check')
+      .set('Authorization', 'Bearer codelens_pat_abc')
+      .send({ fail_on_severity: 'critical,high' })
+      .expect(200);
+    expect(res.body.status).toBe('fail');
+    expect(res.body.severity_counts.critical).toBe(1);
+    expect(res.body.codelens_url).toContain('review-1');
+  });
+
+  it('US-076 ci-check passes when no severity matches fail_on_severity', async () => {
+    process.env.CI_TOKEN_HMAC_SECRET = 'test-secret';
+    globalThis.__CODELENS_GITHUB_TOKEN__ = 'owner-token';
+    globalThis.__CODELENS_OCTOKIT__ = {
+      Octokit: class {
+        get rest() {
+          return { pulls: { get: async () => ({ data: { head: { sha: 'headsha123' }, base: { sha: 'base' } } }) } };
+        }
+      },
+    };
+    supabaseAdminMock = createSupabaseMock({
+      'repo_api_tokens.select.maybeSingle': async () => ({ data: { id: 'tok-1', repo_id: 'repo-1', revoked_at: null }, error: null }),
+      'repositories.select.maybeSingle': async () => ({ data: { id: 'repo-1', user_id: 'owner-user', full_name: 'owner/repo', source: 'github' }, error: null }),
+      'pr_reviews.select.maybeSingle': async () => ({
+        data: { id: 'review-2', status: 'ready', pr_number: 7, pr_head_sha: 'headsha123', findings_json: [], severity_counts: { critical: 0, high: 0, medium: 2, low: 1 } },
+        error: null,
+      }),
+    });
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const reviewController = await import('../src/controllers/reviewController.js');
+    const { requireCiToken } = (await import('../src/middleware/ciTokenAuth.js')).default;
+    const app = express();
+    app.use(express.json());
+    app.post('/api/repos/:repoId/pulls/:number/reviews/ci-check', requireCiToken, wrap(reviewController.default.ciCheckReview));
+
+    const res = await request(app)
+      .post('/api/repos/repo-1/pulls/7/reviews/ci-check')
+      .set('Authorization', 'Bearer codelens_pat_abc')
+      .send({ fail_on_severity: 'critical,high' })
+      .expect(200);
+    expect(res.body.status).toBe('pass');
+  });
+
+  // ─── US-077: notifications ─────────────────────────────────────────────────
+
+  it('US-077 enqueueNotification skips users already notified for the same dedup_key', async () => {
+    let inserted = null;
+    supabaseAdminMock = createSupabaseMock({
+      'notifications.select.many': async () => ({
+        data: [{ user_id: 'user-1', payload_json: { dedup_key: 'k1' } }],
+        error: null,
+      }),
+      'notifications.insert.many': async (state) => { inserted = state.payload; return { data: state.payload, error: null }; },
+    });
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const { enqueueNotification } = await import('../src/services/notifications.js');
+
+    const skipped = await enqueueNotification({
+      user_ids: ['user-1'], repo_id: 'repo-1', type: 'new_critical_issue', dedup_key: 'k1', payload: {},
+    });
+    expect(skipped).toBe(0);
+    expect(inserted).toBeNull();
+
+    const wrote = await enqueueNotification({
+      user_ids: ['user-1'], repo_id: 'repo-1', type: 'new_critical_issue', dedup_key: 'k2', payload: {},
+    });
+    expect(wrote).toBe(1);
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0].payload_json.dedup_key).toBe('k2');
+  });
+
+  it('US-077 notification feed endpoints are user-scoped', async () => {
+    const updates = [];
+    supabaseAdminMock = createSupabaseMock({
+      'notifications.select.many': async (state) => {
+        // unread-count uses head/count; list returns rows
+        if (state.columns === 'id') return { count: 3, data: null, error: null };
+        return { data: [
+          { id: 'n1', type: 'index_ready', severity: 'info', payload_json: {}, link_url: '/repo/r', read_at: null, created_at: '2026-01-02T00:00:00Z' },
+          { id: 'n2', type: 'pr_review_ready', severity: 'warning', payload_json: {}, link_url: '/repo/r', read_at: null, created_at: '2026-01-01T00:00:00Z' },
+        ], error: null };
+      },
+      'notifications.update.many': async (state) => { updates.push(state); return { data: null, error: null }; },
+    });
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+
+    const notificationsController = (await import('../src/controllers/notificationsController.js')).default;
+    const app = express();
+    app.use(express.json());
+    const inject = (req, _res, next) => { req.user = { id: 'user-1' }; next(); };
+    app.get('/api/notifications', inject, wrap(notificationsController.listNotifications));
+    app.get('/api/notifications/unread-count', inject, wrap(notificationsController.unreadCount));
+    app.post('/api/notifications/mark-all-read', inject, wrap(notificationsController.markAllRead));
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message || 'error' }));
+
+    const list = await request(app).get('/api/notifications?limit=20').expect(200);
+    expect(list.body.notifications).toHaveLength(2);
+    expect(list.body.has_more).toBe(false);
+
+    const count = await request(app).get('/api/notifications/unread-count').expect(200);
+    expect(count.body.unread).toBe(3);
+
+    await request(app).post('/api/notifications/mark-all-read').expect(200);
+    expect(updates.length).toBe(1);
   });
 });

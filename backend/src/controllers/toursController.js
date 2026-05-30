@@ -7,6 +7,7 @@ const Anthropic         = require('@anthropic-ai/sdk');
 const { supabaseAdmin } = require('../db/supabase');
 const { recordUsage }   = require('../services/usageTracker');
 const { bindRequestAbort } = require('../lib/sseAbort');
+const { enqueueNotification } = require('../services/notifications'); // US-077
 
 const MODEL = 'claude-sonnet-4-20250514';
 const MAX_DAILY_TOKENS = parseInt(process.env.MAX_DAILY_TOKENS_PER_USER || '500000', 10);
@@ -706,6 +707,22 @@ const forkTour = async (req, res) => {
     .select('id, tour_id, step_order, file_path, start_line, end_line, explanation')
     .eq('tour_id', newTourId)
     .order('step_order', { ascending: true });
+
+  // US-077: notify the original tour's author that their tour was forked.
+  if (sourceTour.created_by && sourceTour.created_by !== userId) {
+    try {
+      await enqueueNotification({
+        user_ids: [sourceTour.created_by],
+        repo_id: sourceTour.repo_id,
+        type: 'tour_shared',
+        severity: 'info',
+        payload: { source_tour_id: tourId, forked_tour_id: newTourId, forked_by: userId },
+        link_url: `/repo/${sourceTour.repo_id}?tab=tours&tour=${tourId}`,
+      });
+    } catch (notifyErr) {
+      console.warn('[forkTour] notification emission failed:', notifyErr.message || notifyErr);
+    }
+  }
 
   return res.status(201).json({ tour, steps: steps || [] });
 };

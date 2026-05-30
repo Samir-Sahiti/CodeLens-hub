@@ -62,15 +62,19 @@ $$;
 REVOKE ALL ON FUNCTION get_github_token_secret FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION get_github_token_secret TO authenticated, service_role;
 
+-- plpgsql (not sql) so the body is validated at first call, not at creation —
+-- this function is defined before the repositories/teams tables it references,
+-- which a LANGUAGE sql body would reject on a fresh database.
 CREATE OR REPLACE FUNCTION can_access_repo(
   p_repo_id UUID,
   p_user_id UUID
 )
 RETURNS BOOLEAN
-LANGUAGE sql
+LANGUAGE plpgsql
 SECURITY DEFINER
 AS $$
-  SELECT EXISTS (
+BEGIN
+  RETURN EXISTS (
     SELECT 1
     FROM repositories r
     WHERE r.id = p_repo_id
@@ -85,6 +89,7 @@ AS $$
         )
       )
   );
+END;
 $$;
 
 GRANT EXECUTE ON FUNCTION can_access_repo(UUID, UUID) TO authenticated, service_role;
@@ -177,6 +182,41 @@ ALTER TABLE repositories ADD COLUMN IF NOT EXISTS has_coverage_files BOOLEAN NOT
 ALTER TABLE repositories ADD COLUMN IF NOT EXISTS language_stats JSONB DEFAULT '[]';
 ALTER TABLE repositories ADD COLUMN IF NOT EXISTS sast_disabled_rules TEXT[] DEFAULT '{}';
 ALTER TABLE repositories ADD COLUMN IF NOT EXISTS latest_indexed_sha TEXT;
+
+-- Team tables are created here (immediately after repositories) because the
+-- repositories and graph_nodes RLS policies below reference team_repositories /
+-- team_members in inline subqueries, which Postgres validates at policy-creation
+-- time. Their RLS policies are defined later in the TEAMS / ORGANIZATIONS section.
+CREATE TABLE IF NOT EXISTS teams (
+  id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  name       TEXT        NOT NULL,
+  created_by UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS team_members (
+  id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  team_id         UUID        NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+  user_id         UUID        REFERENCES auth.users(id) ON DELETE SET NULL,
+  github_username TEXT        NOT NULL,
+  role            TEXT        NOT NULL DEFAULT 'member'
+                              CHECK (role IN ('owner', 'member')),
+  joined_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (team_id, github_username)
+);
+
+CREATE INDEX IF NOT EXISTS team_members_user_id_idx ON team_members (user_id);
+CREATE INDEX IF NOT EXISTS team_members_team_id_idx ON team_members (team_id);
+
+CREATE TABLE IF NOT EXISTS team_repositories (
+  id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  team_id UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+  repo_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+  UNIQUE (team_id, repo_id)
+);
+
+CREATE INDEX IF NOT EXISTS team_repositories_team_id_idx ON team_repositories (team_id);
+CREATE INDEX IF NOT EXISTS team_repositories_repo_id_idx ON team_repositories (repo_id);
 
 ALTER TABLE repositories ENABLE ROW LEVEL SECURITY;
 
@@ -450,38 +490,9 @@ CREATE POLICY "Users can only access suppressions for their repos"
 
 -- =============================================================================
 -- TEAMS / ORGANIZATIONS
+-- Tables are created earlier (right after repositories) so the repositories /
+-- graph_nodes RLS policies can reference them. Only RLS wiring lives here.
 -- =============================================================================
-
-CREATE TABLE IF NOT EXISTS teams (
-  id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  name       TEXT        NOT NULL,
-  created_by UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS team_members (
-  id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  team_id         UUID        NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-  user_id         UUID        REFERENCES auth.users(id) ON DELETE SET NULL,
-  github_username TEXT        NOT NULL,
-  role            TEXT        NOT NULL DEFAULT 'member'
-                              CHECK (role IN ('owner', 'member')),
-  joined_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (team_id, github_username)
-);
-
-CREATE INDEX IF NOT EXISTS team_members_user_id_idx ON team_members (user_id);
-CREATE INDEX IF NOT EXISTS team_members_team_id_idx ON team_members (team_id);
-
-CREATE TABLE IF NOT EXISTS team_repositories (
-  id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  team_id UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-  repo_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
-  UNIQUE (team_id, repo_id)
-);
-
-CREATE INDEX IF NOT EXISTS team_repositories_team_id_idx ON team_repositories (team_id);
-CREATE INDEX IF NOT EXISTS team_repositories_repo_id_idx ON team_repositories (repo_id);
 
 ALTER TABLE teams             ENABLE ROW LEVEL SECURITY;
 ALTER TABLE team_members      ENABLE ROW LEVEL SECURITY;
@@ -1445,6 +1456,79 @@ CREATE POLICY "Users access messages of their conversations"
   WITH CHECK (EXISTS (SELECT 1 FROM agent_conversations c
                        WHERE c.id = agent_messages.conversation_id
                          AND c.user_id = auth.uid()));
+
+-- =============================================================================
+-- US-076: per-repo CI API tokens. Hashed (HMAC-SHA256 with CI_TOKEN_HMAC_SECRET),
+-- never stored or returned in plaintext after creation. Scoped to a single repo
+-- and used only by the CI status-check endpoint.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS repo_api_tokens (
+  id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  repo_id      UUID        NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+  token_hash   TEXT        NOT NULL,
+  name         TEXT,
+  created_by   UUID        REFERENCES auth.users(id) ON DELETE SET NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_used_at TIMESTAMPTZ,
+  revoked_at   TIMESTAMPTZ
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS repo_api_tokens_token_hash_idx ON repo_api_tokens (token_hash);
+CREATE INDEX IF NOT EXISTS repo_api_tokens_repo_idx ON repo_api_tokens (repo_id);
+
+ALTER TABLE repo_api_tokens ENABLE ROW LEVEL SECURITY;
+
+-- Management (list/revoke/generate) is gated by repo access. The CI middleware
+-- reads tokens via service_role, bypassing RLS for the per-request hash lookup.
+DROP POLICY IF EXISTS "Users manage CI tokens for their repos" ON repo_api_tokens;
+CREATE POLICY "Users manage CI tokens for their repos"
+  ON repo_api_tokens FOR ALL
+  USING (can_access_repo(repo_id, auth.uid()))
+  WITH CHECK (can_access_repo(repo_id, auth.uid()));
+
+-- =============================================================================
+-- US-077: in-app notifications. One row per recipient user. payload_json is
+-- type-specific so the UI can render rich cards; link_url deep-links into the app.
+-- =============================================================================
+
+DO $$ BEGIN
+  CREATE TYPE notification_type AS ENUM (
+    'new_critical_issue', 'new_vulnerability', 'index_ready', 'index_failed',
+    'pr_review_ready', 'proposal_shared', 'tour_shared', 'webhook_paused'
+  );
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+  CREATE TYPE notification_severity AS ENUM ('info', 'warning', 'critical');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id           UUID                  PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      UUID                  NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  repo_id      UUID                  REFERENCES repositories(id) ON DELETE CASCADE,
+  type         notification_type     NOT NULL,
+  severity     notification_severity NOT NULL DEFAULT 'info',
+  payload_json JSONB                 NOT NULL DEFAULT '{}'::jsonb,
+  link_url     TEXT,
+  read_at      TIMESTAMPTZ,
+  created_at   TIMESTAMPTZ           NOT NULL DEFAULT NOW()
+);
+
+-- Unread-count badge + ordered feed.
+CREATE INDEX IF NOT EXISTS notifications_user_read_created_idx
+  ON notifications (user_id, read_at, created_at DESC);
+-- De-duplication queries (per user, repo, type).
+CREATE INDEX IF NOT EXISTS notifications_user_repo_type_created_idx
+  ON notifications (user_id, repo_id, type, created_at DESC);
+
+ALTER TABLE notifications ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users access their own notifications" ON notifications;
+CREATE POLICY "Users access their own notifications"
+  ON notifications FOR ALL
+  USING (auth.uid() = user_id)
+  WITH CHECK (auth.uid() = user_id);
 
 -- =============================================================================
 -- END OF SCHEMA

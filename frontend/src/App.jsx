@@ -11,6 +11,7 @@ const Login        = lazy(() => import('./pages/Login'));
 const AuthCallback = lazy(() => import('./pages/AuthCallback'));
 const Dashboard    = lazy(() => import('./pages/Dashboard'));
 const RepoView     = lazy(() => import('./pages/RepoView'));
+const NotificationsPage = lazy(() => import('./pages/NotificationsPage'));
 
 function AnimatedRoutes() {
   const location = useLocation();
@@ -27,6 +28,7 @@ function AnimatedRoutes() {
             <Route path="/"            element={<Dashboard />} />
             <Route path="/dashboard"   element={<Dashboard />} />
             <Route path="/repo/:repoId" element={<RepoView />} />
+            <Route path="/notifications" element={<NotificationsPage />} />
           </Route>
         </Routes>
       </Suspense>

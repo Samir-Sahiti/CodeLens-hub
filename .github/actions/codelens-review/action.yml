@@ -1,0 +1,32 @@
+name: 'CodeLens PR Review'
+description: 'Run CodeLens deterministic PR review and report the result as a GitHub status check.'
+author: 'CodeLens'
+branding:
+  icon: 'shield'
+  color: 'purple'
+inputs:
+  repo_id:
+    description: 'CodeLens repository UUID (from the repo URL / settings).'
+    required: true
+  codelens_api_token:
+    description: 'Per-repo CodeLens CI API token (codelens_pat_...). Store as a secret.'
+    required: true
+  fail_on_severity:
+    description: 'Comma-separated severities that fail the check.'
+    required: false
+    default: 'critical,high'
+  wait_timeout_seconds:
+    description: 'Maximum seconds to wait for the review to complete.'
+    required: false
+    default: '300'
+  codelens_api_url:
+    description: 'Base URL of the CodeLens API.'
+    required: false
+    default: 'https://app.codelens.dev'
+  github_token:
+    description: 'Token used to create the check run. Needs checks:write.'
+    required: false
+    default: ${{ github.token }}
+runs:
+  using: 'node20'
+  main: 'index.js'

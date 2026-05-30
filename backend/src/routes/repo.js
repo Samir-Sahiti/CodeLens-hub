@@ -63,4 +63,14 @@ router.get('/:repoId/pulls/:number/reviews', requireAuth, reviewController.listP
 router.post('/:repoId/pulls/:number/reviews', requireAuth, reviewController.runPrReview);
 router.post('/:repoId/reviews/:reviewId/publish', requireAuth, reviewController.publishPrReviewEndpoint);
 
+// CI status check (US-076) — authenticated by a per-repo CI token, NOT a user JWT
+const { requireCiToken } = require('../middleware/ciTokenAuth');
+router.post('/:repoId/pulls/:number/reviews/ci-check', requireCiToken, reviewController.ciCheckReview);
+
+// CI token management (US-076) — user-authenticated, gated by repo access
+const ciTokenController = require('../controllers/ciTokenController');
+router.post('/:repoId/ci-tokens', requireAuth, ciTokenController.createCiToken);
+router.get('/:repoId/ci-tokens', requireAuth, ciTokenController.listCiTokens);
+router.delete('/:repoId/ci-tokens/:tokenId', requireAuth, ciTokenController.revokeCiToken);
+
 module.exports = router;
