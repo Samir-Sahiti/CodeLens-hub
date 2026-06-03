@@ -167,12 +167,12 @@ export default function NotificationBell({ collapsed }) {
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-label="Notifications"
-        className={`flex w-full items-center rounded-lg px-3 py-2 text-sm text-gray-400 transition-colors hover:bg-surface-800 hover:text-white ${collapsed ? 'justify-center' : 'gap-3'}`}
+        className={`flex w-full items-center rounded-lg px-2 py-2 text-sm font-medium text-surface-400 transition-colors hover:bg-surface-800/70 hover:text-white ${collapsed ? 'justify-center' : 'justify-center lg:justify-start lg:gap-3'}`}
       >
-        <span className="relative">
+        <span className={`relative shrink-0 ${unread > 0 && !collapsed ? 'lg:mr-2' : ''}`}>
           <Bell className="h-5 w-5" />
           {unread > 0 && (
-            <span className="absolute -right-2 -top-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white">
+            <span className="absolute -right-2 -top-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold leading-none text-white">
               {badge}
             </span>
           )}
