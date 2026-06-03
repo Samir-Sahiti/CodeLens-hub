@@ -54,6 +54,33 @@ export function SeverityBreakdown({ counts = {} }) {
   );
 }
 
+function SeveritySummary({ counts = {}, hasReview = false }) {
+  if (!hasReview) return <span className="text-gray-500">-</span>;
+
+  const visibleCounts = SEVERITIES
+    .map((severity) => ({ severity, count: Number(counts[severity] || 0) }))
+    .filter((item) => item.count > 0);
+
+  if (visibleCounts.length === 0) {
+    return <Badge tone="success" className="w-fit">Clean</Badge>;
+  }
+
+  return (
+    <span className="flex flex-wrap gap-1.5">
+      {visibleCounts.map(({ severity, count }) => (
+        <span
+          key={severity}
+          className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold leading-none text-gray-950 ${SEVERITY_CLASS[severity]}`}
+          title={`${severity}: ${count}`}
+        >
+          <span className="capitalize">{severity}</span>
+          <span>{count}</span>
+        </span>
+      ))}
+    </span>
+  );
+}
+
 export function PRListItem({ pull, onSelect }) {
   const counts = pull.latest_review?.severity_counts || {};
   return (
@@ -72,10 +99,8 @@ export function PRListItem({ pull, onSelect }) {
       </span>
       <span className="font-mono text-xs text-gray-400">{shortSha(pull.head_sha)}</span>
       <Badge tone={STATUS_TONE[pull.review_status] || 'subtle'} className="w-fit capitalize">{statusLabel(pull.review_status)}</Badge>
-      <span className="flex gap-1 font-mono text-xs text-gray-400">
-        {SEVERITIES.map((severity) => (
-          <span key={severity} className={Number(counts[severity] || 0) > 0 ? 'text-gray-100' : ''}>{severity[0]}:{Number(counts[severity] || 0)}</span>
-        ))}
+      <span>
+        <SeveritySummary counts={counts} hasReview={!!pull.latest_review} />
       </span>
       <span className="text-xs text-gray-500">{pull.latest_review?.updated_at ? formatDate(pull.latest_review.updated_at) : '-'}</span>
     </button>
