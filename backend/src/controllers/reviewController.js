@@ -24,6 +24,7 @@ const { scanDependencies } = require('../services/osvScanner');
 const { getBlastRadius } = require('../services/graphService');
 const { emitPrReviewReady } = require('../services/notificationEvents');
 const { enqueueNotification, recipientsForRepo } = require('../services/notifications');
+const { scoreIssuesForRepo } = require('../services/riskScoring');
 
 const MODEL = 'claude-sonnet-4-20250514';
 const MAX_DAILY_TOKENS = parseInt(process.env.MAX_DAILY_TOKENS_PER_USER || '500000', 10);
@@ -1308,11 +1309,16 @@ async function runPrReviewBackground({ repoId, prNumber, owner, repo, githubToke
       }
     }
 
-    const filtered = findings.filter((fg) => {
+    const filteredRaw = findings.filter((fg) => {
       if (isSuppressedFinding(fg, suppressedSet)) return false;
       if (findingMatchesExistingIssue(fg, existingIssueKeys)) return false;
       return true;
     });
+    const filtered = (await scoreIssuesForRepo(repoId, filteredRaw.map((finding) => ({
+      ...finding,
+      file_paths: finding.file_path ? [finding.file_path] : [],
+      description: finding.message,
+    })))).sort((a, b) => (b.risk_score ?? -Infinity) - (a.risk_score ?? -Infinity));
 
     for (const finding of filtered) {
       send({ type: 'finding', finding });

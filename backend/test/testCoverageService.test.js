@@ -54,11 +54,14 @@ describe('testCoverageService', () => {
   it('warns and falls back when coverage.xml is not Cobertura', async () => {
     const repo = await makeTempRepo();
     await fs.writeFile(path.join(repo, 'coverage.xml'), '<report><package name="x"><counter type="LINE" covered="1" missed="1"/></package></report>');
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     const { coverageByPath, hasCoverageFiles } = await parseCoverageOverrides(repo, ['src/app.js']);
 
     expect(hasCoverageFiles).toBe(true);
     expect(coverageByPath.size).toBe(0);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('coverage.xml is not Cobertura-like'));
+    warnSpy.mockRestore();
   });
 
   it('parses LCOV, Istanbul JSON, and Cobertura XML with strict precedence inputs', async () => {

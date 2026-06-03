@@ -14,6 +14,7 @@ const { isManifestFile, parseManifest } = require('./manifestParser'); // US-045
 const { scanDependencies } = require('./osvScanner'); // US-045
 const { generateStartHereTour } = require('./startHereTourService'); // US-059
 const { enqueueNotification, recipientsForRepo } = require('./notifications'); // US-077
+const { scoreIssuesForRepo } = require('./riskScoring'); // US-079
 const { OpenAI } = require('openai');
 const { supabaseAdmin } = require('../db/supabase');
 const { SAFE_FETCH_CEILING, warnIfCeilingHit, withSupabaseRetry } = require('../lib/dbHelpers');
@@ -673,6 +674,51 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       console.warn(`[indexer] SCA scan failed (best-effort, non-blocking): ${scaErr.message}`);
     }
 
+    // US-050 + US-079: Git history hotspots and 30-day churn metrics must be
+    // available before the single issue risk-scoring pass below.
+    if (source === 'github' && token) {
+      try {
+        console.time(`[indexer] Phase Churn (${repoId})`);
+
+        const isIncremental = Array.isArray(incrementalChurnCommits) && incrementalChurnCommits.length > 0;
+        if (isIncremental) {
+          await applyIncrementalChurn(owner, name, token, repoId, incrementalChurnCommits);
+        } else {
+          await fetchRepoChurn(owner, name, token, repoId);
+        }
+
+        const churnMap = await readChurnFromDb(repoId);
+
+        if (churnMap.size > 0) {
+          const complexityMap = new Map(finalNodes.map(n => [n.file_path, n.complexity_score || 0]));
+          const maxCount = Math.max(1, ...[...churnMap.values()].map(e => e.count));
+          const maxComplexity = Math.max(1, ...[...complexityMap.values()]);
+
+          const scoredFiles = [];
+          for (const [filePath, entry] of churnMap.entries()) {
+            const complexity = complexityMap.get(filePath) || 0;
+            const score = (entry.count / maxCount) * (complexity / maxComplexity);
+            if (score > 0) scoredFiles.push({ filePath, entry, complexity, score });
+          }
+          scoredFiles.sort((a, b) => b.score - a.score);
+
+          const top10 = scoredFiles.slice(0, 10);
+          if (top10.length > 0) {
+            issues.push(...top10.map(({ filePath, entry, complexity, score }) => ({
+              repo_id: repoId,
+              type: 'refactoring_candidate',
+              severity: score > 0.5 ? 'high' : 'medium',
+              file_paths: [filePath],
+              description: `Hotspot score ${(score * 100).toFixed(0)}/100 — ${entry.count} commits in 12 months by ${entry.authors.size} author${entry.authors.size !== 1 ? 's' : ''}, ${entry.lines.toLocaleString()} lines changed, cyclomatic complexity ${complexity.toFixed(1)}.`,
+            })));
+          }
+        }
+        console.timeEnd(`[indexer] Phase Churn (${repoId})`);
+      } catch (churnErr) {
+        console.warn(`[indexer] Churn analysis failed (best-effort, non-blocking): ${churnErr.message}`);
+      }
+    }
+
     await supabaseAdmin
       .from('analysis_issues')
       .delete()
@@ -680,16 +726,18 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       .eq('type', 'untested_critical_file');
 
     if (issues.length > 0) {
+      const scoredIssues = await scoreIssuesForRepo(repoId, issues, uniqueEdges);
       // Phase 2.2: bulk_insert_analysis_issues consolidates 1-N chunked inserts
       // into a single RPC. Shape validation (type non-null, file_paths
       // non-empty) is enforced server-side now.
-      const issuePayload = issues
+      const issuePayload = scoredIssues
         .filter(issue => issue?.type && Array.isArray(issue.file_paths) && issue.file_paths.length > 0)
         .map(issue => ({
           type:        issue.type,
           severity:    issue.severity || null,
           file_paths:  issue.file_paths,
           description: issue.description || null,
+          risk_score:  issue.risk_score == null ? null : issue.risk_score,
         }));
       if (issuePayload.length > 0) {
         const { error } = await withSupabaseRetry(
@@ -738,7 +786,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
             type: isVuln ? 'new_vulnerability' : 'new_critical_issue',
             severity: issue.severity === 'critical' ? 'critical' : 'warning',
             payload: { issue_id: issue.id, file_path: filePath, rule_id: issue.type, message: issue.description },
-            link_url: `/repo/${repoId}/issues?issue=${issue.id}`,
+            link_url: `/repo/${repoId}?tab=issues&issue=${issue.id}`,
             dedup_key: `${issue.type}::${filePath || ''}::${(issue.description || '').slice(0, 80)}`,
           });
         }
@@ -1021,55 +1069,6 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
 
       } catch (embeddingError) {
         console.warn(`[indexer] Global embedding step failed severely, isolating error entirely: ${embeddingError.message}`);
-      }
-    }
-
-    // US-050: Git history hotspots — GitHub repos only, best-effort
-    if (source === 'github' && token) {
-      try {
-        console.time(`[indexer] Phase Churn (${repoId})`);
-
-        const isIncremental = Array.isArray(incrementalChurnCommits) && incrementalChurnCommits.length > 0;
-        if (isIncremental) {
-          await applyIncrementalChurn(owner, name, token, repoId, incrementalChurnCommits);
-        } else {
-          await fetchRepoChurn(owner, name, token, repoId);
-        }
-
-        // Read persisted churn back so refactoring_candidate issues are recomputed
-        // from the canonical rows on both the full-recompute and the incremental
-        // path. analysis_issues is wiped earlier in the pipeline.
-        const churnMap = await readChurnFromDb(repoId);
-
-        if (churnMap.size > 0) {
-          const complexityMap = new Map(finalNodes.map(n => [n.file_path, n.complexity_score || 0]));
-          const maxCount = Math.max(1, ...[...churnMap.values()].map(e => e.count));
-          const maxComplexity = Math.max(1, ...[...complexityMap.values()]);
-
-          const scoredFiles = [];
-          for (const [filePath, entry] of churnMap.entries()) {
-            const complexity = complexityMap.get(filePath) || 0;
-            const score = (entry.count / maxCount) * (complexity / maxComplexity);
-            if (score > 0) scoredFiles.push({ filePath, entry, complexity, score });
-          }
-          scoredFiles.sort((a, b) => b.score - a.score);
-
-          const top10 = scoredFiles.slice(0, 10);
-          if (top10.length > 0) {
-            const rfIssues = top10.map(({ filePath, entry, complexity, score }) => ({
-              repo_id: repoId,
-              type: 'refactoring_candidate',
-              severity: score > 0.5 ? 'high' : 'medium',
-              file_paths: [filePath],
-              description: `Hotspot score ${(score * 100).toFixed(0)}/100 — ${entry.count} commits in 12 months by ${entry.authors.size} author${entry.authors.size !== 1 ? 's' : ''}, ${entry.lines.toLocaleString()} lines changed, cyclomatic complexity ${complexity.toFixed(1)}.`,
-            }));
-            const { error: rfErr } = await supabaseAdmin.from('analysis_issues').insert(rfIssues);
-            if (rfErr) console.warn(`[indexer] refactoring_candidate insert error: ${rfErr.message}`);
-          }
-        }
-        console.timeEnd(`[indexer] Phase Churn (${repoId})`);
-      } catch (churnErr) {
-        console.warn(`[indexer] Churn analysis failed (best-effort, non-blocking): ${churnErr.message}`);
       }
     }
 

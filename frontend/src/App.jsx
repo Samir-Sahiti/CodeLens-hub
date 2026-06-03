@@ -1,5 +1,5 @@
 import { Suspense, lazy } from 'react';
-import { Routes, Route, useLocation } from 'react-router-dom';
+import { Navigate, Routes, Route, useLocation, useParams } from 'react-router-dom';
 import { AuthProvider }    from './context/AuthContext';
 import { RepoProvider }    from './context/RepoContext';
 import ProtectedRoute      from './components/ProtectedRoute';
@@ -12,6 +12,15 @@ const AuthCallback = lazy(() => import('./pages/AuthCallback'));
 const Dashboard    = lazy(() => import('./pages/Dashboard'));
 const RepoView     = lazy(() => import('./pages/RepoView'));
 const NotificationsPage = lazy(() => import('./pages/NotificationsPage'));
+const NotificationSettings = lazy(() => import('./pages/NotificationSettings'));
+
+function LegacyRepoIssuesRedirect() {
+  const { repoId } = useParams();
+  const { search } = useLocation();
+  const params = new URLSearchParams(search);
+  params.set('tab', 'issues');
+  return <Navigate to={`/repo/${repoId}?${params.toString()}`} replace />;
+}
 
 function AnimatedRoutes() {
   const location = useLocation();
@@ -28,7 +37,10 @@ function AnimatedRoutes() {
             <Route path="/"            element={<Dashboard />} />
             <Route path="/dashboard"   element={<Dashboard />} />
             <Route path="/repo/:repoId" element={<RepoView />} />
+            <Route path="/repo/:repoId/issues" element={<LegacyRepoIssuesRedirect />} />
+            <Route path="/repos/:repoId/issues" element={<LegacyRepoIssuesRedirect />} />
             <Route path="/notifications" element={<NotificationsPage />} />
+            <Route path="/settings/notifications" element={<NotificationSettings />} />
           </Route>
         </Routes>
       </Suspense>

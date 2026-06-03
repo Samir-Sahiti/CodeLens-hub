@@ -1,6 +1,18 @@
 import { memo } from 'react';
 import { ExternalLink, GitBranch, Sparkles } from './ui/Icons';
 
+const TYPE_LABELS = {
+  vulnerable_dependency: 'Vulnerable Dependencies',
+  hardcoded_secret: 'Hardcoded Secrets',
+  missing_auth: 'Potentially Unauthenticated Routes',
+  insecure_pattern: 'Insecure Code Patterns',
+  circular_dependency: 'Circular Dependencies',
+  god_file: 'God Files',
+  high_coupling: 'High Coupling',
+  dead_code: 'Dead Code',
+  refactoring_candidate: 'Refactoring Candidates',
+};
+
 export function getBadgeStyles(severity) {
   switch (severity?.toLowerCase()) {
     case 'critical': return 'bg-red-600/25 text-red-200 ring-1 ring-inset ring-red-500/40';
@@ -47,6 +59,12 @@ const IssueCard = memo(function IssueCard({
   );
   const resolvedSuppressLabel = suppressLabel
     || (type === 'missing_auth' ? 'Mark as intentionally public' : 'Mark as false positive');
+  const riskScore = Number(normalized.risk_score);
+  const hasRisk = Number.isFinite(riskScore);
+  const riskTitle = `severity_weight x blast_factor x churn_factor`
+    + (normalized.severity_weight || normalized.blast_factor || normalized.churn_factor
+      ? ` = ${normalized.severity_weight ?? '?'} x ${normalized.blast_factor ?? '?'} x ${normalized.churn_factor ?? '?'}`
+      : '');
 
   return (
     <div
@@ -58,9 +76,22 @@ const IssueCard = memo(function IssueCard({
           <span className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium uppercase tracking-wider ${getBadgeStyles(normalized.severity)}`}>
             {normalized.severity || 'UNKNOWN'}
           </span>
+          {TYPE_LABELS[normalized.type || type] && (
+            <span className="inline-flex items-center rounded-md border border-gray-800 bg-gray-950/70 px-2 py-1 text-xs font-medium text-gray-400">
+              {TYPE_LABELS[normalized.type || type]}
+            </span>
+          )}
           {normalized.rule_id && (
             <span className="inline-flex items-center rounded-md border border-gray-800 bg-gray-950/70 px-2 py-1 font-mono text-xs text-gray-400">
               {normalized.rule_id}
+            </span>
+          )}
+          {hasRisk && (
+            <span
+              title={riskTitle}
+              className="inline-flex items-center rounded-md border border-accent/30 bg-accent/10 px-2 py-1 text-xs font-medium text-accent-soft"
+            >
+              Risk {riskScore.toFixed(1)}
             </span>
           )}
           {hasPrOpen && (

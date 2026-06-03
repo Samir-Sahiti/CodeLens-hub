@@ -7,7 +7,7 @@ import { useAuth } from '../context/AuthContext';
 import { apiUrl } from '../lib/api';
 import { getSyntaxLanguage } from '../lib/constants';
 import Modal from './ui/Modal';
-import { Button, Badge } from './ui/Primitives';
+import { Button, Badge, Select } from './ui/Primitives';
 import IssueCard, { getBadgeStyles } from './IssueCard';
 import ProposalPanel from './ProposalPanel';
 import {
@@ -21,6 +21,13 @@ import {
 // scroll-container overhead isn't worth it and a plain map preserves the
 // existing sticky-header + grid behaviour exactly.
 const VIRTUALIZE_THRESHOLD = 30;
+const ISSUE_SORT_OPTIONS = [
+  { value: 'risk', label: 'Risk' },
+  { value: 'severity', label: 'Severity' },
+  { value: 'file', label: 'File' },
+  { value: 'recent', label: 'Most recent' },
+];
+const SEVERITY_RANK = { critical: 4, high: 3, medium: 2, low: 1 };
 
 // ── Group config ─────────────────────────────────────────────────────────────
 const GROUP_ORDER = [
@@ -81,7 +88,7 @@ const IssueGroup = memo(function IssueGroup({ type, label, Icon, issues, nodeMap
               <div className="pb-3">
                 <IssueCard
                   issue={issue}
-                  type={type}
+                  type={issue.type || type}
                   onIssueClick={onIssueClick}
                   onSuppress={onSuppress}
                   onDisableRule={onDisableRule}
@@ -101,7 +108,7 @@ const IssueGroup = memo(function IssueGroup({ type, label, Icon, issues, nodeMap
               <IssueCard
                 key={issue.id || `${type}-${idx}`}
                 issue={issue}
-                type={type}
+                type={issue.type || type}
                 onIssueClick={onIssueClick}
                 onSuppress={onSuppress}
                 onDisableRule={onDisableRule}
@@ -353,6 +360,7 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
   const [duplicationClusters, setDuplicationClusters] = useState([]);
   const [selectedDuplicationCluster, setSelectedDuplicationCluster] = useState(null);
   const [filterText,  setFilterText]  = useState('');
+  const [sortBy, setSortBy] = useState('risk');
   const [isFetching, setIsFetching] = useState(false);
   const [canMutateIssues, setCanMutateIssues] = useState(true);
   const [selectedProposalIssue, setSelectedProposalIssue] = useState(null);
@@ -446,6 +454,16 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
       issue.file_paths?.some(fp => fp.toLowerCase().includes(q))
     );
   }, [localIssues, debouncedFilterText]);
+
+  const sortedIssues = useMemo(() => {
+    const firstPath = (issue) => issue.file_paths?.[0] || '';
+    return [...filteredIssues].sort((a, b) => {
+      if (sortBy === 'severity') return (SEVERITY_RANK[b.severity] || 0) - (SEVERITY_RANK[a.severity] || 0);
+      if (sortBy === 'file') return firstPath(a).localeCompare(firstPath(b));
+      if (sortBy === 'recent') return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+      return (Number(b.risk_score) || 0) - (Number(a.risk_score) || 0);
+    });
+  }, [filteredIssues, sortBy]);
 
   const handleIssueClick = useCallback((issue) => {
     if (issue.type === 'vulnerable_dependency') {
@@ -596,11 +614,31 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
           className="w-full rounded-xl border border-gray-800 bg-gray-900 pl-9 pr-4 py-2.5 text-sm text-white placeholder-gray-500 outline-none focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/30 transition"
         />
       </div>
+      <div className="mb-5 flex justify-end">
+        <Select value={sortBy} onChange={(e) => setSortBy(e.target.value)} inputClassName="w-44">
+          {ISSUE_SORT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+        </Select>
+      </div>
 
       {/* Grouped issues */}
       <div className="space-y-2">
-        {GROUP_ORDER.map(({ type, label, Icon }) => {
-          const groupIssues = filteredIssues.filter(i => i.type === type);
+        {sortBy === 'risk' && sortedIssues.length > 0 ? (
+          <IssueGroup
+            type="risk"
+            label="Risk Ranked"
+            Icon={TrendingUp}
+            issues={sortedIssues}
+            nodeMap={nodeMap}
+            onIssueClick={handleIssueClick}
+            onSuppress={handleSuppress}
+            onDisableRule={handleDisableSastRule}
+            onProposeFix={setSelectedProposalIssue}
+            actionsDisabled={!canMutateIssues}
+            scrollParent={scrollParent}
+            proposalsByIssue={proposalsByIssue}
+          />
+        ) : GROUP_ORDER.map(({ type, label, Icon }) => {
+          const groupIssues = sortedIssues.filter(i => i.type === type);
           if (groupIssues.length === 0) return null;
           return (
             <IssueGroup
