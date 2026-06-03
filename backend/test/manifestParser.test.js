@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { isManifestFile, parseManifest, MANIFEST_BASENAMES } from '../src/services/manifestParser.js';
 
@@ -56,7 +56,11 @@ describe('manifestParser', () => {
   });
 
   it('swallows JSON parse errors instead of throwing', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
     expect(() => parseManifest('frontend/package.json', '{not json')).not.toThrow();
     expect(parseManifest('frontend/package.json', '{not json')).toEqual([]);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Failed to parse frontend/package.json'));
+    warnSpy.mockRestore();
   });
 });

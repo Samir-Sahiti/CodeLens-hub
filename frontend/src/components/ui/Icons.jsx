@@ -55,6 +55,7 @@ export {
   XCircle,
   Info,
   Bell,
+  Mail,
   CheckCheck,
 
   // Actions

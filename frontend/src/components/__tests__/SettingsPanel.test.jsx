@@ -34,12 +34,13 @@ describe('SettingsPanel', () => {
     globalThis.fetch = originalFetch;
   });
 
-  it('renders PR review publish controls and disabled banner', () => {
+  it('renders PR review publish controls and disabled banner', async () => {
     render(<SettingsPanel repo={repo} session={{ access_token: 'token-1' }} onRepoUpdated={vi.fn()} />);
 
     expect(screen.getByText(/auto-publish pr reviews/i)).toBeInTheDocument();
     expect(screen.getByText(/PR findings will stay in CodeLens until you publish them manually/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/request changes on/i)).toHaveValue('critical');
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled());
   });
 
   it('patches auto-publish and block severity settings', async () => {

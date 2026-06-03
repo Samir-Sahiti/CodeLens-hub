@@ -37,6 +37,21 @@ export function notificationText(n) {
   }
 }
 
+export function notificationLink(n) {
+  const raw = n?.link_url;
+  if (!raw) return null;
+
+  const issueMatch = raw.match(/^\/repos?\/([^/?#]+)\/issues(?:\?(.+))?$/);
+  if (issueMatch) {
+    const [, repoId, query = ''] = issueMatch;
+    const params = new URLSearchParams(query);
+    params.set('tab', 'issues');
+    return `/repo/${repoId}?${params.toString()}`;
+  }
+
+  return raw;
+}
+
 function groupByDay(notifications) {
   const groups = new Map();
   for (const n of notifications) {
@@ -127,7 +142,8 @@ export default function NotificationBell({ collapsed }) {
       await markRead(n.id);
     }
     setOpen(false);
-    if (n.link_url) navigate(n.link_url);
+    const target = notificationLink(n);
+    if (target) navigate(target);
   };
 
   const markAllRead = async () => {

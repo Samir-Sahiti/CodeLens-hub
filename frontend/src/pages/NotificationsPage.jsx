@@ -5,7 +5,7 @@ import { apiUrl } from '../lib/api';
 import { formatDate } from '../lib/constants';
 import { Button, EmptyState, Banner } from '../components/ui/Primitives';
 import { Bell, CheckCheck } from '../components/ui/Icons';
-import { TYPE_META, SEVERITY_DOT, notificationText } from '../components/NotificationBell';
+import { TYPE_META, SEVERITY_DOT, notificationLink, notificationText } from '../components/NotificationBell';
 
 const PAGE_SIZE = 50;
 
@@ -53,7 +53,8 @@ export default function NotificationsPage() {
         });
       } catch { /* ignore */ }
     }
-    if (n.link_url) navigate(n.link_url);
+    const target = notificationLink(n);
+    if (target) navigate(target);
   };
 
   const markAllRead = async () => {

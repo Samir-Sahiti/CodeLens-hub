@@ -1,6 +1,19 @@
 const { supabase, supabaseAdmin } = require('../db/supabase');
 const { SAFE_FETCH_CEILING, warnIfCeilingHit } = require('../lib/dbHelpers');
 const graphService = require('../services/graphService');
+const { buildRiskContext, computeRiskComponents } = require('../services/riskScoring');
+
+async function attachRiskComponents(repoId, issues) {
+  const ctx = await buildRiskContext(repoId);
+  return (issues || []).map((issue) => {
+    const components = computeRiskComponents(issue, ctx);
+    return {
+      ...issue,
+      ...components,
+      risk_score: issue.risk_score == null ? components.risk_score : issue.risk_score,
+    };
+  });
+}
 
 /** GET /api/analysis/:repoId/graph — dependency graph overview (counts + top hubs/sinks + cycle count) */
 const getDependencyGraph = async (req, res) => {
@@ -37,7 +50,7 @@ const getIssues = async (req, res) => {
 
   if (error) return res.status(500).json({ error: error.message });
   warnIfCeilingHit('analysisController.getIssues', data);
-  res.json(data);
+  res.json(await attachRiskComponents(repoId, data || []));
 };
 
 /** POST /api/analysis/:repoId/issues/suppress — mark an issue as a false positive */

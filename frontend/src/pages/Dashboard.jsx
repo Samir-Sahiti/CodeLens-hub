@@ -11,6 +11,7 @@ import CreateTeamModal from '../components/CreateTeamModal';
 import { Badge, Banner, Button, EmptyState, Panel, SearchInput, Select, Skeleton, Toolbar } from '../components/ui/Primitives';
 import {
   ArrowRight,
+  Clock,
   FolderOpen,
   GitBranch,
   RefreshCw,
@@ -35,11 +36,11 @@ function timeAgo(dateString) {
 }
 
 function LanguageMiniBar({ languages }) {
-  if (!languages?.length) return <div className="mb-5 h-1.5 rounded-full bg-surface-800" />;
+  if (!languages?.length) return <div className="h-1 rounded-full bg-surface-800" />;
   const total = languages.reduce((s, l) => s + l.count, 0);
   if (!total) return null;
   return (
-    <div className="mb-5 flex h-1.5 w-full overflow-hidden rounded-full shadow-inner bg-surface-800" title="Language distribution">
+    <div className="flex h-1 w-full overflow-hidden rounded-full bg-surface-800 shadow-inner" title="Language distribution">
       {languages.map(l => (
         <div
           key={l.language}
@@ -78,43 +79,44 @@ const RepoCard = memo(function RepoCard({ repo, onRetry, onDelete, isRetrying, s
       as="article"
       padded={false}
       style={style}
-      className="group overflow-hidden transition-all hover:border-surface-600 hover:shadow-lg"
+      className="group overflow-hidden bg-surface-900/70 transition-all duration-150 hover:-translate-y-0.5 hover:border-surface-600 hover:bg-surface-900 hover:shadow-lg"
     >
-      <Link to={`/repo/${repo.id}`} className="block">
-        <div className="p-6">
-          <LanguageMiniBar languages={repo.languages} />
-
-          <div className="flex items-start justify-between gap-3">
+      <Link to={`/repo/${repo.id}`} className="block p-5">
+        <div className="space-y-5">
+          <div className="flex min-h-16 items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
+              <div className="flex min-w-0 items-center gap-2">
                 <span className={`h-2 w-2 shrink-0 rounded-full ${healthDot}`} />
-                <h2 className="truncate text-base font-semibold text-surface-50 group-hover:text-accent-soft">
+                <h2 className="truncate text-base font-semibold leading-6 text-surface-50 group-hover:text-accent-soft">
                   {repo.name}
                 </h2>
               </div>
-              <p className="mt-1 truncate text-xs text-surface-500">
+              <p className="mt-1 truncate text-sm text-surface-400">
                 {repo.source === 'github' ? 'GitHub' : 'Upload'} · {repo.file_count ?? 0} files
                 {repo.latest_job_summary?.progress_pct > 0 && (repo.status === 'pending' || repo.status === 'indexing') && (
                   <> · {repo.latest_job_summary.progress_pct}%</>
                 )}
               </p>
             </div>
-            <div className="flex shrink-0 flex-col items-end gap-1.5">
+            <div className="flex shrink-0 flex-col items-end gap-1">
               <StatusBadge status={repo.status} />
               {repo.auto_sync_enabled && <Badge tone="accent">Auto-sync</Badge>}
               {repo.shared && repo.team_name && <Badge tone="subtle">{repo.team_name}</Badge>}
             </div>
           </div>
+
+          <LanguageMiniBar languages={repo.languages} />
         </div>
       </Link>
 
-      <div className="flex items-center justify-between gap-3 border-t border-surface-800 px-6 py-4 bg-surface-900/30">
-        <span className="truncate text-xs text-surface-500">
+      <div className="flex items-center justify-between gap-3 border-t border-surface-800 bg-surface-950/35 px-5 py-3.5">
+        <span className="inline-flex min-w-0 items-center gap-1.5 truncate text-xs text-surface-500">
+          <Clock className="h-3.5 w-3.5 shrink-0" />
           {repo.indexed_at
             ? `Indexed ${timeAgo(repo.indexed_at)}`
             : `Added ${timeAgo(repo.created_at)}`}
         </span>
-        <Toolbar className="shrink-0">
+        <Toolbar className="shrink-0 gap-1.5">
           {!repo.shared && (
             <Button
               size="sm"
@@ -137,7 +139,7 @@ const RepoCard = memo(function RepoCard({ repo, onRetry, onDelete, isRetrying, s
               Delete
             </Button>
           )}
-          <Button as={Link} to={`/repo/${repo.id}`} size="sm" variant="ghost" className="hidden sm:inline-flex cursor-pointer hover:text-white">
+          <Button as={Link} to={`/repo/${repo.id}`} size="sm" variant="ghost" className="hidden cursor-pointer hover:text-white sm:inline-flex">
             Open <ArrowRight className="h-3.5 w-3.5" />
           </Button>
         </Toolbar>
@@ -277,15 +279,16 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="min-h-screen p-4 text-white sm:p-6 lg:p-8">
-      <div className="mb-8">
-        <div className="mb-5 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+    <div className="min-h-screen px-4 py-5 text-white sm:px-6 lg:px-10 lg:py-8">
+      <div className="mx-auto max-w-[96rem]">
+      <div className="mb-6">
+        <div className="mb-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start">
           <div>
             <p className="text-xs uppercase tracking-[0.2em] text-surface-500">Workspace</p>
             <h1 className="mt-1 text-2xl font-semibold tracking-tight text-white">Repositories</h1>
             <p className="mt-1 text-sm text-surface-500">{repos.length} connected repositories</p>
           </div>
-          <Toolbar>
+          <Toolbar className="xl:justify-end">
             <Button icon={Users} variant="outline" onClick={() => setIsCreateTeamOpen(true)}>Create Team</Button>
             <Button icon={Upload} variant="secondary" onClick={() => setIsUploadModalOpen(true)}>Upload</Button>
             <Button icon={GitBranch} variant="primary" onClick={() => setIsConnectModalOpen(true)}>Connect GitHub</Button>
@@ -293,14 +296,14 @@ export default function Dashboard() {
         </div>
 
         {repos.length > 0 && (
-          <Toolbar>
+          <Toolbar className="mt-5 rounded-xl border border-surface-800 bg-surface-900/45 p-2">
             <SearchInput
-              className="w-full max-w-sm"
+              className="min-w-0 flex-1"
               placeholder="Filter repositories"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
-            <div className="relative">
+            <div className="relative w-full sm:w-48">
               <SortAsc className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-surface-500" />
               <Select value={sortBy} onChange={(e) => setSortBy(e.target.value)} inputClassName="pl-9">
                 {SORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
@@ -328,7 +331,7 @@ export default function Dashboard() {
       ) : (
         <>
           {ownedRepos.length > 0 && (
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 2xl:grid-cols-3">
               {ownedRepos.map((repo, i) => (
                 <RepoCard
                   key={repo.id}
@@ -349,7 +352,7 @@ export default function Dashboard() {
                 <h2 className="text-xs font-semibold uppercase tracking-[0.2em] text-surface-400">Team Repositories</h2>
                 <Badge tone="subtle">{sharedRepos.length}</Badge>
               </div>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 2xl:grid-cols-3">
                 {sharedRepos.map((repo, i) => (
                   <RepoCard
                     key={repo.id}
@@ -380,6 +383,7 @@ export default function Dashboard() {
           toast.success(`Team "${team.name}" created with ${count} collaborator${count !== 1 ? 's' : ''} added.`);
         }}
       />
+      </div>
     </div>
   );
 }

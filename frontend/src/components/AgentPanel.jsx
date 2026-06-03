@@ -44,11 +44,12 @@ function formatRelativeTime(iso) {
 /** Verb mapping for ToolCallCard headers. Static once compiled. */
 const TOOL_VERBS = {
   get_graph_overview: () => 'the dependency graph',
-  list_issues: ({ type, file, severity }) => {
-    if (file) return `issues in \`${file}\``;
-    if (type) return `${type} issues`;
-    if (severity) return `${severity}-severity issues`;
-    return 'all issues';
+  list_issues: ({ type, file, severity, sort_by }) => {
+    const suffix = sort_by ? ` sorted by ${sort_by}` : '';
+    if (file) return `issues in \`${file}\`${suffix}`;
+    if (type) return `${type} issues${suffix}`;
+    if (severity) return `${severity}-severity issues${suffix}`;
+    return `all issues${suffix}`;
   },
   get_file_metrics: ({ path }) => `metrics for \`${path}\``,
   get_blast_radius: ({ path }) => `blast radius of \`${path}\``,

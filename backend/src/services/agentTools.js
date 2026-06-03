@@ -29,6 +29,7 @@ const { readFile } = require('./fileService');
 const { embedQuery, retrieveChunks } = require('../ai/ragService');
 const repoController = require('../controllers/repoController');
 const reviewController = require('../controllers/reviewController');
+const { buildRiskContext, computeRiskComponents } = require('./riskScoring');
 
 const COLLECTION_LIMIT = 50;
 
@@ -47,8 +48,9 @@ const tools = [
       type: 'object',
       properties: {
         type: { type: 'string', description: 'Filter to a single issue type (e.g. "god_file").' },
-        severity: { type: 'string', enum: ['low', 'medium', 'high'], description: 'Filter by severity.' },
+        severity: { type: 'string', enum: ['low', 'medium', 'high', 'critical'], description: 'Filter by severity.' },
         file: { type: 'string', description: 'Filter to issues that mention this file path.' },
+        sort_by: { type: 'string', enum: ['risk', 'severity', 'recent'], description: 'Sort order. Defaults to risk.' },
       },
     },
   },
@@ -194,18 +196,39 @@ const toolHandlers = {
       await gate(ctx);
       let q = supabaseAdmin
         .from('analysis_issues')
-        .select('id, type, severity, file_paths, description', { count: 'exact' })
+        .select('id, type, severity, file_paths, description, risk_score, created_at', { count: 'exact' })
         .eq('repo_id', ctx.repoId);
       if (input.type) q = q.eq('type', input.type);
       if (input.severity) q = q.eq('severity', input.severity);
       if (input.file) q = q.contains('file_paths', [input.file]);
+      const sortBy = input.sort_by || 'risk';
+      if (sortBy === 'risk') {
+        q = q.order('risk_score', { ascending: false, nullsFirst: false });
+      } else if (sortBy === 'recent') {
+        q = q.order('created_at', { ascending: false });
+      }
       q = q.range(0, COLLECTION_LIMIT - 1);
       const { data, error, count } = await q;
       if (error) throw error;
       // Sort high → medium → low in JS — Supabase string ordering would put
       // 'medium' before 'low' which is actively misleading.
       const SEV_RANK = { high: 3, critical: 4, medium: 2, low: 1 };
-      const rows = (data || []).slice().sort((a, b) => (SEV_RANK[b.severity] || 0) - (SEV_RANK[a.severity] || 0));
+      const riskCtx = await buildRiskContext(ctx.repoId);
+      const rowsWithComponents = (data || []).map((issue) => {
+        const components = computeRiskComponents(issue, riskCtx);
+        return {
+          ...issue,
+          risk_score: issue.risk_score == null ? components.risk_score : issue.risk_score,
+          severity_weight: components.severity_weight,
+          blast_factor: components.blast_factor,
+          churn_factor: components.churn_factor,
+        };
+      });
+      const rows = rowsWithComponents.slice().sort((a, b) => {
+        if (sortBy === 'recent') return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+        if (sortBy === 'severity') return (SEV_RANK[b.severity] || 0) - (SEV_RANK[a.severity] || 0);
+        return (b.risk_score ?? -Infinity) - (a.risk_score ?? -Infinity);
+      });
       if (typeof count === 'number' && count > rows.length) {
         return { items: rows, truncated: true, total: count };
       }

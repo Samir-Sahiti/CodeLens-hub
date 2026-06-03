@@ -8,6 +8,8 @@
 -- ─── Extensions ───────────────────────────────────────────────────────────────
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS supabase_vault CASCADE;
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+CREATE EXTENSION IF NOT EXISTS pg_net;
 
 -- =============================================================================
 -- ENUMS
@@ -449,13 +451,21 @@ CREATE TABLE IF NOT EXISTS analysis_issues (
   id          UUID       PRIMARY KEY DEFAULT gen_random_uuid(),
   repo_id     UUID       NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
   type        issue_type NOT NULL,
-  severity    TEXT       CHECK (severity IN ('low', 'medium', 'high')),
+  severity    TEXT       CHECK (severity IN ('low', 'medium', 'high', 'critical')),
   file_paths  TEXT[]     NOT NULL,
   description TEXT,
+  risk_score  FLOAT,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE analysis_issues ADD COLUMN IF NOT EXISTS risk_score FLOAT;
+ALTER TABLE analysis_issues DROP CONSTRAINT IF EXISTS analysis_issues_severity_check;
+ALTER TABLE analysis_issues ADD CONSTRAINT analysis_issues_severity_check
+  CHECK (severity IN ('low', 'medium', 'high', 'critical'));
+
 CREATE INDEX IF NOT EXISTS analysis_issues_repo_id_idx ON analysis_issues (repo_id);
+CREATE INDEX IF NOT EXISTS analysis_issues_repo_risk_idx
+  ON analysis_issues (repo_id, risk_score DESC NULLS LAST);
 
 -- =============================================================================
 -- ISSUE SUPPRESSIONS (US-044 / US-046)
@@ -833,6 +843,37 @@ CREATE POLICY "Users can access file_churn for their repos"
     )
   );
 
+-- US-014 / US-079: 30-day churn metrics used by composite risk scoring.
+-- Kept beside the existing 12-month file_churn table; both are preserved.
+CREATE TABLE IF NOT EXISTS churn_metrics (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  repo_id             UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+  file_path           TEXT NOT NULL,
+  commits_in_last_30d INT  NOT NULL DEFAULT 0,
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (repo_id, file_path)
+);
+
+CREATE INDEX IF NOT EXISTS churn_metrics_repo_id_idx ON churn_metrics (repo_id);
+
+ALTER TABLE churn_metrics ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can access churn_metrics for their repos" ON churn_metrics;
+CREATE POLICY "Users can access churn_metrics for their repos"
+  ON churn_metrics FOR ALL
+  USING (
+    repo_id IN (
+      SELECT id FROM repositories
+      WHERE  user_id = auth.uid()
+      OR id IN (
+        SELECT repo_id FROM team_repositories
+        WHERE team_id IN (
+          SELECT team_id FROM team_members WHERE user_id = auth.uid()
+        )
+      )
+    )
+  );
+
 -- =============================================================================
 -- REINDEX CLEAR FUNCTION
 -- Deletes all derived data for a repo in a single transaction (1 RPC round
@@ -854,6 +895,7 @@ BEGIN
   DELETE FROM graph_nodes          WHERE repo_id = p_repo_id;
   DELETE FROM dependency_manifests WHERE repo_id = p_repo_id;
   DELETE FROM file_churn           WHERE repo_id = p_repo_id;
+  DELETE FROM churn_metrics        WHERE repo_id = p_repo_id;
 END;
 $$;
 
@@ -1161,6 +1203,7 @@ BEGIN
   -- 5. Conditionally clear file_churn (preserved on the incremental webhook path).
   IF NOT p_preserve_churn THEN
     DELETE FROM file_churn WHERE repo_id = p_repo_id;
+    DELETE FROM churn_metrics WHERE repo_id = p_repo_id;
   END IF;
 
   -- 6. Reset coverage flags on every graph_node for the repo.
@@ -1219,7 +1262,12 @@ BEGIN
       ARRAY(
         SELECT jsonb_array_elements_text(COALESCE(item->'file_paths', '[]'::jsonb))
       )                                     AS file_paths,
-      NULLIF(item->>'description', '')      AS description
+      NULLIF(item->>'description', '')      AS description,
+      CASE
+        WHEN item ? 'risk_score' AND NULLIF(item->>'risk_score', '') IS NOT NULL
+        THEN (item->>'risk_score')::FLOAT
+        ELSE NULL
+      END                                   AS risk_score
     FROM jsonb_array_elements(p_issues) AS item
   ),
   filtered AS (
@@ -1228,8 +1276,8 @@ BEGIN
        AND array_length(file_paths, 1) > 0
   ),
   inserted AS (
-    INSERT INTO analysis_issues (id, repo_id, type, severity, file_paths, description)
-    SELECT gen_random_uuid(), p_repo_id, type_text::issue_type, severity, file_paths, description
+    INSERT INTO analysis_issues (id, repo_id, type, severity, file_paths, description, risk_score)
+    SELECT gen_random_uuid(), p_repo_id, type_text::issue_type, severity, file_paths, description, risk_score
       FROM filtered
     RETURNING 1
   )
@@ -1512,8 +1560,11 @@ CREATE TABLE IF NOT EXISTS notifications (
   payload_json JSONB                 NOT NULL DEFAULT '{}'::jsonb,
   link_url     TEXT,
   read_at      TIMESTAMPTZ,
+  notification_email_status TEXT,
   created_at   TIMESTAMPTZ           NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS notification_email_status TEXT;
 
 -- Unread-count badge + ordered feed.
 CREATE INDEX IF NOT EXISTS notifications_user_read_created_idx
@@ -1529,6 +1580,107 @@ CREATE POLICY "Users access their own notifications"
   ON notifications FOR ALL
   USING (auth.uid() = user_id)
   WITH CHECK (auth.uid() = user_id);
+
+-- =============================================================================
+-- US-078: notification preferences and email digest opt-in
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS notification_preferences (
+  user_id                  UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  in_app_enabled           BOOLEAN DEFAULT true,
+  email_enabled            BOOLEAN DEFAULT false,
+  email_digest_hour        INT     DEFAULT 9,
+  email_immediate_critical BOOLEAN DEFAULT true,
+  per_type_json            JSONB,
+  timezone                 TEXT    DEFAULT 'UTC'
+);
+
+ALTER TABLE notification_preferences ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users access their own notification preferences" ON notification_preferences;
+CREATE POLICY "Users access their own notification preferences"
+  ON notification_preferences FOR ALL
+  USING (auth.uid() = user_id)
+  WITH CHECK (auth.uid() = user_id);
+
+-- Immediate critical email trigger. Configure these DB settings in Supabase:
+--   ALTER DATABASE postgres SET app.notification_email_trigger_url =
+--     'https://<api-host>/api/preferences/notifications/immediate/run';
+--   ALTER DATABASE postgres SET app.notification_email_trigger_secret = '<secret>';
+CREATE OR REPLACE FUNCTION trigger_immediate_critical_notification_email()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_url    TEXT := current_setting('app.notification_email_trigger_url', true);
+  v_secret TEXT := current_setting('app.notification_email_trigger_secret', true);
+BEGIN
+  IF NEW.severity <> 'critical' THEN
+    RETURN NEW;
+  END IF;
+
+  IF COALESCE(v_url, '') = '' OR COALESCE(v_secret, '') = '' THEN
+    RAISE EXCEPTION 'Notification email trigger settings are not configured';
+  END IF;
+
+  PERFORM net.http_post(
+    url := v_url,
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-notification-email-secret', v_secret
+    ),
+    body := jsonb_build_object('notification_id', NEW.id)
+  );
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS notifications_immediate_critical_email ON notifications;
+CREATE TRIGGER notifications_immediate_critical_email
+  AFTER INSERT ON notifications
+  FOR EACH ROW EXECUTE FUNCTION trigger_immediate_critical_notification_email();
+
+-- Hourly digest scheduler. Configure these DB settings in Supabase before
+-- relying on the job:
+--   ALTER DATABASE postgres SET app.notification_digest_url =
+--     'https://<api-host>/api/preferences/notifications/digest/run';
+--   ALTER DATABASE postgres SET app.notification_digest_secret = '<secret>';
+CREATE OR REPLACE FUNCTION run_notification_digest_http_job()
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_url    TEXT := current_setting('app.notification_digest_url', true);
+  v_secret TEXT := current_setting('app.notification_digest_secret', true);
+BEGIN
+  IF COALESCE(v_url, '') = '' OR COALESCE(v_secret, '') = '' THEN
+    RAISE EXCEPTION 'Notification digest job settings are not configured';
+  END IF;
+
+  PERFORM net.http_post(
+    url := v_url,
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-digest-secret', v_secret
+    ),
+    body := '{}'::jsonb
+  );
+END;
+$$;
+
+SELECT cron.unschedule('codelens-hourly-notification-digest')
+WHERE EXISTS (
+  SELECT 1 FROM cron.job WHERE jobname = 'codelens-hourly-notification-digest'
+);
+
+SELECT cron.schedule(
+  'codelens-hourly-notification-digest',
+  '0 * * * *',
+  $$SELECT run_notification_digest_http_job();$$
+);
 
 -- =============================================================================
 -- END OF SCHEMA

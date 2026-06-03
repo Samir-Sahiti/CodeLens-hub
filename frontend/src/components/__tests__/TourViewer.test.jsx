@@ -115,8 +115,8 @@ describe('TourViewer', () => {
     expect(toast.success).toHaveBeenCalledWith('Link copied — step 2 of Authentication flow');
   });
 
-  it('renders "Forked from" attribution when forked_from is set (US-061)', () => {
-    renderViewer({
+  it('renders "Forked from" attribution when forked_from is set (US-061)', async () => {
+    const { container } = renderViewer({
       tour: {
         ...tour,
         forked_from: 'original-tour-id',
@@ -124,6 +124,7 @@ describe('TourViewer', () => {
       },
     });
     expect(screen.getByText('Forked from Alice')).toBeInTheDocument();
+    await waitFor(() => expect(container.textContent).toContain('line-two'));
   });
 
   it('disables Prev on the first step, advances with Next, and finishes on the last step', async () => {

@@ -11,7 +11,10 @@ vi.mock('../../context/AuthContext', () => ({
 
 function renderPanel(initialEntry = '/repo/repo-1?tab=pulls') {
   return render(
-    <MemoryRouter initialEntries={[initialEntry]}>
+    <MemoryRouter
+      initialEntries={[initialEntry]}
+      future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
+    >
       <ToastProvider>
         <PullRequestsPanel repoId="repo-1" repo={{ name: 'demo' }} active />
       </ToastProvider>

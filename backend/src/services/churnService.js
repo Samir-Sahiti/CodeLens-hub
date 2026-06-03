@@ -17,6 +17,12 @@ function sinceDate() {
   return d.toISOString();
 }
 
+function thirtyDaysAgo() {
+  const d = new Date();
+  d.setDate(d.getDate() - 30);
+  return d;
+}
+
 async function githubGet(url, token) {
   const res = await fetch(url, {
     headers: {
@@ -68,6 +74,7 @@ async function getCommitDetail(owner, repo, sha, token) {
 async function buildChurnMap(owner, repo, token, commits) {
   const limit = pLimit(DETAIL_CONCURRENCY);
   const churnMap = new Map(); // filePath → { commitShas, authors, linesChanged, lastModified }
+  const cutoff30d = thirtyDaysAgo();
 
   const results = await Promise.allSettled(
     commits.map(commit =>
@@ -91,10 +98,11 @@ async function buildChurnMap(owner, repo, token, commits) {
     for (const file of files) {
       const fp = file.filename;
       if (!churnMap.has(fp)) {
-        churnMap.set(fp, { count: 0, authors: new Set(), lines: 0, lastModified: null });
+        churnMap.set(fp, { count: 0, count30d: 0, authors: new Set(), lines: 0, lastModified: null });
       }
       const entry = churnMap.get(fp);
       entry.count += 1;
+      if (ts && ts >= cutoff30d) entry.count30d += 1;
       entry.authors.add(author);
       entry.lines += (file.additions || 0) + (file.deletions || 0);
       if (ts && (!entry.lastModified || ts > entry.lastModified)) {
@@ -151,6 +159,19 @@ async function fetchRepoChurn(owner, repoName, token, repoId) {
       if (error) console.warn(`[churn] DB upsert error: ${error.message}`);
     }
     console.log(`[churn] Wrote ${rows.length} file_churn rows for repo ${repoId}`);
+
+    const metricRows = rows.map((row) => ({
+      repo_id: repoId,
+      file_path: row.file_path,
+      commits_in_last_30d: churnMap.get(row.file_path)?.count30d || 0,
+      updated_at: new Date().toISOString(),
+    }));
+    for (let i = 0; i < metricRows.length; i += BATCH) {
+      const { error } = await supabaseAdmin
+        .from('churn_metrics')
+        .upsert(metricRows.slice(i, i + BATCH), { onConflict: 'repo_id,file_path', ignoreDuplicates: false });
+      if (error) console.warn(`[churn] churn_metrics upsert error: ${error.message}`);
+    }
   }
 
   console.timeEnd(`[churn] Fetch (${repoId})`);
@@ -181,7 +202,8 @@ async function applyIncrementalChurn(owner, repoName, token, repoId, commitShas)
   );
 
   // Build per-file delta from fetched commit details
-  const deltaMap = new Map(); // filePath → { countDelta, linesDelta, lastModified }
+  const deltaMap = new Map(); // filePath → { countDelta, count30dDelta, linesDelta, lastModified }
+  const cutoff30d = thirtyDaysAgo();
   for (const result of details) {
     if (result.status !== 'fulfilled') continue;
     const commit = result.value;
@@ -191,10 +213,11 @@ async function applyIncrementalChurn(owner, repoName, token, repoId, commitShas)
       const fp = file.filename;
       if (!fp) continue;
       if (!deltaMap.has(fp)) {
-        deltaMap.set(fp, { countDelta: 0, linesDelta: 0, lastModified: null });
+        deltaMap.set(fp, { countDelta: 0, count30dDelta: 0, linesDelta: 0, lastModified: null });
       }
       const entry = deltaMap.get(fp);
       entry.countDelta += 1;
+      if (ts && ts >= cutoff30d) entry.count30dDelta += 1;
       entry.linesDelta += (file.additions || 0) + (file.deletions || 0);
       if (ts && (!entry.lastModified || ts > entry.lastModified)) {
         entry.lastModified = ts;
@@ -245,6 +268,27 @@ async function applyIncrementalChurn(owner, repoName, token, repoId, commitShas)
   if (upErr) console.warn(`[churn] Incremental upsert failed: ${upErr.message}`);
   else console.log(`[churn] Incremental update touched ${rows.length} files for repo ${repoId}`);
 
+  const { data: existingMetrics } = await supabaseAdmin
+    .from('churn_metrics')
+    .select('file_path, commits_in_last_30d')
+    .eq('repo_id', repoId)
+    .in('file_path', touchedPaths);
+  const metricsByPath = new Map((existingMetrics || []).map((row) => [row.file_path, row]));
+  const metricRows = [];
+  for (const [filePath, delta] of deltaMap.entries()) {
+    const existing = metricsByPath.get(filePath);
+    metricRows.push({
+      repo_id: repoId,
+      file_path: filePath,
+      commits_in_last_30d: (existing?.commits_in_last_30d || 0) + delta.count30dDelta,
+      updated_at: new Date().toISOString(),
+    });
+  }
+  const { error: metricsErr } = await supabaseAdmin
+    .from('churn_metrics')
+    .upsert(metricRows, { onConflict: 'repo_id,file_path', ignoreDuplicates: false });
+  if (metricsErr) console.warn(`[churn] Incremental churn_metrics upsert failed: ${metricsErr.message}`);
+
   console.timeEnd(`[churn] Incremental (${repoId})`);
 }
 
@@ -272,6 +316,7 @@ async function readChurnFromDb(repoId) {
     for (let i = 0; i < authorCount; i++) authors.add(`__author_${i}__`);
     map.set(row.file_path, {
       count: row.commit_count || 0,
+      count30d: 0,
       authors,
       lines: row.lines_changed || 0,
       lastModified: row.last_modified ? new Date(row.last_modified) : null,

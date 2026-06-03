@@ -3,7 +3,7 @@ import request from 'supertest';
 import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const require = createRequire(import.meta.url);
 
@@ -152,6 +152,10 @@ function createSupabaseMock(handlers) {
 
 describe('Backend API integration (mocked)', () => {
   beforeEach(() => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
     process.env.OPENAI_API_KEY = 'test';
     process.env.ANTHROPIC_API_KEY = 'test';
 
@@ -183,6 +187,10 @@ describe('Backend API integration (mocked)', () => {
         },
       },
     };
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   const wrap = (handler) => (req, res, next) => {
