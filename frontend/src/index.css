@@ -146,9 +146,39 @@ body {
   to { transform: translateX(0); opacity: 1; }
 }
 
+@keyframes slideOutToRight {
+  from { transform: translateX(0); opacity: 1; }
+  to { transform: translateX(100%); opacity: 0.85; }
+}
+
 @keyframes slideInFromLeft {
   from { transform: translateX(-100%); opacity: 0.85; }
   to { transform: translateX(0); opacity: 1; }
+}
+
+.guide-panel {
+  animation: slideInFromRight 280ms ease-out both;
+}
+
+.guide-panel-out {
+  animation: slideOutToRight 280ms ease-in both;
+}
+
+.annotation-badge {
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
 }
 
 @keyframes drawCheck {

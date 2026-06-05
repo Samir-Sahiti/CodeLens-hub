@@ -70,7 +70,43 @@ const upsertProfile = async (req, res) => {
  * The requireAuth middleware already validated the JWT and attached req.user.
  */
 const getMe = async (req, res) => {
-  res.json({ user: req.user });
+  const { data: profile, error } = await supabaseAdmin
+    .from('profiles')
+    .select('onboarding_seen')
+    .eq('id', req.user.id)
+    .maybeSingle();
+
+  if (error) {
+    console.error('[getMe] profile lookup failed:', error);
+    return res.status(500).json({ error: 'Failed to fetch profile' });
+  }
+
+  res.json({
+    user: req.user,
+    onboarding_seen: profile?.onboarding_seen ?? null,
+  });
+};
+
+/**
+ * POST /api/auth/onboarding-seen  (protected by requireAuth)
+ * Marks the static onboarding guide as dismissed for this user.
+ */
+const markOnboardingSeen = async (req, res) => {
+  const { data, error } = await supabaseAdmin
+    .from('profiles')
+    .upsert(
+      { id: req.user.id, onboarding_seen: new Date().toISOString() },
+      { onConflict: 'id' }
+    )
+    .select('onboarding_seen')
+    .single();
+
+  if (error) {
+    console.error('[markOnboardingSeen]', error);
+    return res.status(500).json({ error: 'Failed to update onboarding state' });
+  }
+
+  res.json({ onboarding_seen: data.onboarding_seen });
 };
 
 /**
@@ -83,4 +119,4 @@ const signOut = async (req, res) => {
   res.json({ message: 'Signed out' });
 };
 
-module.exports = { upsertProfile, getMe, signOut };
+module.exports = { upsertProfile, getMe, markOnboardingSeen, signOut };

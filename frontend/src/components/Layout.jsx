@@ -1,9 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import { lazy, Suspense, useState, useEffect, useCallback, useRef } from 'react';
 import { Link, Outlet, useLocation, useParams, useSearchParams } from 'react-router-dom';
 import { useAuth }  from '../context/AuthContext';
 import { useRepo }  from '../context/RepoContext';
 import { apiUrl }   from '../lib/api';
-import OnboardingModal from './OnboardingModal';
 import NotificationBell from './NotificationBell';
 import Tooltip from './ui/Tooltip';
 import { Badge, IconButton } from './ui/Primitives';
@@ -11,9 +10,11 @@ import { Badge, IconButton } from './ui/Primitives';
 import {
   LayoutDashboard, GitGraph, BarChart3, FolderTree,
   Package, ShieldAlert, Sparkles, Code2, Settings, GitBranch,
-  LogOut, Info, ChevronLeft, ChevronRight, ArrowLeft,
+  LogOut, HelpCircle, ChevronLeft, ChevronRight, ArrowLeft,
   Star,
 } from './ui/Icons';
+
+const OnboardingGuide = lazy(() => import('./OnboardingGuide'));
 
 // ── Token usage hook ─────────────────────────────────────────────────────────
 function useTokenUsage(session) {
@@ -53,13 +54,17 @@ function useKeyboardShortcut(key, callback, options = {}) {
 }
 
 export default function Layout() {
-  const { user, session, signOut } = useAuth();
+  const { user, session, signOut, onboardingSeen, setOnboardingSeen } = useAuth();
   const { repo, issueCount }       = useRepo();
   const tokenUsage                 = useTokenUsage(session);
   const location                   = useLocation();
   const { repoId }                 = useParams();
   const [searchParams]             = useSearchParams();
-  const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
+  const [isGuideOpen, setIsGuideOpen] = useState(false);
+  const [isGuideRendered, setIsGuideRendered] = useState(false);
+  const [deepLinkSlug, setDeepLinkSlug] = useState(null);
+  const [firstRepoId, setFirstRepoId] = useState(null);
+  const closeGuideTimerRef = useRef(null);
 
   // Sidebar collapse — persisted in localStorage
   const [collapsed, setCollapsed] = useState(() => {
@@ -80,15 +85,77 @@ export default function Layout() {
 
   const activeTab = searchParams.get('tab') || 'graph';
 
-  // Show onboarding modal on first dashboard visit
-  useEffect(() => {
-    if (
-      location.pathname === '/dashboard' &&
-      !localStorage.getItem('codelens_onboarding_complete')
-    ) {
-      setIsOnboardingOpen(true);
+  const openGuide = useCallback((slug) => {
+    if (closeGuideTimerRef.current) {
+      window.clearTimeout(closeGuideTimerRef.current);
+      closeGuideTimerRef.current = null;
     }
-  }, [location.pathname]);
+    setDeepLinkSlug(slug || null);
+    setIsGuideRendered(true);
+    setIsGuideOpen(true);
+  }, []);
+
+  useEffect(() => {
+    const slug = searchParams.get('guide');
+    if (slug) {
+      openGuide(slug);
+    }
+  }, [openGuide, searchParams]);
+
+  useEffect(() => {
+    const handleOpenGuide = (event) => {
+      openGuide(event.detail?.slug);
+    };
+    window.addEventListener('codelens:open-guide', handleOpenGuide);
+    return () => window.removeEventListener('codelens:open-guide', handleOpenGuide);
+  }, [openGuide]);
+
+  useEffect(() => {
+    if (!session?.access_token) {
+      setFirstRepoId(null);
+      return undefined;
+    }
+
+    let cancelled = false;
+    fetch(apiUrl('/api/repos'), {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    })
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (cancelled) return;
+        const repos = data?.repos || [];
+        const firstReady = repos.find(r => r.status === 'ready') || repos[0];
+        setFirstRepoId(firstReady?.id ? String(firstReady.id) : null);
+      })
+      .catch(() => {});
+
+    return () => { cancelled = true; };
+  }, [session?.access_token]);
+
+  const closeGuide = useCallback(async () => {
+    setIsGuideOpen(false);
+    if (closeGuideTimerRef.current) window.clearTimeout(closeGuideTimerRef.current);
+    closeGuideTimerRef.current = window.setTimeout(() => {
+      setIsGuideRendered(false);
+      closeGuideTimerRef.current = null;
+    }, 300);
+    if (!session?.access_token || onboardingSeen) return;
+
+    try {
+      const res = await fetch(apiUrl('/api/auth/onboarding-seen'), {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setOnboardingSeen(data.onboarding_seen ?? new Date().toISOString());
+      }
+    } catch {}
+  }, [onboardingSeen, session?.access_token, setOnboardingSeen]);
+
+  useEffect(() => () => {
+    if (closeGuideTimerRef.current) window.clearTimeout(closeGuideTimerRef.current);
+  }, []);
 
   const repoNavItems = [
     { label: 'Graph',        tab: 'graph',        Icon: GitGraph     },
@@ -115,7 +182,7 @@ export default function Layout() {
       >
 
         {/* Brand + collapse toggle */}
-        <div className="flex h-16 items-center justify-between px-3 border-b border-surface-800 shrink-0">
+        <div className="flex h-16 items-center justify-between gap-2 px-3 border-b border-surface-800 shrink-0">
           {!collapsed && (
             <Link
               to="/dashboard"
@@ -130,12 +197,18 @@ export default function Layout() {
               CL
             </Link>
           )}
-          <IconButton
-            onClick={toggleSidebar}
-            label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-            icon={collapsed ? ChevronRight : ChevronLeft}
-            className={collapsed ? 'mx-auto' : ''}
-          />
+          <div className={`flex items-center gap-1 ${collapsed ? 'mx-auto flex-col' : ''}`}>
+            <IconButton
+              onClick={() => openGuide()}
+              label="Open guide"
+              icon={HelpCircle}
+            />
+            <IconButton
+              onClick={toggleSidebar}
+              label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              icon={collapsed ? ChevronRight : ChevronLeft}
+            />
+          </div>
         </div>
 
         {/* Nav */}
@@ -253,9 +326,9 @@ export default function Layout() {
           {/* Show introduction */}
           <NavItem
             collapsed={collapsed}
-            onClick={() => setIsOnboardingOpen(true)}
-            icon={Info}
-            label="Introduction"
+            onClick={() => openGuide()}
+            icon={HelpCircle}
+            label="Guide"
             isActive={false}
             as="button"
           />
@@ -278,10 +351,17 @@ export default function Layout() {
         <Outlet />
       </main>
 
-      <OnboardingModal
-        isOpen={isOnboardingOpen}
-        onClose={() => setIsOnboardingOpen(false)}
-      />
+      {isGuideRendered && (
+        <Suspense fallback={null}>
+          <OnboardingGuide
+            open={isGuideOpen}
+            onClose={closeGuide}
+            repoId={repoId}
+            firstRepoId={firstRepoId}
+            deepLinkSlug={deepLinkSlug}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

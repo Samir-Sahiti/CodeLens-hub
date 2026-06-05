@@ -98,7 +98,7 @@ function deriveImpactAnalysis(sourcePath, response, nodes) {
 
 export default function RepoView() {
   const { repoId } = useParams();
-  const { session } = useAuth();
+  const { session, onboardingSeen } = useAuth();
   const { setRepo: setRepoCtx, setIssueCount } = useRepo();
   const toast = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -492,6 +492,9 @@ export default function RepoView() {
     const prev = prevStatusRef.current;
     prevStatusRef.current = repo?.status ?? null;
     if ((prev === 'pending' || prev === 'indexing') && repo?.status === 'ready') {
+      if (!onboardingSeen) {
+        window.dispatchEvent(new CustomEvent('codelens:open-guide', { detail: { repoId } }));
+      }
       setSearchParams((current) => {
         if (!current.get('tab')) {
           const next = new URLSearchParams(current);
@@ -501,7 +504,7 @@ export default function RepoView() {
         return current;
       }, { replace: true });
     }
-  }, [repo?.status, setSearchParams]);
+  }, [onboardingSeen, repo?.status, repoId, setSearchParams]);
 
   const handleReindex = async () => {
     if (!session?.access_token) return;

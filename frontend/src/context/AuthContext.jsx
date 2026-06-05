@@ -45,7 +45,22 @@ async function syncProfile(session, attempt = 0) {
 export function AuthProvider({ children }) {
   const [session,      setSession]      = useState(undefined); // undefined = still loading
   const [user,         setUser]         = useState(null);
+  const [onboardingSeen, setOnboardingSeen] = useState(null);
   const [syncError,    setSyncError]    = useState(null);
+
+  const fetchMe = async (nextSession) => {
+    if (!nextSession?.access_token) {
+      setOnboardingSeen(null);
+      return;
+    }
+
+    const res = await fetch(apiUrl('/api/auth/me'), {
+      headers: { Authorization: `Bearer ${nextSession.access_token}` },
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    setOnboardingSeen(data.onboarding_seen ?? null);
+  };
 
   useEffect(() => {
     // Hydrate from localStorage on mount
@@ -53,7 +68,11 @@ export function AuthProvider({ children }) {
       setSession(session ?? null);
       setUser(session?.user ?? null);
       if (session) {
-        syncProfile(session).catch(err => setSyncError(err.message));
+        syncProfile(session)
+          .then(() => fetchMe(session))
+          .catch(err => setSyncError(err.message));
+      } else {
+        setOnboardingSeen(null);
       }
     });
 
@@ -72,6 +91,11 @@ export function AuthProvider({ children }) {
             setSyncError(err.message);
           }
         }
+        if (session) {
+          fetchMe(session).catch(err => setSyncError(err.message));
+        } else {
+          setOnboardingSeen(null);
+        }
       }
     );
 
@@ -86,7 +110,7 @@ export function AuthProvider({ children }) {
   const loading = session === undefined;
 
   return (
-    <AuthContext.Provider value={{ user, session, loading, signOut, syncError }}>
+    <AuthContext.Provider value={{ user, session, loading, signOut, syncError, onboardingSeen, setOnboardingSeen }}>
       {children}
     </AuthContext.Provider>
   );
