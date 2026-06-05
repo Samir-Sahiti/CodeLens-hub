@@ -54,6 +54,7 @@ export {
   AlertCircle,
   XCircle,
   Info,
+  HelpCircle,
   Bell,
   Mail,
   CheckCheck,

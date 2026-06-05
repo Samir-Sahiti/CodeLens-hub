@@ -7,10 +7,10 @@
 ## Features
 
 ### Interactive Dependency Graph
-Analyzes the repository and builds a visual, force-directed dependency graph. Nodes represent files, edges show how they relate. Supports both SVG rendering (small repos) and Canvas rendering (large repos with 300+ files), with clustering for very large graphs. Export the current graph view as PNG or SVG.
+Analyzes the repository and builds a visual, force-directed dependency graph. Nodes represent files, edges show how they relate, with clustering, attack-surface overlays, and change impact analysis for blast radius review.
 
 ### Architectural Issue Detection
-Automatically detects structural problems: circular dependencies, god files, high coupling, and dead code. Issues are highlighted on the graph and grouped in a dedicated Issues panel.
+Automatically detects structural problems: circular dependencies, god files, high coupling, dead code, suppressions, and security signals. Issues are highlighted on the graph and grouped in a dedicated Issues panel.
 
 ### File Metrics & Complexity Analysis
 Each file's lines of code, import/dependent count, and complexity score are surfaced in a sortable Metrics table. Critical and at-risk files are colour-coded for instant triage.
@@ -18,17 +18,29 @@ Each file's lines of code, import/dependent count, and complexity score are surf
 ### Change Impact Analysis (Blast Radius)
 Select any file to see exactly which other files would be affected by a change — direct and transitive dependents highlighted live on the graph and exportable as JSON.
 
-### Natural Language Code Search
-RAG-powered search over the indexed codebase. Queries like "How does authentication work?" return context-aware, streamed answers with source references. Powered by OpenAI embeddings and Groq LLM.
+### Dependencies & SCA
+Scans package manifests and vulnerable packages so dependency risk is visible alongside code risk. Dependency findings can be reviewed from the Dependencies tab.
+
+### Tours
+Create, fork, and share guided tours that walk teammates through important files, graph paths, and repository concepts.
+
+### Pull Requests
+Pull request review integration is represented in the app and will expand into deeper PR review workflows in a future update.
+
+### Agent / Search
+Ask repository questions grounded in indexed code, graph data, issues, and metrics. Search and agent answers include source context so results can be verified.
 
 ### AI Code Review
 Paste a code snippet or describe a change and get a structured review — bug detection, security flags, and improvement suggestions — powered by Anthropic Claude.
 
-### GitHub Webhook Auto-sync
-Connect a GitHub webhook so the dependency graph and AI search index automatically re-index on every push to the default branch — no manual re-indexing required.
+### Settings
+Manage webhook auto-sync, team membership, notification preferences, and CI integration for each repository.
 
 ### Team Organizations
 Create a Team backed by your GitHub repository's collaborator list. Collaborators automatically see the shared indexed repository on their dashboard the first time they sign into CodeLens — no duplicate indexing.
+
+### In-App Onboarding Guide
+A persistent help icon opens a markdown-sourced guide that is fuzzy-searchable, deep-linkable, and organized around the main app tabs.
 
 ---
 

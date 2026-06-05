@@ -145,6 +145,7 @@ CREATE TABLE IF NOT EXISTS profiles (
 
 -- Column added in US-039 — safe to re-run
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS github_token_secret_id UUID;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS onboarding_seen TIMESTAMPTZ;
 
 ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
 

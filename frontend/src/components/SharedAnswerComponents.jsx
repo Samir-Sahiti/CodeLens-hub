@@ -142,7 +142,7 @@ function CodeBlock({ children, className, ...props }) {
 // AnswerBlock — renders full markdown with GFM, code highlighting, streaming cursor
 // ---------------------------------------------------------------------------
 
-const mdComponents = {
+export const mdComponents = {
   code({ node, inline, className, children, ...props }) {
     if (inline) {
       return (

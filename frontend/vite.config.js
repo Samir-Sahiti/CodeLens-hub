@@ -1,5 +1,32 @@
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
+import yaml from 'js-yaml';
+
+function onboardingPlugin() {
+  return {
+    name: 'codelens-onboarding',
+    transform(src, id) {
+      if (!id.endsWith('onboarding-guide.md')) return null;
+
+      const sections = src
+        .split(/^---\s*$/m)
+        .map(part => part.trim())
+        .filter(Boolean)
+        .reduce((acc, part, index, parts) => {
+          if (index % 2 !== 0) return acc;
+          const frontmatter = yaml.load(part) || {};
+          const body = (parts[index + 1] || '').trim();
+          acc.push({ ...frontmatter, body });
+          return acc;
+        }, []);
+
+      return {
+        code: `export const sections = ${JSON.stringify(sections)};`,
+        map: null,
+      };
+    },
+  };
+}
 
 // Bundle visualizer (Phase 0): generates dist/stats.html on every production
 // build so chunk size regressions are visible. Loaded dynamically to avoid
@@ -25,7 +52,7 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '../', '');
 
   return {
-    plugins: [react(), ...(visualizerPlugin ? [visualizerPlugin] : [])],
+    plugins: [react(), onboardingPlugin(), ...(visualizerPlugin ? [visualizerPlugin] : [])],
     envDir: '../', // Tell Vite where to find .env for CLIENT-side variables
 
     server: {
