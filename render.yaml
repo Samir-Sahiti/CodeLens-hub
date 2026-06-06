@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: codelens-api
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: INTERNAL_SNAPSHOT_SECRET
+        sync: false
+
+  - type: cron
+    name: codelens-daily-snapshot
+    schedule: "0 3 * * *"
+    region: oregon
+    command: node scripts/snapshot-daily.js
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: INTERNAL_SNAPSHOT_SECRET
+        sync: false
