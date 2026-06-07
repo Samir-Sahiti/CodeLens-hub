@@ -21,6 +21,7 @@ const toursRoutes    = require('./routes/tours');
 const agentRoutes    = require('./routes/agent');
 const notificationRoutes = require('./routes/notifications');
 const preferencesRoutes = require('./routes/preferences');
+const internalRoutes = require('./routes/internal');
 const errorHandler   = require('./middleware/errorHandler');
 const { requestTimingMiddleware } = require('./observability/requestStore');
 
@@ -88,6 +89,7 @@ app.use('/api/repos',    toursRoutes);
 app.use('/api',           agentRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/preferences', preferencesRoutes);
+app.use('/api/internal',  internalRoutes);
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 

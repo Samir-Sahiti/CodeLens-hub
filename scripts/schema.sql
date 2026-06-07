@@ -1684,5 +1684,178 @@ SELECT cron.schedule(
 );
 
 -- =============================================================================
+-- US-081: Daily metrics snapshot table and rollup job
+-- Pre-aggregated per-repo structural health snapshot, written nightly and
+-- immediately after every successful re-index. Denormalised on purpose: single-
+-- row reads per data point beat multi-table joins across 90-day trend windows.
+-- Retention: keep all rows — ~500 bytes each, 90d × 1000 repos ≈ 45 MB.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS repo_metrics_daily (
+  id                       UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  repo_id                  UUID        NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+  snapshot_date            DATE        NOT NULL,
+  file_count               INT         NOT NULL DEFAULT 0,
+  total_loc                INT         NOT NULL DEFAULT 0,
+  avg_complexity           FLOAT       NOT NULL DEFAULT 0,
+  max_complexity           FLOAT       NOT NULL DEFAULT 0,
+  -- { by_type: { god_file, circular_dependency, … }, by_severity: { critical, … } }
+  issue_counts_json        JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  -- { by_severity: { critical, … }, by_package: [{ name, severity, count }] }
+  vulnerability_counts_json JSONB      NOT NULL DEFAULT '{}'::jsonb,
+  -- { total, direct, transitive, vulnerable }
+  dependency_counts_json   JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  -- top 10 highest risk_score issues at snapshot time (denormalized for fast trend queries)
+  top_risks_json           JSONB       NOT NULL DEFAULT '[]'::jsonb,
+  created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (repo_id, snapshot_date)
+);
+
+-- Trend queries always filter by repo and order by date descending.
+CREATE INDEX IF NOT EXISTS repo_metrics_daily_repo_date_idx
+  ON repo_metrics_daily (repo_id, snapshot_date DESC);
+
+ALTER TABLE repo_metrics_daily ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can view metrics for their repos" ON repo_metrics_daily;
+CREATE POLICY "Users can view metrics for their repos"
+  ON repo_metrics_daily FOR SELECT
+  USING (can_access_repo(repo_id, auth.uid()));
+
+-- Single RPC that computes and upserts snapshots for all ready repos (or one
+-- specific repo when p_repo_id is supplied). All aggregations run in a single
+-- INSERT … SELECT per repo; ON CONFLICT ensures idempotent re-runs.
+CREATE OR REPLACE FUNCTION generate_daily_snapshots(p_repo_id UUID DEFAULT NULL)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  INSERT INTO repo_metrics_daily (
+    repo_id, snapshot_date, file_count, total_loc, avg_complexity, max_complexity,
+    issue_counts_json, vulnerability_counts_json, dependency_counts_json, top_risks_json
+  )
+  SELECT
+    r.id,
+    CURRENT_DATE,
+    r.file_count,
+    COALESCE(SUM(n.line_count), 0)::INT   AS total_loc,
+    COALESCE(AVG(n.complexity_score), 0)::FLOAT AS avg_complexity,
+    COALESCE(MAX(n.complexity_score), 0)::FLOAT AS max_complexity,
+    -- issue_counts_json
+    (
+      SELECT jsonb_build_object(
+        'by_type', jsonb_build_object(
+          'god_file',              COUNT(*) FILTER (WHERE type = 'god_file'),
+          'circular_dependency',   COUNT(*) FILTER (WHERE type = 'circular_dependency'),
+          'high_coupling',         COUNT(*) FILTER (WHERE type = 'high_coupling'),
+          'dead_code',             COUNT(*) FILTER (WHERE type = 'dead_code'),
+          'hardcoded_secret',      COUNT(*) FILTER (WHERE type = 'hardcoded_secret'),
+          'insecure_pattern',      COUNT(*) FILTER (WHERE type = 'insecure_pattern'),
+          'missing_auth',          COUNT(*) FILTER (WHERE type = 'missing_auth'),
+          'vulnerable_dependency', COUNT(*) FILTER (WHERE type = 'vulnerable_dependency'),
+          'refactoring_candidate', COUNT(*) FILTER (WHERE type = 'refactoring_candidate')
+        ),
+        'by_severity', jsonb_build_object(
+          'critical', COUNT(*) FILTER (WHERE severity = 'critical'),
+          'high',     COUNT(*) FILTER (WHERE severity = 'high'),
+          'medium',   COUNT(*) FILTER (WHERE severity = 'medium'),
+          'low',      COUNT(*) FILTER (WHERE severity = 'low')
+        )
+      )
+      FROM analysis_issues WHERE repo_id = r.id
+    ),
+    -- vulnerability_counts_json
+    (
+      SELECT jsonb_build_object(
+        'by_severity', jsonb_build_object(
+          'critical', COUNT(*) FILTER (WHERE severity = 'critical' AND type = 'vulnerable_dependency'),
+          'high',     COUNT(*) FILTER (WHERE severity = 'high'     AND type = 'vulnerable_dependency'),
+          'medium',   COUNT(*) FILTER (WHERE severity = 'medium'   AND type = 'vulnerable_dependency'),
+          'low',      COUNT(*) FILTER (WHERE severity = 'low'      AND type = 'vulnerable_dependency')
+        ),
+        'by_package', COALESCE((
+          SELECT jsonb_agg(
+            jsonb_build_object(
+              'name',  package_name,
+              'count', vuln_count,
+              'severity', (
+                SELECT (ARRAY['low', 'medium', 'high', 'critical'])[
+                  COALESCE(MAX(
+                    CASE v->>'severity'
+                      WHEN 'critical' THEN 4
+                      WHEN 'high'     THEN 3
+                      WHEN 'medium'   THEN 2
+                      WHEN 'low'      THEN 1
+                      ELSE 1
+                    END
+                  ), 1)
+                ]
+                FROM jsonb_array_elements(vulns_json) v
+              )
+            )
+          )
+          FROM dependency_manifests
+          WHERE repo_id = r.id AND vuln_count > 0
+        ), '[]'::jsonb)
+      )
+      FROM analysis_issues WHERE repo_id = r.id
+    ),
+    -- dependency_counts_json
+    (
+      SELECT jsonb_build_object(
+        'total',       COUNT(DISTINCT m.id),
+        'direct',      COUNT(DISTINCT m.id) FILTER (WHERE m.is_transitive = false),
+        'transitive',  COUNT(DISTINCT m.id) FILTER (WHERE m.is_transitive = true),
+        'vulnerable',  COUNT(DISTINCT m.id) FILTER (WHERE m.vuln_count > 0)
+      )
+      FROM dependency_manifests m WHERE m.repo_id = r.id
+    ),
+    -- top_risks_json — top 10 by risk_score, denormalised for fast trend reads
+    (
+      SELECT COALESCE(jsonb_agg(risk_issues), '[]'::jsonb)
+      FROM (
+        SELECT id, type, severity, file_paths, description, risk_score
+        FROM analysis_issues
+        WHERE repo_id = r.id AND risk_score IS NOT NULL
+        ORDER BY risk_score DESC NULLS LAST
+        LIMIT 10
+      ) risk_issues
+    )
+  FROM repositories r
+  LEFT JOIN graph_nodes n ON n.repo_id = r.id
+  WHERE r.status = 'ready' AND (p_repo_id IS NULL OR r.id = p_repo_id)
+  GROUP BY r.id, r.file_count
+  ON CONFLICT (repo_id, snapshot_date) DO UPDATE SET
+    file_count                = EXCLUDED.file_count,
+    total_loc                 = EXCLUDED.total_loc,
+    avg_complexity            = EXCLUDED.avg_complexity,
+    max_complexity            = EXCLUDED.max_complexity,
+    issue_counts_json         = EXCLUDED.issue_counts_json,
+    vulnerability_counts_json = EXCLUDED.vulnerability_counts_json,
+    dependency_counts_json    = EXCLUDED.dependency_counts_json,
+    top_risks_json            = EXCLUDED.top_risks_json;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION generate_daily_snapshots(UUID) TO service_role;
+
+-- Register the nightly pg_cron job (03:00 UTC) if the extension is available.
+-- The DO block is silent on missing pg_cron so the schema stays idempotent on
+-- environments that rely on the Render scheduled-job fallback instead.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+    PERFORM cron.schedule(
+      'generate_daily_snapshots',
+      '0 3 * * *',
+      'SELECT generate_daily_snapshots()'
+    );
+  END IF;
+EXCEPTION WHEN OTHERS THEN
+  NULL; -- ignore if cron is inaccessible
+END $$;
+
+-- =============================================================================
 -- END OF SCHEMA
 -- =============================================================================

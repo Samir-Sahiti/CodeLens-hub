@@ -15,6 +15,7 @@ const { scanDependencies } = require('./osvScanner'); // US-045
 const { generateStartHereTour } = require('./startHereTourService'); // US-059
 const { enqueueNotification, recipientsForRepo } = require('./notifications'); // US-077
 const { scoreIssuesForRepo } = require('./riskScoring'); // US-079
+const { computeSnapshot } = require('../lib/snapshotRepo'); // US-081
 const { OpenAI } = require('openai');
 const { supabaseAdmin } = require('../db/supabase');
 const { SAFE_FETCH_CEILING, warnIfCeilingHit, withSupabaseRetry } = require('../lib/dbHelpers');
@@ -755,6 +756,14 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     // enrichment so the UI does not stay on the loading skeleton while optional
     // chunking, duplicate detection, or churn work finishes.
     await markRepoReady({ repoId, fileCount, hasCoverageFiles, finalNodes, latestIndexedSha });
+
+    // US-081: generate daily snapshot for this repo to keep the 'today' data point fresh
+    try {
+      await computeSnapshot(repoId, supabaseAdmin);
+      console.log(`[indexer] Generated daily snapshot post-index for ${repoId}`);
+    } catch (snapCatchErr) {
+      console.warn(`[indexer] Post-index snapshot generation threw: ${snapCatchErr.message}`);
+    }
 
     // US-077: notify recipients that the index is ready and surface newly-introduced
     // critical/high issues + vulnerabilities. Best-effort — never blocks the pipeline.
