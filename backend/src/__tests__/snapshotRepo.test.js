@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach as _beforeEach } from 'vitest';
 import { computeSnapshot } from '../lib/snapshotRepo';
 
 describe('snapshotRepo', () => {
@@ -86,7 +86,7 @@ describe('snapshotRepo', () => {
         };
 
         if (table === 'repo_metrics_daily') {
-          query.upsert = vi.fn().mockImplementation((payload, opts) => {
+          query.upsert = vi.fn().mockImplementation((payload, _opts) => {
             // Simulate UPSERT on repo_id, snapshot_date
             const index = metricsTable.findIndex(r => r.repo_id === payload.repo_id && r.snapshot_date === payload.snapshot_date);
             if (index > -1) {

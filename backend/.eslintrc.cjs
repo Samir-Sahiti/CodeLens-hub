@@ -12,4 +12,16 @@ module.exports = {
     'no-unused-vars': ['warn', { varsIgnorePattern: '^_', argsIgnorePattern: '^_' }],
     'no-undef': 'error',
   },
+  overrides: [
+    {
+      // Vitest test files use ESM import syntax
+      files: ['**/*.test.js', '**/__tests__/**/*.js'],
+      parserOptions: {
+        sourceType: 'module',
+      },
+      env: {
+        node: true,
+      },
+    },
+  ],
 };
