@@ -11,7 +11,7 @@ import {
   LayoutDashboard, GitGraph, BarChart3, FolderTree,
   Package, ShieldAlert, Sparkles, Code2, Settings, GitBranch,
   LogOut, HelpCircle, ChevronLeft, ChevronRight, ArrowLeft,
-  Star,
+  Star, TrendingUp,
 } from './ui/Icons';
 
 const OnboardingGuide = lazy(() => import('./OnboardingGuide'));
@@ -160,6 +160,7 @@ export default function Layout() {
   const repoNavItems = [
     { label: 'Graph',        tab: 'graph',        Icon: GitGraph     },
     { label: 'Metrics',      tab: 'metrics',      Icon: BarChart3    },
+    { label: 'Trends',       tab: 'trends',       Icon: TrendingUp   },
     { label: 'Files',        tab: 'files',        Icon: FolderTree   },
     { label: 'Dependencies', tab: 'dependencies', Icon: Package      },
     { label: 'Pull Requests', tab: 'pulls',       Icon: GitBranch    },

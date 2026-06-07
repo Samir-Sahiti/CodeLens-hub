@@ -25,6 +25,7 @@ const { getBlastRadius } = require('../services/graphService');
 const { emitPrReviewReady } = require('../services/notificationEvents');
 const { enqueueNotification, recipientsForRepo } = require('../services/notifications');
 const { scoreIssuesForRepo } = require('../services/riskScoring');
+const { fixNpmDependency }  = require('../services/dependencyFixer');
 
 const MODEL = 'claude-sonnet-4-20250514';
 const MAX_DAILY_TOKENS = parseInt(process.env.MAX_DAILY_TOKENS_PER_USER || '500000', 10);
@@ -2744,6 +2745,34 @@ const generateProposal = async (req, res) => {
       }
     }
 
+    // Fast path: for vulnerable_dependency issues we can produce a deterministic
+    // proposal using dependencyFixer without spending Claude tokens.
+    if (issue.type === 'vulnerable_dependency') {
+      const parsed = await tryBuildVulnFixProposal(issue, repoId);
+      if (parsed) {
+        emitProposalEvents(send, parsed);
+        const { data: inserted, error: insErr } = await supabaseAdmin
+          .from('issue_proposals')
+          .insert({
+            issue_id: issueId,
+            user_id: req.user.id,
+            status: 'pending',
+            proposal_json: parsed,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+          })
+          .select('id')
+          .single();
+        if (insErr) {
+          send({ type: 'error', message: 'Could not save the generated proposal.' });
+        } else {
+          send({ type: 'done', proposal_id: inserted.id, prompt_tokens: 0, completion_tokens: 0 });
+        }
+        return res.end();
+      }
+      // Fall through to Claude if the fixer couldn't handle it
+    }
+
     const { system, user } = await buildContextForIssue(issue, repoId);
     const { signal, cleanup } = bindRequestAbort(req);
 
@@ -2849,6 +2878,94 @@ const generateProposal = async (req, res) => {
   }
 };
 
+// ── US-083/084: Deterministic vulnerable-dep fixer ───────────────────────────
+
+/**
+ * Attempt to build a proposal for a vulnerable_dependency issue using
+ * dependencyFixer (no Claude). Returns a proposal_json object or null.
+ */
+async function tryBuildVulnFixProposal(issue, repoId) {
+  const desc = issue.description || '';
+  const manifestPath = Array.isArray(issue.file_paths) ? issue.file_paths[0] : null;
+  if (!manifestPath) return null;
+
+  const lockfileInfo = inferLockfileInfo(manifestPath);
+  if (!lockfileInfo) return null; // non-npm/yarn manifest (e.g. Cargo.toml)
+
+  // Parse package name + target version from description
+  const pkgMatch = desc.match(/^[^:]+:\s(@?[^@\s]+)@([^\s(]+)\s+has a known vulnerability/);
+  if (!pkgMatch) return null;
+  const package_name = pkgMatch[1];
+
+  const fixedVersionMatch = desc.match(/— upgrade to ([^\s.,;)]+)/);
+  if (!fixedVersionMatch) return null;
+  const target_version = fixedVersionMatch[1];
+
+  const effectiveManifestPath = lockfileInfo.manifest_path_override || manifestPath;
+
+  // Load manifest + lockfile from indexed file_contents
+  const [manifestContent, lockfileContent] = await Promise.all([
+    fetchFileSource(repoId, effectiveManifestPath),
+    fetchFileSource(repoId, lockfileInfo.lockfile_path),
+  ]);
+  if (!manifestContent) return null;
+
+  const result = await fixNpmDependency({
+    manifest_content:  manifestContent,
+    lockfile_content:  lockfileContent,
+    lockfile_format:   lockfileInfo.lockfile_format,
+    package_name,
+    target_version,
+    strategy:          'minimum_safe',
+  });
+
+  if (!result.ok) return null;
+
+  const changes = [
+    {
+      file_path: effectiveManifestPath,
+      action:    'modify',
+      diff:      `Update ${package_name} to ${target_version}`,
+      full_content: result.new_manifest,
+    },
+  ];
+  if (result.new_lockfile && lockfileInfo.lockfile_path !== effectiveManifestPath) {
+    changes.push({
+      file_path: lockfileInfo.lockfile_path,
+      action:    'modify',
+      diff:      `Re-locked after upgrading ${package_name}`,
+      full_content: result.new_lockfile,
+    });
+  }
+
+  const applied = result.applied_changes || [];
+  const changesText = applied.map(c => `- \`${c.package}\`: ${c.from || '(transitive)'} → ${c.to} (${c.kind})`).join('\n');
+
+  return {
+    summary:   `Upgrade ${package_name} to ${target_version} (deterministic fix)`,
+    rationale: `Bumps \`${package_name}\` to \`${target_version}\` to resolve the known vulnerability.\n\nChanges applied:\n${changesText}`,
+    changes,
+    risks:     [],
+  };
+}
+
+/**
+ * Compute per-package blast radius: files that import a given npm package.
+ * Returns top-3 file paths + total count.
+ */
+async function getPackageBlastRadius(repoId, packageName) {
+  const pattern = `%/node_modules/${packageName}/%`;
+  const { data } = await supabaseAdmin
+    .from('graph_edges')
+    .select('from_path')
+    .eq('repo_id', repoId)
+    .ilike('to_path', pattern)
+    .limit(50);
+
+  const unique = [...new Set((data || []).map(r => r.from_path))];
+  return { total: unique.length, top3: unique.slice(0, 3) };
+}
+
 // ── US-066: Apply proposal as a GitHub draft PR ─────────────────────────────
 
 function buildBranchSlug(issueType, filePath) {
@@ -2885,6 +3002,21 @@ function buildPrBody({ rationale, risks, repoId, issueId, proposalId, issueType 
   }
   sections.push(`## Source\nOpened from a [CodeLens proposal](${issueLink}) for issue type \`${issueType || 'unknown'}\`.`);
   return sections.join('\n\n');
+}
+
+/** Detect lockfile format + expected lockfile path from a manifest path. */
+function inferLockfileInfo(manifestPath = '') {
+  const dir  = path.posix.dirname(manifestPath);
+  const base = path.basename(manifestPath).toLowerCase();
+  if (base === 'package.json' || base === 'package-lock.json') {
+    return { lockfile_format: 'npm', lockfile_path: dir === '.' ? 'package-lock.json' : `${dir}/package-lock.json` };
+  }
+  if (base === 'yarn.lock') {
+    // yarn.lock is both the manifest root and the lockfile
+    const pkgJson = dir === '.' ? 'package.json' : `${dir}/package.json`;
+    return { lockfile_format: 'yarn', lockfile_path: manifestPath, manifest_path_override: pkgJson };
+  }
+  return null;
 }
 
 async function findExistingOpenPr(octokit, owner, repo, branchName) {
@@ -3096,6 +3228,323 @@ const applyProposalAsPr = async (req, res) => {
   }
 };
 
+// ── US-084: Batch vulnerable-dependency auto-PR ──────────────────────────────
+
+const batchDependencyProposal = async (req, res) => {
+  const { repoId } = req.params;
+  const { vulnerability_ids } = req.body || {};
+
+  if (!Array.isArray(vulnerability_ids) || vulnerability_ids.length === 0) {
+    return res.status(400).json({ error: 'vulnerability_ids must be a non-empty array' });
+  }
+
+  const allowed = await canAccessRepo(repoId, req.user.id);
+  if (!allowed) return res.status(404).json({ error: 'Repository not found or unauthorized' });
+
+  // Idempotency: hash the sorted IDs and look for an existing applied batch proposal
+  const batchKey = crypto
+    .createHash('sha256')
+    .update([...vulnerability_ids].sort().join(','))
+    .digest('hex')
+    .slice(0, 16);
+
+  const { data: existing } = await supabaseAdmin
+    .from('issue_proposals')
+    .select('id, pr_url, branch_name, proposal_json')
+    .eq('user_id', req.user.id)
+    .eq('status', 'applied')
+    .contains('proposal_json', { batch_key: batchKey })
+    .maybeSingle();
+
+  if (existing?.pr_url) {
+    return res.json({ ok: true, pr_url: existing.pr_url, branch_name: existing.branch_name, reused: true });
+  }
+
+  // Fetch all vulnerability issues
+  const { data: issues, error: issErr } = await supabaseAdmin
+    .from('analysis_issues')
+    .select('id, type, severity, description, file_paths')
+    .in('id', vulnerability_ids)
+    .eq('repo_id', repoId)
+    .eq('type', 'vulnerable_dependency');
+
+  if (issErr) return res.status(500).json({ error: 'Failed to load vulnerability issues' });
+  if (!issues || issues.length === 0) {
+    return res.status(404).json({ error: 'No vulnerable_dependency issues found for the given IDs' });
+  }
+
+  const { data: repoRow } = await supabaseAdmin
+    .from('repositories')
+    .select('id, full_name, default_branch, source, dependency_update_strategy')
+    .eq('id', repoId)
+    .single();
+
+  if (!repoRow?.full_name || repoRow.source !== 'github') {
+    return res.status(400).json({ error: 'Only GitHub-connected repositories support batch fix PR.' });
+  }
+
+  const githubToken = await getGithubTokenForUser(req.user.id);
+  if (!githubToken) {
+    return res.status(401).json({ error: 'Your GitHub token has expired. Reconnect GitHub from Settings.' });
+  }
+
+  // Group issues by manifest file
+  const byManifest = new Map();
+  for (const issue of issues) {
+    const manifest = Array.isArray(issue.file_paths) ? issue.file_paths[0] : null;
+    if (!manifest) continue;
+    if (!byManifest.has(manifest)) byManifest.set(manifest, []);
+    byManifest.get(manifest).push(issue);
+  }
+
+  // For each manifest group: chain dependencyFixer calls
+  const allChanges = [];
+  const failedFixes = [];
+  const appliedPackages = [];
+
+  for (const [manifestPath, manifestIssues] of byManifest) {
+    const lockfileInfo = inferLockfileInfo(manifestPath);
+    if (!lockfileInfo) {
+      manifestIssues.forEach(i => failedFixes.push({ issue_id: i.id, reason: 'unsupported_manifest_type' }));
+      continue;
+    }
+
+    const effectiveManifestPath = lockfileInfo.manifest_path_override || manifestPath;
+    let currentManifest = await fetchFileSource(repoId, effectiveManifestPath);
+    let currentLockfile = await fetchFileSource(repoId, lockfileInfo.lockfile_path);
+
+    if (!currentManifest) {
+      manifestIssues.forEach(i => failedFixes.push({ issue_id: i.id, reason: 'manifest_not_found' }));
+      continue;
+    }
+
+    for (const issue of manifestIssues) {
+      const desc = issue.description || '';
+      const pkgMatch = desc.match(/^[^:]+:\s(@?[^@\s]+)@([^\s(]+)\s+has a known vulnerability/);
+      const fixedVersionMatch = desc.match(/— upgrade to ([^\s.,;)]+)/);
+      if (!pkgMatch || !fixedVersionMatch) {
+        failedFixes.push({ issue_id: issue.id, reason: 'cannot_parse_issue_description' });
+        continue;
+      }
+      const package_name  = pkgMatch[1];
+      const target_version = fixedVersionMatch[1];
+
+      const result = await fixNpmDependency({
+        manifest_content: currentManifest,
+        lockfile_content: currentLockfile,
+        lockfile_format:  lockfileInfo.lockfile_format,
+        package_name,
+        target_version,
+        strategy: repoRow.dependency_update_strategy || 'minimum_safe',
+      });
+
+      if (result.ok) {
+        currentManifest = result.new_manifest;
+        if (result.new_lockfile) currentLockfile = result.new_lockfile;
+        appliedPackages.push({ package_name, target_version, issue_id: issue.id, applied_changes: result.applied_changes });
+      } else {
+        failedFixes.push({ issue_id: issue.id, package: package_name, reason: result.reason });
+      }
+    }
+
+    if (appliedPackages.length === 0) continue;
+
+    allChanges.push({ file_path: effectiveManifestPath, full_content: currentManifest });
+    if (currentLockfile && lockfileInfo.lockfile_path !== effectiveManifestPath) {
+      allChanges.push({ file_path: lockfileInfo.lockfile_path, full_content: currentLockfile });
+    }
+  }
+
+  if (allChanges.length === 0) {
+    return res.status(422).json({
+      error: 'No dependency fixes could be applied.',
+      failed_fixes: failedFixes,
+    });
+  }
+
+  // Compute blast radius per package for the PR body
+  const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/+$/, '');
+  const pkgDetails = await Promise.all(
+    appliedPackages.map(async (p) => {
+      const br = await getPackageBlastRadius(repoId, p.package_name);
+      return { ...p, blast_radius: br };
+    })
+  );
+
+  // Build PR body
+  const countBySev = { critical: 0, high: 0, medium: 0, low: 0 };
+  for (const issue of issues) { if (countBySev[issue.severity] !== undefined) countBySev[issue.severity]++; }
+  const total = appliedPackages.length;
+  const sevParts = Object.entries(countBySev).filter(([, v]) => v > 0).map(([k, v]) => `${v} ${k}`).join(', ');
+
+  const pkgTable = [
+    '| Package | Old → New | Kind | Used by |',
+    '|---|---|---|---|',
+    ...pkgDetails.map(p => {
+      const ac = (p.applied_changes || [])[0] || {};
+      const usedBy = p.blast_radius.total > 0
+        ? `${p.blast_radius.total} file${p.blast_radius.total !== 1 ? 's' : ''} (${p.blast_radius.top3.map(f => `\`${path.basename(f)}\``).join(', ')}${p.blast_radius.total > 3 ? '…' : ''})`
+        : 'not directly imported';
+      return `| \`${p.package_name}\` | ${ac.from || '(transitive)'} → ${ac.to || p.target_version} | ${ac.kind || 'direct'} | ${usedBy} |`;
+    }),
+  ].join('\n');
+
+  const prBody = [
+    `## Summary\nFixes ${total} vulnerabilit${total !== 1 ? 'ies' : 'y'} (${sevParts}) across ${appliedPackages.length} package${appliedPackages.length !== 1 ? 's' : ''}.`,
+    `## Packages Updated\n${pkgTable}`,
+    failedFixes.length ? `## Not Applied\n${failedFixes.map(f => `- Issue \`${f.issue_id}\`: ${f.reason}${f.package ? ` (\`${f.package}\`)` : ''}`).join('\n')}` : '',
+    frontendUrl ? `## Source\nGenerated by [CodeLens](${frontendUrl}/repos/${repoId}?tab=dependencies).` : '',
+  ].filter(Boolean).join('\n\n');
+
+  const prTitle = `Fix ${total} vulnerable ${total !== 1 ? 'dependencies' : 'dependency'}`;
+  const branchName = `codelens/fix-deps-${batchKey.slice(0, 8)}`;
+  const [owner, repoName] = repoRow.full_name.split('/');
+  const octokit = getOctokit(githubToken);
+
+  try {
+    let defaultBranch = repoRow.default_branch;
+    if (!defaultBranch) {
+      const { data: repoMeta } = await octokit.rest.repos.get({ owner, repo: repoName });
+      defaultBranch = repoMeta.default_branch;
+    }
+
+    const { data: baseRef } = await octokit.rest.git.getRef({ owner, repo: repoName, ref: `heads/${defaultBranch}` });
+    const baseSha = baseRef.object.sha;
+    const { data: baseCommit } = await octokit.rest.git.getCommit({ owner, repo: repoName, commit_sha: baseSha });
+    const baseTreeSha = baseCommit.tree.sha;
+
+    const treeEntries = [];
+    for (const change of allChanges) {
+      const { data: blob } = await octokit.rest.git.createBlob({ owner, repo: repoName, content: change.full_content, encoding: 'utf-8' });
+      treeEntries.push({ path: change.file_path, mode: '100644', type: 'blob', sha: blob.sha });
+    }
+
+    const { data: newTree } = await octokit.rest.git.createTree({ owner, repo: repoName, base_tree: baseTreeSha, tree: treeEntries });
+    const { data: commit } = await octokit.rest.git.createCommit({
+      owner,
+      repo: repoName,
+      message: `${prTitle}\n\nAutomatically generated by CodeLens.`,
+      tree: newTree.sha,
+      parents: [baseSha],
+    });
+
+    let prUrl;
+    try {
+      await octokit.rest.git.createRef({ owner, repo: repoName, ref: `refs/heads/${branchName}`, sha: commit.sha });
+    } catch (refErr) {
+      if (refErr?.status === 422) {
+        const existingPr = await findExistingOpenPr(octokit, owner, repoName, branchName);
+        if (existingPr) { prUrl = existingPr.html_url; }
+        else {
+          await octokit.rest.git.updateRef({ owner, repo: repoName, ref: `heads/${branchName}`, sha: commit.sha, force: true });
+        }
+      } else { throw refErr; }
+    }
+
+    if (!prUrl) {
+      const { data: pr } = await octokit.rest.pulls.create({ owner, repo: repoName, draft: true, head: branchName, base: defaultBranch, title: prTitle, body: prBody });
+      prUrl = pr.html_url;
+      // Label the PR
+      try {
+        await octokit.rest.issues.addLabels({ owner, repo: repoName, issue_number: pr.number, labels: ['dependencies', 'security'] });
+      } catch { /* labels might not exist — non-fatal */ }
+    }
+
+    // Persist to issue_proposals for the first issue in the batch (for badge tracking)
+    const proposalJson = {
+      summary:   prTitle,
+      rationale: prBody,
+      changes:   allChanges.map(c => ({ file_path: c.file_path, action: 'modify', diff: '', full_content: c.full_content })),
+      risks:     failedFixes.map(f => `${f.package || f.issue_id}: ${f.reason}`),
+      batch_key: batchKey,
+      batch_ids: vulnerability_ids,
+    };
+
+    await withSupabaseRetry(
+      () => supabaseAdmin.from('issue_proposals').insert({
+        issue_id: issues[0].id,
+        user_id: req.user.id,
+        status: 'applied',
+        proposal_json: proposalJson,
+        branch_name: branchName,
+        pr_url: prUrl,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+      }),
+      { label: 'batch_proposal.insert' },
+    );
+
+    return res.json({
+      ok: true,
+      pr_url: prUrl,
+      branch_name: branchName,
+      applied_count: appliedPackages.length,
+      failed_fixes: failedFixes,
+    });
+  } catch (err) {
+    const { http, message } = mapGithubError(err);
+    console.error('[batchDependencyProposal] Failed:', err?.status, err?.message);
+    return res.status(http).json({ error: message });
+  }
+};
+
+/**
+ * Internal (non-HTTP) version of batchDependencyProposal for use by the indexer
+ * auto-PR trigger. Returns { ok, pr_url } or throws.
+ */
+async function batchDependencyProposalInternal({ repoId, userId, vulnerabilityIds }) {
+  const { data: issues } = await supabaseAdmin
+    .from('analysis_issues')
+    .select('id, type, severity, description, file_paths')
+    .in('id', vulnerabilityIds)
+    .eq('repo_id', repoId)
+    .eq('type', 'vulnerable_dependency');
+
+  if (!issues || issues.length === 0) return { ok: false, reason: 'no_issues' };
+
+  const batchKey = crypto
+    .createHash('sha256')
+    .update([...vulnerabilityIds].sort().join(','))
+    .digest('hex')
+    .slice(0, 16);
+
+  // Check idempotency
+  const { data: existing } = await supabaseAdmin
+    .from('issue_proposals')
+    .select('pr_url')
+    .eq('user_id', userId)
+    .eq('status', 'applied')
+    .contains('proposal_json', { batch_key: batchKey })
+    .maybeSingle();
+  if (existing?.pr_url) return { ok: true, pr_url: existing.pr_url, reused: true };
+
+  const { data: repoRow } = await supabaseAdmin
+    .from('repositories')
+    .select('id, full_name, default_branch, source, dependency_update_strategy')
+    .eq('id', repoId)
+    .single();
+
+  if (!repoRow?.full_name || repoRow.source !== 'github') return { ok: false, reason: 'not_github' };
+
+  const githubToken = await getGithubTokenForUser(userId);
+  if (!githubToken) return { ok: false, reason: 'no_github_token' };
+
+  // Delegate to the shared implementation
+  const fakeReq = {
+    params: { repoId },
+    body: { vulnerability_ids: vulnerabilityIds },
+    user: { id: userId },
+  };
+
+  return new Promise((resolve) => {
+    const fakeRes = {
+      status(code) { return { json: (data) => resolve({ ...data, http_status: code }) }; },
+      json(data) { resolve(data); },
+    };
+    batchDependencyProposal(fakeReq, fakeRes).catch((err) => resolve({ ok: false, reason: err.message }));
+  });
+}
+
 // ── Lightweight summary for IssueCard badges ────────────────────────────────
 
 const listProposalSummaries = async (req, res) => {
@@ -3185,6 +3634,8 @@ module.exports = {
   updateProposalStatus,
   applyProposalAsPr,
   listProposalSummaries,
+  batchDependencyProposal,
+  batchDependencyProposalInternal,
   _private: {
     parseFindingsFromText,
     rerankSecurityChunks,

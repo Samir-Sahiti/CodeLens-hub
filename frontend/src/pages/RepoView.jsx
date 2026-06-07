@@ -17,6 +17,7 @@ const FileChatPanel        = lazy(() => import('../components/FileChatPanel'));
 const FileBrowser          = lazy(() => import('../components/FileBrowser'));
 const DependenciesPanel    = lazy(() => import('../components/DependenciesPanel'));
 const PullRequestsPanel    = lazy(() => import('../components/PullRequestsPanel'));
+const TrendsPanel          = lazy(() => import('../components/TrendsPanel'));
 const MetricsPanel         = lazy(() => import('../components/MetricsPanel'));
 const IssuesPanel          = lazy(() => import('../components/IssuesPanel'));
 const SettingsPanel        = lazy(() => import('../components/SettingsPanel'));
@@ -859,6 +860,11 @@ export default function RepoView() {
                   active={activeTab === 'pulls'}
                   onRepoUpdated={fetchRepo}
                 />
+              </div>
+
+              {/* Trends tab — daily metrics over time (US-082) */}
+              <div className={activeTab === 'trends' ? 'tab-panel-active h-full' : 'tab-panel-hidden h-full'}>
+                {activeTab === 'trends' && <TrendsPanel repoId={repoId} />}
               </div>
             </div>
           </Suspense>

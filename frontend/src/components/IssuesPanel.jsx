@@ -43,32 +43,48 @@ const GROUP_ORDER = [
 ];
 
 // ── IssueGroup ────────────────────────────────────────────────────────────────
-const IssueGroup = memo(function IssueGroup({ type, label, Icon, issues, nodeMap, onIssueClick, onSuppress, onDisableRule, onProposeFix, actionsDisabled, scrollParent, proposalsByIssue }) {
+const IssueGroup = memo(function IssueGroup({ type, label, Icon, issues, nodeMap, onIssueClick, onSuppress, onDisableRule, onProposeFix, actionsDisabled, scrollParent, proposalsByIssue, onBatchFix, batchFixing }) {
   const [isOpen, setIsOpen] = useState(true);
+  const showBatchFix = type === 'vulnerable_dependency' && issues.length >= 2 && typeof onBatchFix === 'function';
 
   return (
     <div className="mb-6 last:mb-0">
       {/* Sticky header */}
-      <button
-        onClick={() => setIsOpen(v => !v)}
-        className="sticky top-0 z-10 w-full flex items-center justify-between bg-gray-950 border-b border-gray-800 shadow-sm pb-2 mb-3 pt-1 group"
-      >
-        <div className="flex items-center gap-2.5">
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gray-800 border border-gray-700">
-            <Icon className="h-3.5 w-3.5 text-gray-400 group-hover:text-white transition-colors" />
-          </div>
-          <h2 className="text-base font-semibold text-gray-200 group-hover:text-white transition-colors">
-            {label}
-          </h2>
-          <span className="rounded-full bg-gray-800 px-2 py-0.5 text-xs font-medium text-gray-500">
-            {issues.length}
-          </span>
+      <div className="sticky top-0 z-10 bg-gray-950 border-b border-gray-800 shadow-sm pb-2 mb-3 pt-1">
+        <div className="flex items-center justify-between">
+          <button
+            onClick={() => setIsOpen(v => !v)}
+            className="flex items-center gap-2.5 group"
+          >
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gray-800 border border-gray-700">
+              <Icon className="h-3.5 w-3.5 text-gray-400 group-hover:text-white transition-colors" />
+            </div>
+            <h2 className="text-base font-semibold text-gray-200 group-hover:text-white transition-colors">
+              {label}
+            </h2>
+            <span className="rounded-full bg-gray-800 px-2 py-0.5 text-xs font-medium text-gray-500">
+              {issues.length}
+            </span>
+            {isOpen
+              ? <ChevronUp className="h-4 w-4 text-gray-600 ml-1" />
+              : <ChevronDown className="h-4 w-4 text-gray-600 ml-1" />
+            }
+          </button>
+          {showBatchFix && (
+            <button
+              onClick={() => onBatchFix(issues.map(i => i.id))}
+              disabled={actionsDisabled || batchFixing}
+              className="flex items-center gap-1.5 rounded-lg border border-indigo-700/50 bg-indigo-900/30 px-3 py-1 text-xs font-medium text-indigo-300 hover:bg-indigo-900/60 hover:text-indigo-200 transition disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {batchFixing ? (
+                <><div className="h-3 w-3 animate-spin rounded-full border-2 border-indigo-400 border-t-transparent" /> Opening PR…</>
+              ) : (
+                <><Sparkles className="h-3 w-3" /> Batch fix PR</>
+              )}
+            </button>
+          )}
         </div>
-        {isOpen
-          ? <ChevronUp className="h-4 w-4 text-gray-600" />
-          : <ChevronDown className="h-4 w-4 text-gray-600" />
-        }
-      </button>
+      </div>
 
       {/* Collapsible body */}
       {isOpen && (
@@ -365,6 +381,8 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
   const [canMutateIssues, setCanMutateIssues] = useState(true);
   const [selectedProposalIssue, setSelectedProposalIssue] = useState(null);
   const [proposalsByIssue, setProposalsByIssue] = useState({});
+  const [batchFixing, setBatchFixing] = useState(false);
+  const [batchFixError, setBatchFixError] = useState(null);
   // Phase 4.1: callback ref so the scroll-parent element propagates through
   // state and triggers a re-render — IssueGroup's customScrollParent prop
   // needs the actual DOM node, not a ref placeholder.
@@ -546,6 +564,27 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
     }));
   }, []);
 
+  const handleBatchFix = useCallback(async (issueIds) => {
+    if (!accessToken || batchFixing) return;
+    setBatchFixing(true);
+    setBatchFixError(null);
+    try {
+      const res = await fetch(apiUrl(`/api/repos/${repoId}/dependencies/batch-proposal`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({ vulnerability_ids: issueIds }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Batch fix failed');
+      // Open the PR in a new tab
+      if (data.pr_url) window.open(data.pr_url, '_blank', 'noopener,noreferrer');
+    } catch (err) {
+      setBatchFixError(err.message);
+    } finally {
+      setBatchFixing(false);
+    }
+  }, [accessToken, batchFixing, repoId]);
+
   if ((!localIssues || localIssues.length === 0) && duplicationClusters.length === 0) {
     return (
       <>
@@ -655,6 +694,8 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
               actionsDisabled={!canMutateIssues}
               scrollParent={scrollParent}
               proposalsByIssue={proposalsByIssue}
+              onBatchFix={type === 'vulnerable_dependency' ? handleBatchFix : undefined}
+              batchFixing={batchFixing}
             />
           );
         })}
@@ -663,6 +704,12 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
           clusters={duplicationClusters}
           onOpen={setSelectedDuplicationCluster}
         />
+
+        {batchFixError && (
+          <div className="rounded-xl border border-red-900/50 bg-red-950/20 px-4 py-3 text-sm text-red-400">
+            Batch fix failed: {batchFixError}
+          </div>
+        )}
 
         {/* No filter results */}
         {filterText && filteredIssues.length === 0 && duplicationClusters.length === 0 && (

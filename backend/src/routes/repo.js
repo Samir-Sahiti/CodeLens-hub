@@ -56,6 +56,12 @@ router.get('/:repoId/branches', requireAuth, repoController.getBranches);
 // Compute or retrieve cached architectural diff between two refs (US-051)
 router.get('/:repoId/diff', requireAuth, repoController.getDiff);
 
+// Daily metrics trend data for trend charts (US-082)
+router.get('/:repoId/trends', requireAuth, repoController.getTrends);
+
+// Batch vulnerable-dependency fix PR (US-084)
+router.post('/:repoId/dependencies/batch-proposal', requireAuth, reviewController.batchDependencyProposal);
+
 // PR review run (deterministic-only pipeline) — US-073
 const reviewController = require('../controllers/reviewController');
 router.get('/:repoId/pulls', requireAuth, reviewController.listPullRequests);

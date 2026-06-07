@@ -12,7 +12,9 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.20.0",
+    "@npmcli/arborist": "^9.7.0",
     "@supabase/supabase-js": "^2.39.0",
+    "@yarnpkg/lockfile": "^1.1.0",
     "adm-zip": "^0.5.16",
     "compression": "^1.7.4",
     "cors": "^2.8.5",

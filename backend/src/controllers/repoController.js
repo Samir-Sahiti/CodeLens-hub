@@ -337,7 +337,16 @@ const getAnalysisData = async (req, res) => {
  */
 const updateRepo = async (req, res) => {
   const { repoId } = req.params;
-  const { auto_sync_enabled, sast_disabled_rules, pr_review_enabled, pr_review_auto_publish, pr_review_block_on_severity } = req.body;
+  const {
+    auto_sync_enabled,
+    sast_disabled_rules,
+    pr_review_enabled,
+    pr_review_auto_publish,
+    pr_review_block_on_severity,
+    dependency_update_strategy,
+    dependency_batch_threshold,
+    dependency_auto_pr_enabled,
+  } = req.body;
 
   const updates = {};
   if (typeof auto_sync_enabled === 'boolean') updates.auto_sync_enabled = auto_sync_enabled;
@@ -354,6 +363,25 @@ const updateRepo = async (req, res) => {
     return res.status(400).json({ error: 'pr_review_block_on_severity must be critical or high' });
   }
   if (['critical', 'high'].includes(pr_review_block_on_severity)) updates.pr_review_block_on_severity = pr_review_block_on_severity;
+
+  // Dependency auto-PR settings (US-084)
+  if (dependency_update_strategy !== undefined) {
+    if (!['minimum_safe', 'latest_safe'].includes(dependency_update_strategy)) {
+      return res.status(400).json({ error: 'dependency_update_strategy must be minimum_safe or latest_safe' });
+    }
+    updates.dependency_update_strategy = dependency_update_strategy;
+  }
+  if (dependency_batch_threshold !== undefined) {
+    const t = parseInt(dependency_batch_threshold, 10);
+    if (isNaN(t) || t < 1 || t > 20) {
+      return res.status(400).json({ error: 'dependency_batch_threshold must be an integer between 1 and 20' });
+    }
+    updates.dependency_batch_threshold = t;
+  }
+  if (typeof dependency_auto_pr_enabled === 'boolean') updates.dependency_auto_pr_enabled = dependency_auto_pr_enabled;
+  if (dependency_auto_pr_enabled !== undefined && typeof dependency_auto_pr_enabled !== 'boolean') {
+    return res.status(400).json({ error: 'dependency_auto_pr_enabled must be a boolean' });
+  }
 
   if (Object.keys(updates).length === 0) {
     return res.status(400).json({ error: 'No valid fields to update' });
@@ -994,4 +1022,89 @@ const getDiff = async (req, res) => {
   }
 };
 
-module.exports = { connectRepo, uploadRepo, listRepos, getStatus, reindexRepo, deleteRepo, getAnalysisData, updateRepo, generateWebhook, getFileContent, getDependencies, getChurn, getDuplication, getBranches, getDiff, getStoredDependenciesWithIssues };
+/** GET /api/repos/:repoId/trends?range=30d — daily metrics snapshots for trend charts (US-082) */
+const getTrends = async (req, res) => {
+  const { repoId } = req.params;
+  const { range = '30d' } = req.query;
+
+  const allowed = await canAccessRepo(repoId, req.user.id);
+  if (!allowed) return res.status(404).json({ error: 'Repository not found or unauthorized' });
+
+  try {
+    let cutoffDate = null;
+    if (range === '7d')  cutoffDate = new Date(Date.now() - 7  * 24 * 60 * 60 * 1000);
+    else if (range === '30d') cutoffDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    else if (range === '90d') cutoffDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+    // 'all' → no cutoff
+
+    let query = supabaseAdmin
+      .from('repo_metrics_daily')
+      .select('snapshot_date, file_count, total_loc, avg_complexity, max_complexity, issue_counts_json, vulnerability_counts_json, dependency_counts_json, top_risks_json')
+      .eq('repo_id', repoId)
+      .order('snapshot_date', { ascending: true });
+
+    if (cutoffDate) {
+      query = query.gte('snapshot_date', cutoffDate.toISOString().split('T')[0]);
+    }
+
+    const { data: snapshots, error } = await query;
+    if (error) throw error;
+
+    const rows = snapshots || [];
+
+    // Compute summary: current value + delta vs period start
+    const current = rows.length > 0 ? rows[rows.length - 1] : null;
+    const periodStart = rows.length > 0 ? rows[0] : null;
+
+    const safeDelta = (a, b) => (a != null && b != null) ? (a - b) : null;
+
+    const summary = {
+      current: current ? {
+        snapshot_date: current.snapshot_date,
+        file_count: current.file_count,
+        total_loc: current.total_loc,
+        avg_complexity: current.avg_complexity,
+        max_complexity: current.max_complexity,
+        critical_issues: current.issue_counts_json?.by_severity?.critical ?? 0,
+        high_issues: current.issue_counts_json?.by_severity?.high ?? 0,
+        medium_issues: current.issue_counts_json?.by_severity?.medium ?? 0,
+        low_issues: current.issue_counts_json?.by_severity?.low ?? 0,
+        total_vulnerabilities:
+          (current.vulnerability_counts_json?.by_severity?.critical ?? 0) +
+          (current.vulnerability_counts_json?.by_severity?.high ?? 0) +
+          (current.vulnerability_counts_json?.by_severity?.medium ?? 0) +
+          (current.vulnerability_counts_json?.by_severity?.low ?? 0),
+        vulnerable_deps: current.dependency_counts_json?.vulnerable ?? 0,
+      } : null,
+      period_start: periodStart ? { snapshot_date: periodStart.snapshot_date } : null,
+      delta: (current && periodStart && current !== periodStart) ? {
+        file_count: safeDelta(current.file_count, periodStart.file_count),
+        total_loc: safeDelta(current.total_loc, periodStart.total_loc),
+        avg_complexity: current.avg_complexity != null && periodStart.avg_complexity != null
+          ? parseFloat((current.avg_complexity - periodStart.avg_complexity).toFixed(2))
+          : null,
+        critical_issues: safeDelta(
+          current.issue_counts_json?.by_severity?.critical ?? 0,
+          periodStart.issue_counts_json?.by_severity?.critical ?? 0
+        ),
+        total_vulnerabilities: safeDelta(
+          (current.vulnerability_counts_json?.by_severity?.critical ?? 0) +
+          (current.vulnerability_counts_json?.by_severity?.high ?? 0) +
+          (current.vulnerability_counts_json?.by_severity?.medium ?? 0) +
+          (current.vulnerability_counts_json?.by_severity?.low ?? 0),
+          (periodStart.vulnerability_counts_json?.by_severity?.critical ?? 0) +
+          (periodStart.vulnerability_counts_json?.by_severity?.high ?? 0) +
+          (periodStart.vulnerability_counts_json?.by_severity?.medium ?? 0) +
+          (periodStart.vulnerability_counts_json?.by_severity?.low ?? 0)
+        ),
+      } : null,
+    };
+
+    res.json({ snapshots: rows, summary });
+  } catch (err) {
+    console.error('[getTrends] Error:', err);
+    res.status(500).json({ error: err.message || 'Failed to fetch trends data' });
+  }
+};
+
+module.exports = { connectRepo, uploadRepo, listRepos, getStatus, reindexRepo, deleteRepo, getAnalysisData, updateRepo, generateWebhook, getFileContent, getDependencies, getChurn, getDuplication, getBranches, getDiff, getStoredDependenciesWithIssues, getTrends };
