@@ -1857,5 +1857,17 @@ EXCEPTION WHEN OTHERS THEN
 END $$;
 
 -- =============================================================================
+-- US-084: Vulnerable dependency auto-PR + batching settings on repositories
+-- =============================================================================
+
+ALTER TABLE repositories ADD COLUMN IF NOT EXISTS dependency_update_strategy TEXT NOT NULL DEFAULT 'minimum_safe';
+ALTER TABLE repositories DROP CONSTRAINT IF EXISTS repositories_dependency_update_strategy_check;
+ALTER TABLE repositories ADD CONSTRAINT repositories_dependency_update_strategy_check
+  CHECK (dependency_update_strategy IN ('minimum_safe', 'latest_safe'));
+
+ALTER TABLE repositories ADD COLUMN IF NOT EXISTS dependency_batch_threshold INT NOT NULL DEFAULT 3;
+ALTER TABLE repositories ADD COLUMN IF NOT EXISTS dependency_auto_pr_enabled BOOLEAN NOT NULL DEFAULT false;
+
+-- =============================================================================
 -- END OF SCHEMA
 -- =============================================================================

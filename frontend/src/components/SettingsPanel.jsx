@@ -15,6 +15,9 @@ export default function SettingsPanel({ repo, session, onRepoUpdated }) {
   const [autoSync,     setAutoSync]     = useState(repo?.auto_sync_enabled ?? false);
   const [autoPublish,  setAutoPublish]  = useState(repo?.pr_review_auto_publish ?? true);
   const [blockSeverity, setBlockSeverity] = useState(repo?.pr_review_block_on_severity || 'critical');
+  const [depStrategy,  setDepStrategy]  = useState(repo?.dependency_update_strategy || 'minimum_safe');
+  const [depThreshold, setDepThreshold] = useState(repo?.dependency_batch_threshold ?? 3);
+  const [depAutoPr,    setDepAutoPr]    = useState(repo?.dependency_auto_pr_enabled ?? false);
   const [isSaving,     setIsSaving]     = useState(false);
   const [webhookInfo,  setWebhookInfo]  = useState(null);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -78,7 +81,11 @@ export default function SettingsPanel({ repo, session, onRepoUpdated }) {
     setAutoSync(repo?.auto_sync_enabled ?? false);
     setAutoPublish(repo?.pr_review_auto_publish ?? true);
     setBlockSeverity(repo?.pr_review_block_on_severity || 'critical');
-  }, [repo?.auto_sync_enabled, repo?.pr_review_auto_publish, repo?.pr_review_block_on_severity]);
+    setDepStrategy(repo?.dependency_update_strategy || 'minimum_safe');
+    setDepThreshold(repo?.dependency_batch_threshold ?? 3);
+    setDepAutoPr(repo?.dependency_auto_pr_enabled ?? false);
+  }, [repo?.auto_sync_enabled, repo?.pr_review_auto_publish, repo?.pr_review_block_on_severity,
+      repo?.dependency_update_strategy, repo?.dependency_batch_threshold, repo?.dependency_auto_pr_enabled]);
 
   const saveRepoSettings = async (updates) => {
     setIsSaving(true);
@@ -118,6 +125,25 @@ export default function SettingsPanel({ repo, session, onRepoUpdated }) {
     const next = event.target.value;
     setBlockSeverity(next);
     await saveRepoSettings({ pr_review_block_on_severity: next });
+  };
+
+  const handleDepStrategyChange = async (event) => {
+    const next = event.target.value;
+    setDepStrategy(next);
+    await saveRepoSettings({ dependency_update_strategy: next });
+  };
+
+  const handleDepThresholdChange = async (event) => {
+    const raw = parseInt(event.target.value, 10);
+    const next = isNaN(raw) ? 3 : Math.max(1, Math.min(20, raw));
+    setDepThreshold(next);
+    await saveRepoSettings({ dependency_batch_threshold: next });
+  };
+
+  const handleDepAutoPrToggle = async () => {
+    const next = !depAutoPr;
+    setDepAutoPr(next);
+    await saveRepoSettings({ dependency_auto_pr_enabled: next });
   };
 
   const handleGenerateWebhook = async () => {
@@ -328,6 +354,68 @@ export default function SettingsPanel({ repo, session, onRepoUpdated }) {
             ))}
           </div>
         )}
+      </Panel>
+
+      {/* Dependency Updates — US-084 */}
+      <Panel>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-base font-semibold text-white">Dependency Updates</h3>
+            <p className="mt-1 text-sm text-gray-400">
+              Configure automatic batch fix PRs for vulnerable npm/yarn dependencies.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-5 space-y-5">
+          {/* Update strategy */}
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium text-gray-300">Update strategy</p>
+              <p className="text-xs text-gray-500 mt-0.5">Whether to target the minimum CVE-fixing version or the latest non-breaking version.</p>
+            </div>
+            <Select
+              value={depStrategy}
+              onChange={handleDepStrategyChange}
+              disabled={isSaving}
+              inputClassName="w-44"
+            >
+              <option value="minimum_safe">Minimum safe</option>
+              <option value="latest_safe">Latest safe</option>
+            </Select>
+          </div>
+
+          {/* Batch threshold */}
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium text-gray-300">Batch threshold</p>
+              <p className="text-xs text-gray-500 mt-0.5">Open a single batched PR when this many vulnerabilities are open (1–20).</p>
+            </div>
+            <input
+              type="number"
+              min={1}
+              max={20}
+              value={depThreshold}
+              onChange={handleDepThresholdChange}
+              disabled={isSaving}
+              className="w-20 rounded-lg border border-gray-700 bg-gray-900 px-3 py-1.5 text-sm text-white text-center outline-none focus:border-indigo-500 disabled:opacity-50"
+            />
+          </div>
+
+          {/* Auto-PR toggle */}
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium text-gray-300">Auto-PR on index</p>
+              <p className="text-xs text-gray-500 mt-0.5">Automatically open a batch fix PR after each index when the threshold is met.</p>
+            </div>
+            <Switch
+              checked={depAutoPr}
+              onChange={handleDepAutoPrToggle}
+              disabled={isSaving}
+              label=""
+            />
+          </div>
+        </div>
       </Panel>
     </div>
   );

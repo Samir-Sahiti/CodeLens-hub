@@ -149,7 +149,7 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
     // user_id here and sast_disabled_rules later in the parsing phase.
     const { data: repoMeta } = await supabaseAdmin
       .from('repositories')
-      .select('user_id, sast_disabled_rules')
+      .select('user_id, sast_disabled_rules, dependency_auto_pr_enabled, dependency_batch_threshold, dependency_update_strategy')
       .eq('id', repoId)
       .single();
     const repoUserId = repoMeta?.user_id || null;
@@ -763,6 +763,32 @@ const indexRepository = async ({ repoId, owner, name, token, extractPath, source
       console.log(`[indexer] Generated daily snapshot post-index for ${repoId}`);
     } catch (snapCatchErr) {
       console.warn(`[indexer] Post-index snapshot generation threw: ${snapCatchErr.message}`);
+    }
+
+    // US-084: auto-open a batch fix PR when dependency_auto_pr_enabled and enough vulns found
+    if (repoMeta?.dependency_auto_pr_enabled && repoUserId && token && source === 'github') {
+      const threshold = repoMeta.dependency_batch_threshold ?? 3;
+      try {
+        const { data: vulnIssues } = await supabaseAdmin
+          .from('analysis_issues')
+          .select('id')
+          .eq('repo_id', repoId)
+          .eq('type', 'vulnerable_dependency');
+        const vulnCount = (vulnIssues || []).length;
+        if (vulnCount >= threshold) {
+          const vulnIds = (vulnIssues || []).map(i => i.id);
+          console.log(`[indexer] Auto-PR: ${vulnCount} vuln(s) >= threshold ${threshold}, triggering batch-proposal.`);
+          // Fire-and-forget — never blocks the pipeline
+          const { batchDependencyProposalInternal } = require('../controllers/reviewController');
+          if (typeof batchDependencyProposalInternal === 'function') {
+            batchDependencyProposalInternal({ repoId, userId: repoUserId, vulnerabilityIds: vulnIds }).catch((autoErr) => {
+              console.warn('[indexer] Auto-PR batch proposal failed:', autoErr.message);
+            });
+          }
+        }
+      } catch (autoErr) {
+        console.warn('[indexer] Auto-PR trigger failed (best-effort):', autoErr.message);
+      }
     }
 
     // US-077: notify recipients that the index is ready and surface newly-introduced
