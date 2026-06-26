@@ -17,7 +17,7 @@
  *   party imports like `'react'` that the parser emits but never resolve
  *   to a real `graph_nodes` row).
  * - Loaders are memoised per-request via AsyncLocalStorage so multiple
- *   agent tools in a single Anthropic iteration share one fetch.
+ *   agent tools in a single LLM iteration share one fetch.
  */
 
 const { supabaseAdmin } = require('../db/supabase');

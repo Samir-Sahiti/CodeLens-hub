@@ -81,7 +81,7 @@ Deterministic, runs every index. Surfaced in the Issues tab.
 - Drillable `AttackSurfacePanel` with per-source path counts.
 
 ### 4.6 AI Security Audit Mode (US-048)
-- **Single-file audit** — Claude-Sonnet-driven, security-focused system prompt, 12 chunks re-ranked by security-keyword frequency, structured findings (`severity, category, line_reference, explanation, suggested_fix, confidence`).
+- **Single-file audit** — OpenAI-driven, security-focused system prompt, 12 chunks re-ranked by security-keyword frequency, structured findings (`severity, category, line_reference, explanation, suggested_fix, confidence`).
 - **Whole-repo audit** — top 20 files by `incoming_count + complexity_score`, sequential per-file with budget checks, persisted to `security_audits` table; supports `partial` status when budget runs out.
 - Cross-links AI findings to deterministic `analysis_issues` rows on the same file.
 
@@ -89,7 +89,7 @@ Deterministic, runs every index. Surfaced in the Issues tab.
 
 ## 5. AI Code Review (US-026)
 
-- **Single-file review** via Claude Sonnet 4 (`claude-sonnet-4-20250514`).
+- **Single-file review** via OpenAI (`gpt-4.1`).
 - **Focus presets**: Performance, Bug Hunt, Architecture (the Security preset was replaced by Security Audit mode in US-048).
 - **Modes**: General | Security Audit (segmented control).
 - SSE streaming with abort on tab close.
@@ -111,7 +111,7 @@ The "Propose fix" path on every issue card.
   - `vulnerable_dependency` → manifest + safe version proposal
 - **Structured output**: `{ summary, rationale, changes: [{file_path, action, diff, full_content}], risks }`.
 - **Streaming SSE**: `summary_delta`, `rationale_delta`, `change`, `risk`, `done`.
-- **Caching** — most-recent pending proposal returned without re-calling Claude; `?regenerate=true` bypasses.
+- **Caching** — most-recent pending proposal returned without re-calling the LLM; `?regenerate=true` bypasses.
 - **Persistence** — `issue_proposals` table; stale-marked on re-index when underlying file's content_hash changes.
 - **Review panel** (US-065) — slide-in panel with summary, rationale, per-file unified-diff renderer (added/removed/context coloring), risks list. Stale-banner with one-click regenerate. Token cost displayed.
 - **Apply via PR** (US-066) — opens a GitHub draft PR in a single commit via the Git Data API (createBlob → createTree → createCommit → createRef → pulls.create). PR body embeds rationale, risks, and a deep link back to the CodeLens issue. Idempotent on retry. Per-issue "PR opened" badge on the IssueCard after success.
@@ -121,7 +121,7 @@ The "Propose fix" path on every issue card.
 ## 7. RAG-Powered Code Search
 
 - **Embedding model**: OpenAI `text-embedding-3-small` (1536-dim), HNSW index `m=16 ef_construction=64` (US-041).
-- **LLM**: Groq for fast RAG response synthesis (separate from Anthropic for review/audit).
+- **LLM**: OpenAI (`gpt-4.1`) for RAG response synthesis (same provider as review/audit).
 - **Endpoints**: `/api/search/*`, dedicated Search page in the frontend.
 
 ---
@@ -141,7 +141,7 @@ The "Propose fix" path on every issue card.
 - Cosine-similarity clustering over `code_chunks` embeddings → `duplicationScanner`.
 - **Duplication section** in the Issues panel with severity, member count, total duplicated lines, similarity range.
 - **DuplicationDetailModal** — side-by-side picker comparing any two cluster members.
-- **AI shared-utility refactor** — Claude-driven extraction proposal (SSE-streamed) for a selected cluster.
+- **AI shared-utility refactor** — OpenAI-driven extraction proposal (SSE-streamed) for a selected cluster.
 
 ---
 
@@ -238,11 +238,11 @@ A unified suppression mechanism reusable by any rule-based scanner:
 | Layer | Choice |
 |---|---|
 | Frontend | React 18 · Vite · Tailwind · D3.js v7 · React Router 6 |
-| Backend | Node 20 · Express 4 · Octokit · `@anthropic-ai/sdk` · openai · piscina |
+| Backend | Node 20 · Express 4 · Octokit · openai · piscina |
 | DB | Postgres 15 (Supabase) + pgvector (HNSW) |
 | Auth | Supabase Auth + GitHub OAuth |
 | AST | Tree-sitter (JS · TS · TSX · Python · C# · Go · Java · Rust · Ruby) |
-| Models | OpenAI `text-embedding-3-small`, Groq (RAG), Claude Sonnet 4 (review/audit/proposals) |
+| Models | OpenAI `text-embedding-3-small` (embeddings), `gpt-4.1` (RAG/review/audit/proposals/agent/tours), `gpt-4o-mini` (agent titles) |
 
 ---
 
@@ -250,7 +250,7 @@ A unified suppression mechanism reusable by any rule-based scanner:
 
 From `issues.md`:
 
-- **AI Repo Agent (US-067 – US-071)** — conversational agent over the deterministic analysis as a tool surface (`get_blast_radius`, `list_issues`, `find_paths`, `get_attack_paths`, `propose_fix`, etc.). Tool-use loop with Anthropic, SSE-streamed, persisted trace per turn. Replaces the current Search tab. **Not yet started.**
+- **AI Repo Agent (US-067 – US-071)** — conversational agent over the deterministic analysis as a tool surface (`get_blast_radius`, `list_issues`, `find_paths`, `get_attack_paths`, `propose_fix`, etc.). Tool-use loop with OpenAI, SSE-streamed, persisted trace per turn. Replaces the current Search tab.
 
 ---
 

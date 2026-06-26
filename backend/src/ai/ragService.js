@@ -3,22 +3,15 @@
  *
  * Used by:
  *   - searchController (US-018 / US-019)  — embeds the user query and feeds
- *     chunks into Claude for synthesis.
+ *     chunks into the LLM for synthesis.
  *   - agentTools.search_code (US-068) — returns raw chunks (no synthesis).
  *
- * The OpenAI client is wrapped in a Proxy so tests can stub
- * `globalThis.__CODELENS_OPENAI__`, matching the convention used by other
- * controllers.
+ * The OpenAI client is shared from ./openaiClient (Proxy-wrapped so tests can
+ * stub `globalThis.__CODELENS_OPENAI__`).
  */
 
-const { OpenAI } = require('openai');
 const { supabaseAdmin } = require('../db/supabase');
-
-const _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || 'sk-dummy' });
-function _proxy(real, key) {
-  return new Proxy(real, { get(_t, p) { const a = globalThis[key] || real; const v = a[p]; return typeof v === 'function' ? v.bind(a) : v; } });
-}
-const openai = _proxy(_openai, '__CODELENS_OPENAI__');
+const { openai } = require('./openaiClient');
 
 /**
  * Embed a natural language query. Returns `{ embedding, tokens }`.

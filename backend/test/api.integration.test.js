@@ -148,7 +148,7 @@ function createSupabaseMock(handlers) {
   };
 }
 
-// OpenAI / Anthropic are injected via globals (see beforeEach) to avoid network.
+// OpenAI is injected via globals (see beforeEach) to avoid network calls.
 
 describe('Backend API integration (mocked)', () => {
   beforeEach(() => {
@@ -157,7 +157,6 @@ describe('Backend API integration (mocked)', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
     process.env.OPENAI_API_KEY = 'test';
-    process.env.ANTHROPIC_API_KEY = 'test';
 
     indexerMock = {
       startGitHubIndexing: vi.fn(),
@@ -171,19 +170,24 @@ describe('Backend API integration (mocked)', () => {
 
     globalThis.__CODELENS_OPENAI__ = {
       embeddings: {
-        create: async () => ({ data: [{ embedding: [0.01, 0.02, 0.03] }] }),
+        create: async () => ({ data: [{ embedding: [0.01, 0.02, 0.03] }], usage: { total_tokens: 3 } }),
       },
-    };
-
-    globalThis.__CODELENS_ANTHROPIC__ = {
-      messages: {
-        create: async ({ stream }) => {
-          if (!stream) return { content: [{ text: 'ok' }] };
-          async function* gen() {
-            yield { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hello' } };
-            yield { type: 'content_block_delta', delta: { type: 'text_delta', text: ' world' } };
-          }
-          return gen();
+      chat: {
+        completions: {
+          create: async ({ stream }) => {
+            // Non-streaming (e.g. agent title generation, tour steps).
+            if (!stream) {
+              return { choices: [{ message: { content: 'ok' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+            }
+            // Streaming: OpenAI-shaped chunks + a final usage chunk
+            // (stream_options.include_usage emits usage with empty choices).
+            async function* gen() {
+              yield { choices: [{ delta: { content: 'Hello' } }] };
+              yield { choices: [{ delta: { content: ' world' }, finish_reason: 'stop' }] };
+              yield { choices: [], usage: { prompt_tokens: 5, completion_tokens: 2 } };
+            }
+            return gen();
+          },
         },
       },
     };
@@ -739,16 +743,18 @@ describe('Backend API integration (mocked)', () => {
     globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
     globalThis.__CODELENS_SUPABASE_ANON__ = supabaseAdminMock;
 
-    let anthropicArgs = null;
-    globalThis.__CODELENS_ANTHROPIC__ = {
-      messages: {
-        create: async (args) => {
-          anthropicArgs = args;
-          async function* gen() {
-            yield { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Extract shared utility.' } };
-            yield { type: 'message_delta', usage: { output_tokens: 7 } };
-          }
-          return gen();
+    let openaiArgs = null;
+    globalThis.__CODELENS_OPENAI__ = {
+      chat: {
+        completions: {
+          create: async (args) => {
+            openaiArgs = args;
+            async function* gen() {
+              yield { choices: [{ delta: { content: 'Extract shared utility.' }, finish_reason: 'stop' }] };
+              yield { choices: [], usage: { prompt_tokens: 10, completion_tokens: 7 } };
+            }
+            return gen();
+          },
         },
       },
     };
@@ -775,15 +781,17 @@ describe('Backend API integration (mocked)', () => {
       })
       .expect(200);
 
-    expect(anthropicArgs.system).toContain('remove duplicated code');
-    expect(anthropicArgs.messages[0].content).toContain('a.js');
+    const sysMsg = openaiArgs.messages.find((m) => m.role === 'system');
+    const userMsg = openaiArgs.messages.find((m) => m.role === 'user');
+    expect(sysMsg.content).toContain('remove duplicated code');
+    expect(userMsg.content).toContain('a.js');
     expect(res.text).toContain('Extract shared utility.');
     expect(res.text).toContain('"type":"done"');
     expect(supabaseCallLog).toContain('api_usage.insert.many');
   });
 
   it('POST /api/review/:repoId security_audit streams findings and uses security retrieval', async () => {
-    let anthropicArgs = null;
+    let openaiArgs = null;
     supabaseAdminMock = createSupabaseMock({
       'repositories.select.maybeSingle': async () => ({ data: { id: 'repo-1', status: 'ready' }, error: null }),
       'analysis_issues.select.many': async () => ({
@@ -802,14 +810,20 @@ describe('Backend API integration (mocked)', () => {
     globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
     globalThis.__CODELENS_SUPABASE_ANON__ = supabaseAdminMock;
 
-    globalThis.__CODELENS_ANTHROPIC__ = {
-      messages: {
-        create: async (args) => {
-          anthropicArgs = args;
-          async function* gen() {
-            yield { type: 'content_block_delta', delta: { type: 'text_delta', text: '{"severity":"high","category":"injection","line_reference":"src/auth.js:6","explanation":"exec uses token input","suggested_fix":"Avoid shell execution","confidence":"high"}' } };
-          }
-          return gen();
+    globalThis.__CODELENS_OPENAI__ = {
+      embeddings: {
+        create: async () => ({ data: [{ embedding: [0.01, 0.02, 0.03] }], usage: { total_tokens: 3 } }),
+      },
+      chat: {
+        completions: {
+          create: async (args) => {
+            openaiArgs = args;
+            async function* gen() {
+              yield { choices: [{ delta: { content: '{"severity":"high","category":"injection","line_reference":"src/auth.js:6","explanation":"exec uses token input","suggested_fix":"Avoid shell execution","confidence":"high"}' }, finish_reason: 'stop' }] };
+              yield { choices: [], usage: { prompt_tokens: 8, completion_tokens: 20 } };
+            }
+            return gen();
+          },
         },
       },
     };
@@ -825,8 +839,9 @@ describe('Backend API integration (mocked)', () => {
       .send({ snippet: 'exec(req.body.cmd)', mode: 'security_audit', filePath: 'src/auth.js' })
       .expect(200);
 
-    expect(anthropicArgs.system).toContain('injection vulnerabilities');
-    expect(anthropicArgs.system).toContain('confidence');
+    const auditSysMsg = openaiArgs.messages.find((m) => m.role === 'system');
+    expect(auditSysMsg.content).toContain('injection vulnerabilities');
+    expect(auditSysMsg.content).toContain('confidence');
     expect(res.text.indexOf('src/auth.js')).toBeLessThan(res.text.indexOf('src/plain.js'));
     expect(res.text).toContain('"type":"finding"');
     expect(res.text).toContain('"matching_analysis_issues"');

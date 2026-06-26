@@ -2,13 +2,13 @@
  * SSE abort helper (Phase 1.1).
  *
  * Binds a request's `close` event to a new AbortController so upstream calls
- * (Claude SDK, fetch, etc.) can stop generating output once the client
+ * (OpenAI SDK, fetch, etc.) can stop generating output once the client
  * disconnects. Without this, every closed-tab kicks off the full output stream
  * to completion while still billing the token output — wasteful at any scale.
  *
  *   const { signal, cleanup, isAborted } = bindRequestAbort(req);
  *   try {
- *     const stream = await anthropic.messages.create({ ... }, { signal });
+ *     const stream = await openai.chat.completions.create({ ... }, { signal });
  *     ...
  *   } finally {
  *     cleanup();
@@ -35,7 +35,7 @@ function bindRequestAbort(req) {
   };
 }
 
-/** Classifies a thrown error as an abort, matching both the Anthropic SDK and undici flavours. */
+/** Classifies a thrown error as an abort, matching both the OpenAI SDK and undici flavours. */
 function isAbortError(err, signal) {
   if (!err) return false;
   if (signal && signal.aborted) return true;

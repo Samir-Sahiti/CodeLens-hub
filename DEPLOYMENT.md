@@ -72,7 +72,6 @@ GITHUB_CLIENT_ID=<from step 2>
 GITHUB_CLIENT_SECRET=<from step 2>
 GITHUB_CALLBACK_URL=https://your-frontend-domain.com/auth/callback
 OPENAI_API_KEY=<your key>
-GROQ_API_KEY=<your key>
 FRONTEND_URL=https://your-frontend-domain.com
 BACKEND_URL=https://your-backend-domain.onrender.com
 ```

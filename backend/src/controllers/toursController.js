@@ -2,25 +2,16 @@
  * Tours controller — Tour generation via RAG + graph BFS walk (US-055)
  */
 
-const { OpenAI }        = require('openai');
-const Anthropic         = require('@anthropic-ai/sdk');
 const { supabaseAdmin } = require('../db/supabase');
 const { recordUsage }   = require('../services/usageTracker');
 const { bindRequestAbort } = require('../lib/sseAbort');
 const { enqueueNotification } = require('../services/notifications'); // US-077
+const { openai, CHAT_MODEL } = require('../ai/openaiClient');
 
-const MODEL = 'claude-sonnet-4-20250514';
+const MODEL = CHAT_MODEL;
 const MAX_DAILY_TOKENS = parseInt(process.env.MAX_DAILY_TOKENS_PER_USER || '500000', 10);
 const DISTANCE_THRESHOLD = 0.4;
 const MAX_STEPS = 8;
-
-const _openai    = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || 'sk-dummy' });
-const _anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || 'sk-ant-dummy' });
-function _proxy(real, key) {
-  return new Proxy(real, { get(_t, p) { const a = globalThis[key] || real; const v = a[p]; return typeof v === 'function' ? v.bind(a) : v; } });
-}
-const openai    = _proxy(_openai,    '__CODELENS_OPENAI__');
-const anthropic = _proxy(_anthropic, '__CODELENS_ANTHROPIC__');
 
 async function getRepoAccess(repoId, userId) {
   const { data: owned } = await supabaseAdmin
@@ -74,7 +65,7 @@ async function dailyTokensUsed(userId) {
 }
 
 /**
- * Run a Claude explanation pass over a list of file paths, producing tour step rows.
+ * Run an LLM explanation pass over a list of file paths, producing tour step rows.
  * Shared by the public RAG tour endpoint and the Start Here service (US-059).
  *
  * @param {object} args
@@ -155,25 +146,27 @@ async function explainSteps({
 
     let explanation = '';
     try {
-      const response = await anthropic.messages.create({
+      const response = await openai.chat.completions.create({
         model:      MODEL,
         max_tokens: maxTokens,
-        system:     systemPrompt,
-        messages:   [{ role: 'user', content: userPrompt }],
+        messages:   [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
       }, abortSignal ? { signal: abortSignal } : undefined);
-      explanation = response.content[0]?.type === 'text' ? response.content[0].text : '';
-      const inputTokens  = response.usage?.input_tokens  || 0;
-      const outputTokens = response.usage?.output_tokens || 0;
+      explanation = response.choices?.[0]?.message?.content || '';
+      const inputTokens  = response.usage?.prompt_tokens     || 0;
+      const outputTokens = response.usage?.completion_tokens || 0;
       budgetRemaining -= inputTokens + outputTokens;
       await recordUsage({
         userId,
         endpoint:         'tour-generate',
-        provider:         'anthropic',
+        provider:         'openai',
         promptTokens:     inputTokens,
         completionTokens: outputTokens,
       });
     } catch (err) {
-      console.error(`[tour] Claude call failed at step ${i + 1}:`, err.message);
+      console.error(`[tour] LLM call failed at step ${i + 1}:`, err.message);
       explanation = '';
     }
 
@@ -292,7 +285,7 @@ const generateTour = async (req, res) => {
     }
   }
 
-  // 7. Generate Claude explanation for each step. Bind the request's close
+  // 7. Generate LLM explanation for each step. Bind the request's close
   // event so closing the tab mid-tour aborts the remaining per-step calls.
   const { signal: abortSignal, cleanup: cleanupAbort } = bindRequestAbort(req);
   let steps;

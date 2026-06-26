@@ -1449,7 +1449,7 @@ CREATE TRIGGER pr_finding_proposals_set_updated_at
 --   role = 'user' | 'assistant'  → { text: string }
 --   role = 'tool_use'            → { tool_name: string, input: object, tool_use_id: string }
 --   role = 'tool_result'         → { tool_use_id: string, output: any, is_error: boolean }
--- tool_use_id matches the Anthropic protocol id so the trace can be replayed verbatim.
+-- tool_use_id stores the provider tool-call id (OpenAI tool_call id) so the trace can be replayed verbatim.
 -- =============================================================================
 
 DO $$ BEGIN

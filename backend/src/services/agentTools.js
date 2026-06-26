@@ -6,7 +6,7 @@
  * reads, and the existing refactor-proposal pipeline (US-064).
  *
  * Two exports:
- *   - `tools`         — Anthropic-format tool schema array (pass into messages.create).
+ *   - `tools`         — OpenAI function-calling tool schema array (pass into chat.completions.create).
  *   - `toolHandlers`  — { [tool_name]: async (input, ctx) => result }.
  *
  * The handler contract (load-bearing, do not change without updating the loop):
@@ -33,9 +33,11 @@ const { buildRiskContext, computeRiskComponents } = require('./riskScoring');
 
 const COLLECTION_LIMIT = 50;
 
-// ─── tool schema definitions (Anthropic format) ────────────────────────────
+// ─── tool schema definitions ────────────────────────────────────────────────
+// Defined in a neutral { name, description, input_schema } shape (the single
+// source of truth) and mapped to OpenAI's function-calling format at export.
 
-const tools = [
+const toolDefs = [
   {
     name: 'get_graph_overview',
     description: 'Returns high-level statistics of the repository\'s dependency graph: total node count (`nodeCount`), total edge count (`edgeCount`), the top 10 hub files by incoming imports (`topHubs`), the top 10 files by outgoing imports (`topSinks`), and the count of strongly-connected components containing a cycle (`cyclicComponentCount` — a 10-file cycle is one component, not 10 cycles). Use this first to orient yourself in an unfamiliar repo before drilling into specific files.',
@@ -163,6 +165,17 @@ const tools = [
     },
   },
 ];
+
+// OpenAI chat-completions function-calling format. The model dispatches by
+// `function.name`; toolHandlers/READ_ONLY_TOOLS key off the same names.
+const tools = toolDefs.map((t) => ({
+  type: 'function',
+  function: {
+    name: t.name,
+    description: t.description,
+    parameters: t.input_schema,
+  },
+}));
 
 // ─── handler implementations ──────────────────────────────────────────────
 
@@ -367,7 +380,7 @@ const toolHandlers = {
       const {
         fetchAnalysisIssue,
         buildContextForIssue,
-        streamClaude,
+        streamLLM,
         parseProposalJson,
         normalizeProposal,
       } = reviewController._private;
@@ -377,8 +390,8 @@ const toolHandlers = {
 
       const { system, user } = await buildContextForIssue(issue, ctx.repoId);
       // No SSE send fn — the agent loop emits its own tool_result event; req=null
-      // so streamClaude's abort binding is a no-op when called outside HTTP.
-      const { text, inputTokens, outputTokens } = await streamClaude({
+      // so streamLLM's abort binding is a no-op when called outside HTTP.
+      const { text, inputTokens, outputTokens } = await streamLLM({
         system,
         user,
         userId: ctx.userId,

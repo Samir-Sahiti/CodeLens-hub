@@ -31,7 +31,7 @@ Pull request review integration is represented in the app and will expand into d
 Ask repository questions grounded in indexed code, graph data, issues, and metrics. Search and agent answers include source context so results can be verified.
 
 ### AI Code Review
-Paste a code snippet or describe a change and get a structured review — bug detection, security flags, and improvement suggestions — powered by Anthropic Claude.
+Paste a code snippet or describe a change and get a structured review — bug detection, security flags, and improvement suggestions — powered by OpenAI.
 
 ### Settings
 Manage webhook auto-sync, team membership, notification preferences, and CI integration for each repository.
@@ -56,8 +56,7 @@ A persistent help icon opens a markdown-sourced guide that is fuzzy-searchable, 
 | AST Parsing | Tree-sitter (JS, TS, JSX, TSX, Python, C#, Go, Java, Rust, Ruby) |
 | Embeddings | OpenAI `text-embedding-3-small` (1536-dim) |
 | Vector Index | pgvector HNSW (m=16, ef_construction=64) |
-| LLM / RAG | Groq API |
-| AI Code Review | Anthropic Claude (`@anthropic-ai/sdk`) |
+| LLM (RAG, review, audit, proposals, agent, tours) | OpenAI (`openai` SDK) — `gpt-4.1` / `gpt-4o-mini` |
 | GitHub Integration | Octokit |
 | Containerisation | Docker, Docker Compose |
 | CI/CD | GitHub Actions → GitHub Container Registry |
@@ -129,8 +128,7 @@ Fill in `.env` with your credentials:
 SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
 VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY
 GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_CALLBACK_URL
-OPENAI_API_KEY        # embeddings
-GROQ_API_KEY          # RAG LLM responses
+OPENAI_API_KEY        # embeddings + all chat/reasoning (RAG, review, audit, proposals, agent, file chat, tours)
 ```
 
 ### 3. Apply database migrations
