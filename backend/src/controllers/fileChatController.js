@@ -8,14 +8,12 @@
  * - No embedding / no similarity search (RAG disabled for this session)
  * - Fetch the selected file's content from the DB (assembled from code_chunks)
  * - Optionally include direct imports (graph_edges from_path = filePath)
- * - Stream Claude response via SSE
+ * - Stream LLM response via SSE
  */
 
-const Anthropic = require('@anthropic-ai/sdk');
 const { supabaseAdmin } = require('../db/supabase');
 const { bindRequestAbort, isAbortError } = require('../lib/sseAbort');
-
-const anthropic = globalThis.__CODELENS_ANTHROPIC__ || new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || 'sk-ant-dummy' });
+const { streamChatText } = require('../ai/openaiClient');
 
 async function canAccessRepo(repoId, userId) {
   // Owner check
@@ -131,8 +129,8 @@ const chatWithFile = async (req, res) => {
   };
 
   try {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      send({ type: 'error', message: 'File chat is not available: Anthropic API key not configured.' });
+    if (!process.env.OPENAI_API_KEY) {
+      send({ type: 'error', message: 'File chat is not available: OpenAI API key not configured.' });
       return res.end();
     }
 
@@ -183,23 +181,17 @@ const chatWithFile = async (req, res) => {
     const { signal, cleanup } = bindRequestAbort(req);
     let aborted = false;
     try {
-      const stream = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1500,
+      await streamChatText({
         system: `${system}\n\n${systemContext}`,
-        messages: [{ role: 'user', content: query.trim() }],
-        stream: true,
-      }, { signal });
-
-      for await (const event of stream) {
-        if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
-          send({ type: 'chunk', text: event.delta.text });
-        }
-      }
+        user: query.trim(),
+        maxTokens: 1500,
+        signal,
+        onDelta: (frag) => send({ type: 'chunk', text: frag }),
+      });
     } catch (streamErr) {
       if (isAbortError(streamErr, signal)) {
         aborted = true;
-        console.warn('[fileChat] Claude stream aborted by client disconnect');
+        console.warn('[fileChat] LLM stream aborted by client disconnect');
       } else {
         throw streamErr;
       }

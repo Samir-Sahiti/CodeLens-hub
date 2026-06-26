@@ -10,23 +10,14 @@
  *   2. Vector search (pgvector cosine similarity over code_chunks)
  *   3. Guard clause  (if best match is too far, return graceful fallback)
  *   4. Build prompt  (system + user with retrieved context)
- *   5. Stream answer (Anthropic Claude)
+ *   5. Stream answer (OpenAI chat completion)
  *   6. Return        { answer, sources[] } or stream depending on client
  */
 
-const { OpenAI }     = require('openai');
-const Anthropic      = require('@anthropic-ai/sdk');
 const { supabaseAdmin } = require('../db/supabase');
 const { recordUsage } = require('../services/usageTracker');
 const { bindRequestAbort, isAbortError } = require('../lib/sseAbort');
-
-const _openai    = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || 'sk-dummy' });
-const _anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || 'sk-ant-dummy' });
-function _proxy(real, key) {
-  return new Proxy(real, { get(_t, p) { const a = globalThis[key] || real; const v = a[p]; return typeof v === 'function' ? v.bind(a) : v; } });
-}
-const openai    = _proxy(_openai,    '__CODELENS_OPENAI__');
-const anthropic = _proxy(_anthropic, '__CODELENS_ANTHROPIC__');
+const { openai, CHAT_MODEL } = require('../ai/openaiClient');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -65,7 +56,7 @@ async function retrieveChunks(repoId, embedding, topK = 8) {
 }
 
 /**
- * Build the Claude system + user prompt from retrieved chunks.
+ * Build the LLM system + user prompt from retrieved chunks.
  */
 function buildPrompt(query, chunks) {
   const contextBlocks = chunks.map(chunk => {
@@ -161,16 +152,10 @@ const search = async (req, res) => {
   }, PIPELINE_TIMEOUT_MS);
 
   try {
-    // 1. Check API keys
+    // 1. Check API key
     if (!process.env.OPENAI_API_KEY) {
       clearTimeout(timeoutId);
       send({ type: 'error', message: 'Search is not available: OpenAI API key not configured.' });
-      return res.end();
-    }
-
-    if (!process.env.ANTHROPIC_API_KEY) {
-      clearTimeout(timeoutId);
-      send({ type: 'error', message: 'Search is not available: Anthropic API key not configured.' });
       return res.end();
     }
 
@@ -240,37 +225,36 @@ const search = async (req, res) => {
     const sources = trimmedChunks.slice(0, 5).map(formatSource);
     send({ type: 'sources', sources });
 
-    // 7. Build Claude prompt
+    // 7. Build the LLM prompt
     const { system, user } = buildPrompt(query.trim(), trimmedChunks);
 
-    // 8. Stream Claude response
+    // 8. Stream the LLM response
     const llmStart = Date.now();
     const { signal, cleanup } = bindRequestAbort(req);
     let aborted = false;
     let inputTokens = 0, outputTokens = 0;
     try {
-      const stream = await anthropic.messages.create({
-        model:      'claude-sonnet-4-20250514',
+      const stream = await openai.chat.completions.create({
+        model:      CHAT_MODEL,
         max_tokens: 1500,
-        system,
-        messages:   [{ role: 'user', content: user }],
+        messages:   [{ role: 'system', content: system }, { role: 'user', content: user }],
         stream:     true,
+        stream_options: { include_usage: true },
       }, { signal });
 
-      for await (const event of stream) {
+      for await (const chunk of stream) {
         if (pipelineTimedOut) break;
-        if (event.type === 'message_start') {
-          inputTokens = event.message?.usage?.input_tokens || 0;
-        } else if (event.type === 'message_delta') {
-          outputTokens = event.usage?.output_tokens || 0;
-        } else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
-          send({ type: 'chunk', text: event.delta.text });
+        const delta = chunk.choices?.[0]?.delta?.content;
+        if (delta) send({ type: 'chunk', text: delta });
+        if (chunk.usage) {
+          inputTokens  = chunk.usage.prompt_tokens || inputTokens;
+          outputTokens = chunk.usage.completion_tokens || outputTokens;
         }
       }
     } catch (streamErr) {
       if (isAbortError(streamErr, signal)) {
         aborted = true;
-        console.warn(`[search] Claude stream aborted by client disconnect (partial_output_tokens=${outputTokens})`);
+        console.warn(`[search] LLM stream aborted by client disconnect (partial_output_tokens=${outputTokens})`);
       } else {
         throw streamErr;
       }
@@ -278,7 +262,7 @@ const search = async (req, res) => {
       cleanup();
     }
 
-    recordUsage({ userId: req.user.id, endpoint: 'search', provider: 'anthropic', promptTokens: inputTokens, completionTokens: outputTokens });
+    recordUsage({ userId: req.user.id, endpoint: 'search', provider: 'openai', promptTokens: inputTokens, completionTokens: outputTokens });
 
     clearTimeout(timeoutId);
     if (!pipelineTimedOut && !aborted) {

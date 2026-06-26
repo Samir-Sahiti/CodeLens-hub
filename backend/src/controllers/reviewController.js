@@ -4,10 +4,9 @@
 
 const path              = require('path');
 const crypto            = require('crypto');
-const { OpenAI }        = require('openai');
-const Anthropic         = require('@anthropic-ai/sdk');
 const { supabaseAdmin } = require('../db/supabase');
 const { recordUsage }   = require('../services/usageTracker');
+const { openai, streamChatText, CHAT_MODEL } = require('../ai/openaiClient');
 
 function getOctokit(githubToken) {
   const { Octokit } = globalThis.__CODELENS_OCTOKIT__ || require('octokit');
@@ -27,21 +26,13 @@ const { enqueueNotification, recipientsForRepo } = require('../services/notifica
 const { scoreIssuesForRepo } = require('../services/riskScoring');
 const { fixNpmDependency }  = require('../services/dependencyFixer');
 
-const MODEL = 'claude-sonnet-4-20250514';
+const MODEL = CHAT_MODEL;
 const MAX_DAILY_TOKENS = parseInt(process.env.MAX_DAILY_TOKENS_PER_USER || '500000', 10);
 const SECURITY_KEYWORDS = ['auth', 'password', 'token', 'crypto', 'sanitize', 'exec', 'eval', 'sql'];
 const WHOLE_REPO_AUDIT_LIMIT = 20;
 const AUDIT_OUTPUT_TOKEN_ESTIMATE = 900;
 const AUDIT_CONTEXT_TOKEN_ESTIMATE = 1800;
 const EMBEDDING_TOKEN_ESTIMATE = 512;
-
-const _openai    = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || 'sk-dummy' });
-const _anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || 'sk-ant-dummy' });
-function _proxy(real, key) {
-  return new Proxy(real, { get(_t, p) { const a = globalThis[key] || real; const v = a[p]; return typeof v === 'function' ? v.bind(a) : v; } });
-}
-const openai    = _proxy(_openai,    '__CODELENS_OPENAI__');
-const anthropic = _proxy(_anthropic, '__CODELENS_ANTHROPIC__');
 
 async function canAccessRepo(repoId, userId) {
   const { data: owned } = await supabaseAdmin
@@ -350,7 +341,7 @@ async function embedSnippet(snippet, userId, endpoint = 'review') {
   return embedding;
 }
 
-async function streamClaude({ system, user, send, userId, endpoint = 'review', maxTokens = 1500, req }) {
+async function streamLLM({ system, user, send, userId, endpoint = 'review', maxTokens = 1500, req }) {
   const { signal, cleanup } = bindRequestAbort(req);
   let text = '';
   let inputTokens = 0;
@@ -358,28 +349,21 @@ async function streamClaude({ system, user, send, userId, endpoint = 'review', m
   let aborted = false;
 
   try {
-    const stream = await anthropic.messages.create({
-      model: MODEL,
-      max_tokens: maxTokens,
+    const result = await streamChatText({
       system,
-      messages: [{ role: 'user', content: user }],
-      stream: true,
-    }, { signal });
-
-    for await (const event of stream) {
-      if (event.type === 'message_start') {
-        inputTokens = event.message?.usage?.input_tokens || 0;
-      } else if (event.type === 'message_delta') {
-        outputTokens = event.usage?.output_tokens || outputTokens;
-      } else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
-        text += event.delta.text;
-        send?.({ type: 'chunk', text: event.delta.text });
-      }
-    }
+      user,
+      model: MODEL,
+      maxTokens,
+      signal,
+      onDelta: (frag) => send?.({ type: 'chunk', text: frag }),
+    });
+    text = result.text;
+    inputTokens = result.promptTokens;
+    outputTokens = result.completionTokens;
   } catch (err) {
     if (isAbortError(err, signal)) {
       aborted = true;
-      console.warn(`[review] Claude stream aborted by client disconnect (endpoint=${endpoint}, partial_output_tokens=${outputTokens})`);
+      console.warn(`[review] LLM stream aborted by client disconnect (endpoint=${endpoint})`);
     } else {
       throw err;
     }
@@ -387,9 +371,10 @@ async function streamClaude({ system, user, send, userId, endpoint = 'review', m
     cleanup();
   }
 
-  // Record usage even on abort — input tokens were already billed and any partial
-  // output tokens count too. Skipping this would let abuse vectors hide cost.
-  await recordUsage({ userId, endpoint, provider: 'anthropic', promptTokens: inputTokens, completionTokens: outputTokens });
+  // Record usage even on abort — any tokens already incurred count. Skipping this
+  // would let abuse vectors hide cost. (On abort, the OpenAI usage chunk may not
+  // arrive, so counts can be 0.)
+  await recordUsage({ userId, endpoint, provider: 'openai', promptTokens: inputTokens, completionTokens: outputTokens });
   return { text, inputTokens, outputTokens, aborted };
 }
 
@@ -815,10 +800,6 @@ const review = async (req, res) => {
       send({ type: 'error', message: 'Review is not available: OpenAI API key not configured.' });
       return res.end();
     }
-    if (!process.env.ANTHROPIC_API_KEY) {
-      send({ type: 'error', message: 'Review is not available: Anthropic API key not configured.' });
-      return res.end();
-    }
 
     let embedding;
     try {
@@ -844,7 +825,7 @@ const review = async (req, res) => {
     const { system, user } = buildReviewPrompt(snippet.trim(), contextDescription, chunks, mode, filePath);
     // In security_audit mode, suppress raw chunk events — findings arrive as structured `finding` SSE events instead.
     const chunkSend = mode === 'security_audit' ? null : send;
-    const { text, aborted } = await streamClaude({ system, user, send: chunkSend, userId: req.user.id, endpoint: 'review', req });
+    const { text, aborted } = await streamLLM({ system, user, send: chunkSend, userId: req.user.id, endpoint: 'review', req });
     if (aborted) return res.end();
 
     if (mode === 'security_audit') {
@@ -885,8 +866,8 @@ const runSecurityAudit = async (req, res) => {
   };
 
   try {
-    if (!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY) {
-      send({ type: 'error', message: 'Security audit is not available: AI provider key not configured.' });
+    if (!process.env.OPENAI_API_KEY) {
+      send({ type: 'error', message: 'Security audit is not available: OpenAI API key not configured.' });
       return res.end();
     }
 
@@ -968,7 +949,7 @@ const runSecurityAudit = async (req, res) => {
       }
 
       const { system, user } = buildReviewPrompt(source.slice(0, 20000), `Whole-repo security audit target: ${target.file_path}`, chunks, 'security_audit', target.file_path);
-      const { text, aborted } = await streamClaude({ system, user, send, userId: req.user.id, endpoint: 'security_audit', maxTokens: 1200, req });
+      const { text, aborted } = await streamLLM({ system, user, send, userId: req.user.id, endpoint: 'security_audit', maxTokens: 1200, req });
       if (aborted) {
         // Client disconnected mid-audit. Persist a partial report so the user
         // can resume from where we stopped, then exit the loop without billing
@@ -1083,13 +1064,13 @@ const duplicationRefactor = async (req, res) => {
   const send = sendFactory(res);
 
   try {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      send({ type: 'error', message: 'Duplication refactor is not available: Anthropic API key not configured.' });
+    if (!process.env.OPENAI_API_KEY) {
+      send({ type: 'error', message: 'Duplication refactor is not available: OpenAI API key not configured.' });
       return res.end();
     }
 
     const { system, user } = buildDuplicationRefactorPrompt(cluster);
-    const { aborted } = await streamClaude({
+    const { aborted } = await streamLLM({
       system,
       user,
       send,
@@ -2071,8 +2052,8 @@ const generatePrFindingProposal = async (req, res) => {
   const send = sendFactory(res);
 
   try {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      send({ type: 'error', message: 'Proposal generation requires the Anthropic API key.' });
+    if (!process.env.OPENAI_API_KEY) {
+      send({ type: 'error', message: 'Proposal generation requires the OpenAI API key.' });
       return res.end();
     }
 
@@ -2122,28 +2103,27 @@ const generatePrFindingProposal = async (req, res) => {
     let outputTokens = 0;
     let summaryEmitted = '';
     let aborted = false;
+    let acc = '';
     try {
-      const stream = await anthropic.messages.create({
-        model: MODEL,
-        max_tokens: PROPOSAL_MAX_TOKENS,
+      const result = await streamChatText({
         system,
-        messages: [{ role: 'user', content: user }],
-        stream: true,
-      }, { signal });
-
-      for await (const event of stream) {
-        if (event.type === 'message_start') inputTokens = event.message?.usage?.input_tokens || 0;
-        else if (event.type === 'message_delta') outputTokens = event.usage?.output_tokens || outputTokens;
-        else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
-          text += event.delta.text;
-          const currentSummary = extractStreamingSummary(text);
+        user,
+        model: MODEL,
+        maxTokens: PROPOSAL_MAX_TOKENS,
+        signal,
+        onDelta: (frag) => {
+          acc += frag;
+          const currentSummary = extractStreamingSummary(acc);
           if (currentSummary && currentSummary.length > summaryEmitted.length) {
             const delta = currentSummary.slice(summaryEmitted.length);
             summaryEmitted = currentSummary;
             send({ type: 'summary_delta', delta });
           }
-        }
-      }
+        },
+      });
+      text = result.text;
+      inputTokens = result.promptTokens;
+      outputTokens = result.completionTokens;
     } catch (streamErr) {
       if (isAbortError(streamErr, signal)) aborted = true;
       else throw streamErr;
@@ -2154,7 +2134,7 @@ const generatePrFindingProposal = async (req, res) => {
     await recordUsage({
       userId: req.user.id,
       endpoint: 'pr_finding_proposal_generation',
-      provider: 'anthropic',
+      provider: 'openai',
       promptTokens: inputTokens,
       completionTokens: outputTokens,
     });
@@ -2725,8 +2705,8 @@ const generateProposal = async (req, res) => {
   const send = sendFactory(res);
 
   try {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      send({ type: 'error', message: 'Proposal generation requires the Anthropic API key.' });
+    if (!process.env.OPENAI_API_KEY) {
+      send({ type: 'error', message: 'Proposal generation requires the OpenAI API key.' });
       return res.end();
     }
 
@@ -2746,7 +2726,7 @@ const generateProposal = async (req, res) => {
     }
 
     // Fast path: for vulnerable_dependency issues we can produce a deterministic
-    // proposal using dependencyFixer without spending Claude tokens.
+    // proposal using dependencyFixer without spending LLM tokens.
     if (issue.type === 'vulnerable_dependency') {
       const parsed = await tryBuildVulnFixProposal(issue, repoId);
       if (parsed) {
@@ -2770,7 +2750,7 @@ const generateProposal = async (req, res) => {
         }
         return res.end();
       }
-      // Fall through to Claude if the fixer couldn't handle it
+      // Fall through to the LLM if the fixer couldn't handle it
     }
 
     const { system, user } = await buildContextForIssue(issue, repoId);
@@ -2781,35 +2761,32 @@ const generateProposal = async (req, res) => {
     let outputTokens = 0;
     let summaryEmitted = '';
     let aborted = false;
+    let acc = '';
 
     try {
-      const stream = await anthropic.messages.create({
-        model: MODEL,
-        max_tokens: PROPOSAL_MAX_TOKENS,
+      const result = await streamChatText({
         system,
-        messages: [{ role: 'user', content: user }],
-        stream: true,
-      }, { signal });
-
-      for await (const event of stream) {
-        if (event.type === 'message_start') {
-          inputTokens = event.message?.usage?.input_tokens || 0;
-        } else if (event.type === 'message_delta') {
-          outputTokens = event.usage?.output_tokens || outputTokens;
-        } else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
-          text += event.delta.text;
-          const currentSummary = extractStreamingSummary(text);
+        user,
+        model: MODEL,
+        maxTokens: PROPOSAL_MAX_TOKENS,
+        signal,
+        onDelta: (frag) => {
+          acc += frag;
+          const currentSummary = extractStreamingSummary(acc);
           if (currentSummary && currentSummary.length > summaryEmitted.length) {
             const delta = currentSummary.slice(summaryEmitted.length);
             summaryEmitted = currentSummary;
             send({ type: 'summary_delta', delta });
           }
-        }
-      }
+        },
+      });
+      text = result.text;
+      inputTokens = result.promptTokens;
+      outputTokens = result.completionTokens;
     } catch (streamErr) {
       if (isAbortError(streamErr, signal)) {
         aborted = true;
-        console.warn(`[proposals] Claude stream aborted by client disconnect (issue=${issueId}, partial_output_tokens=${outputTokens})`);
+        console.warn(`[proposals] LLM stream aborted by client disconnect (issue=${issueId})`);
       } else {
         throw streamErr;
       }
@@ -2820,7 +2797,7 @@ const generateProposal = async (req, res) => {
     await recordUsage({
       userId: req.user.id,
       endpoint: 'proposal_generation',
-      provider: 'anthropic',
+      provider: 'openai',
       promptTokens: inputTokens,
       completionTokens: outputTokens,
     });
@@ -2882,7 +2859,7 @@ const generateProposal = async (req, res) => {
 
 /**
  * Attempt to build a proposal for a vulnerable_dependency issue using
- * dependencyFixer (no Claude). Returns a proposal_json object or null.
+ * dependencyFixer (no LLM). Returns a proposal_json object or null.
  */
 async function tryBuildVulnFixProposal(issue, repoId) {
   const desc = issue.description || '';
@@ -3652,6 +3629,6 @@ module.exports = {
     choosePrReviewEvent,
     buildContextForIssue,
     fetchAnalysisIssue,
-    streamClaude,
+    streamLLM,
   },
 };

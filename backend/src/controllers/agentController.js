@@ -1,38 +1,28 @@
 /**
  * Agent controller (US-069).
  *
- * Drives the Anthropic tool-use loop, persists every turn to agent_messages,
+ * Drives the OpenAI tool-use loop, persists every turn to agent_messages,
  * and streams events to the client over SSE. The conversation history rail
  * (US-071) is also served from here.
  *
  * Persistence-as-you-go is the load-bearing correctness property: every
  * assistant text block, every tool_use, and every tool_result is INSERTed
- * before the next anthropic.messages.create call. A crashed or aborted stream
+ * before the next chat.completions.create call. A crashed or aborted stream
  * leaves the conversation resumable from the last persisted turn.
  */
 
-const Anthropic = require('@anthropic-ai/sdk');
 const { supabaseAdmin } = require('../db/supabase');
 const { canAccessRepo } = require('../lib/repoAccess');
 const { bindRequestAbort, isAbortError } = require('../lib/sseAbort');
 const { withSupabaseRetry } = require('../lib/dbHelpers');
 const { recordUsage } = require('../services/usageTracker');
 const { tools, toolHandlers, isReadOnlyTool } = require('../services/agentTools');
+const { openai, CHAT_MODEL, TITLE_MODEL } = require('../ai/openaiClient');
 
-const MODEL = 'claude-sonnet-4-20250514';
-const TITLE_MODEL = 'claude-haiku-4-5-20251001';
+const MODEL = CHAT_MODEL;
 const MAX_ITERATIONS = parseInt(process.env.AGENT_MAX_ITERATIONS || '15', 10);
 const TOKEN_CAP = parseInt(process.env.AGENT_TOKEN_CAP || '50000', 10);
 const MAX_OUTPUT_TOKENS = 4096;
-
-const _anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || 'sk-ant-dummy' });
-const anthropic = new Proxy(_anthropic, {
-  get(_t, p) {
-    const a = globalThis.__CODELENS_ANTHROPIC__ || _anthropic;
-    const v = a[p];
-    return typeof v === 'function' ? v.bind(a) : v;
-  },
-});
 
 function buildSystemPrompt(repoFullName) {
   return [
@@ -66,32 +56,49 @@ function sendFactory(res) {
 // ─── message rehydration ──────────────────────────────────────────────────
 
 /**
- * Group persisted agent_messages rows into Anthropic's message format.
- * Consecutive 'assistant' + 'tool_use' rows fold into one assistant message;
- * consecutive 'tool_result' rows fold into one user message.
+ * Group persisted agent_messages rows into OpenAI's chat message format.
+ * Consecutive 'assistant' + 'tool_use' rows fold into one assistant message
+ * carrying `tool_calls`; each 'tool_result' row becomes its own `role: 'tool'`
+ * message (OpenAI requires one tool message per tool_call_id, immediately
+ * following the assistant message that requested them).
  */
 function rehydrateMessages(rows) {
   const out = [];
-  let pending = null; // { role: 'assistant' | 'user', content: [...] }
-  const flush = () => { if (pending) { out.push(pending); pending = null; } };
+  let pendingAssistant = null; // { role:'assistant', content, tool_calls? }
+  const flush = () => {
+    if (!pendingAssistant) return;
+    if (pendingAssistant.tool_calls && pendingAssistant.tool_calls.length > 0) {
+      // OpenAI accepts null content alongside tool_calls.
+      if (!pendingAssistant.content) pendingAssistant.content = null;
+    } else {
+      delete pendingAssistant.tool_calls;
+      if (pendingAssistant.content == null) pendingAssistant.content = '';
+    }
+    out.push(pendingAssistant);
+    pendingAssistant = null;
+  };
   for (const row of rows) {
     const c = row.content_json || {};
     if (row.role === 'user') {
       flush();
-      out.push({ role: 'user', content: [{ type: 'text', text: c.text || '' }] });
+      out.push({ role: 'user', content: c.text || '' });
     } else if (row.role === 'assistant') {
-      if (!pending || pending.role !== 'assistant') { flush(); pending = { role: 'assistant', content: [] }; }
-      if (c.text) pending.content.push({ type: 'text', text: c.text });
+      if (!pendingAssistant) pendingAssistant = { role: 'assistant', content: '' };
+      if (c.text) pendingAssistant.content = (pendingAssistant.content || '') + c.text;
     } else if (row.role === 'tool_use') {
-      if (!pending || pending.role !== 'assistant') { flush(); pending = { role: 'assistant', content: [] }; }
-      pending.content.push({ type: 'tool_use', id: c.tool_use_id, name: c.tool_name, input: c.input || {} });
+      if (!pendingAssistant) pendingAssistant = { role: 'assistant', content: '' };
+      if (!pendingAssistant.tool_calls) pendingAssistant.tool_calls = [];
+      pendingAssistant.tool_calls.push({
+        id: c.tool_use_id,
+        type: 'function',
+        function: { name: c.tool_name, arguments: JSON.stringify(c.input || {}) },
+      });
     } else if (row.role === 'tool_result') {
-      if (!pending || pending.role !== 'user') { flush(); pending = { role: 'user', content: [] }; }
-      pending.content.push({
-        type: 'tool_result',
-        tool_use_id: c.tool_use_id,
+      flush(); // tool messages must follow the assistant message that called them
+      out.push({
+        role: 'tool',
+        tool_call_id: c.tool_use_id,
         content: JSON.stringify(c.output),
-        is_error: Boolean(c.is_error),
       });
     }
   }
@@ -139,7 +146,7 @@ async function readTotalTokens(conversationId) {
 
 async function generateTitleAsync(conversationId, firstMessage) {
   try {
-    const res = await anthropic.messages.create({
+    const res = await openai.chat.completions.create({
       model: TITLE_MODEL,
       max_tokens: 50,
       messages: [{
@@ -147,7 +154,7 @@ async function generateTitleAsync(conversationId, firstMessage) {
         content: `Summarise this question as a 4–6 word title. Reply with the title only, no quotes.\n\nQuestion: ${firstMessage}`,
       }],
     });
-    const title = (res.content?.[0]?.text || '').trim().replace(/^["']|["']$/g, '').slice(0, 80);
+    const title = (res.choices?.[0]?.message?.content || '').trim().replace(/^["']|["']$/g, '').slice(0, 80);
     if (title) {
       await supabaseAdmin
         .from('agent_conversations')
@@ -163,57 +170,55 @@ async function generateTitleAsync(conversationId, firstMessage) {
 // ─── stream parsing ───────────────────────────────────────────────────────
 
 /**
- * Consume an Anthropic stream into a structured turn result. Emits text_delta
- * and tool_use SSE events as content arrives. Returns the final turn shape:
+ * Consume an OpenAI chat-completions stream into a structured turn result.
+ * Emits text_delta SSE events as content arrives. Tool calls arrive as
+ * `delta.tool_calls[]` fragments keyed by `index` (id/name on the first
+ * fragment, `function.arguments` accumulated as a string), parsed once at the
+ * end. Token usage comes from the final chunk (requires
+ * stream_options.include_usage). Returns the turn shape:
  *   { textBlocks: [string], toolUses: [{ id, name, input }],
  *     inputTokens, outputTokens, stopReason }
  */
 async function consumeStream(stream, send) {
-  const blocks = []; // ordered: { type: 'text', text } | { type: 'tool_use', id, name, partialJson }
+  let text = '';
+  const toolCallsByIndex = new Map(); // index -> { id, name, args }
   let inputTokens = 0;
   let outputTokens = 0;
   let stopReason = null;
 
-  for await (const event of stream) {
-    if (event.type === 'message_start') {
-      inputTokens = event.message?.usage?.input_tokens || 0;
-    } else if (event.type === 'content_block_start') {
-      const cb = event.content_block || {};
-      if (cb.type === 'text') {
-        blocks[event.index] = { type: 'text', text: '' };
-      } else if (cb.type === 'tool_use') {
-        blocks[event.index] = { type: 'tool_use', id: cb.id, name: cb.name, partialJson: '' };
+  for await (const chunk of stream) {
+    const choice = chunk.choices?.[0];
+    if (choice) {
+      const delta = choice.delta || {};
+      if (delta.content) {
+        text += delta.content;
+        send({ type: 'text_delta', delta: delta.content });
       }
-    } else if (event.type === 'content_block_delta') {
-      const b = blocks[event.index];
-      if (!b) continue;
-      if (event.delta?.type === 'text_delta') {
-        b.text += event.delta.text;
-        send({ type: 'text_delta', delta: event.delta.text });
-      } else if (event.delta?.type === 'input_json_delta') {
-        b.partialJson += event.delta.partial_json || '';
+      if (Array.isArray(delta.tool_calls)) {
+        for (const tc of delta.tool_calls) {
+          const idx = tc.index ?? 0;
+          let entry = toolCallsByIndex.get(idx);
+          if (!entry) { entry = { id: '', name: '', args: '' }; toolCallsByIndex.set(idx, entry); }
+          if (tc.id) entry.id = tc.id;
+          if (tc.function?.name) entry.name = tc.function.name;
+          if (tc.function?.arguments) entry.args += tc.function.arguments;
+        }
       }
-    } else if (event.type === 'content_block_stop') {
-      // Tool_use blocks get parsed at stop.
-    } else if (event.type === 'message_delta') {
-      if (event.usage?.output_tokens) outputTokens = event.usage.output_tokens;
-      if (event.delta?.stop_reason) stopReason = event.delta.stop_reason;
+      if (choice.finish_reason) stopReason = choice.finish_reason;
+    }
+    if (chunk.usage) {
+      inputTokens = chunk.usage.prompt_tokens || inputTokens;
+      outputTokens = chunk.usage.completion_tokens || outputTokens;
     }
   }
 
-  const textBlocks = [];
   const toolUses = [];
-  for (const b of blocks) {
-    if (!b) continue;
-    if (b.type === 'text') {
-      textBlocks.push(b.text);
-    } else if (b.type === 'tool_use') {
-      let input = {};
-      try { input = b.partialJson ? JSON.parse(b.partialJson) : {}; } catch { /* malformed input */ }
-      toolUses.push({ id: b.id, name: b.name, input });
-    }
+  for (const [, entry] of [...toolCallsByIndex.entries()].sort((a, b) => a[0] - b[0])) {
+    let input = {};
+    try { input = entry.args ? JSON.parse(entry.args) : {}; } catch { /* malformed input */ }
+    toolUses.push({ id: entry.id, name: entry.name, input });
   }
-  return { textBlocks, toolUses, inputTokens, outputTokens, stopReason };
+  return { textBlocks: text ? [text] : [], toolUses, inputTokens, outputTokens, stopReason };
 }
 
 // ─── route handlers ───────────────────────────────────────────────────────
@@ -231,8 +236,8 @@ const chat = async (req, res) => {
   const allowed = await canAccessRepo(repoId, userId);
   if (!allowed) return res.status(404).json({ error: 'Repository not found or unauthorized' });
 
-  if (!process.env.ANTHROPIC_API_KEY) {
-    return res.status(503).json({ error: 'Agent unavailable: Anthropic API key not configured' });
+  if (!process.env.OPENAI_API_KEY) {
+    return res.status(503).json({ error: 'Agent unavailable: OpenAI API key not configured' });
   }
 
   // Fetch repo full_name for the system prompt.
@@ -278,16 +283,18 @@ const chat = async (req, res) => {
 
     await insertMessage(conversationId, 'user', { text: message.trim() });
 
-    // Load prior messages (excluding the one we just inserted is fine — we'll
-    // refetch them all to rebuild Anthropic's messages array in order).
+    // Load prior messages (including the one we just inserted) and rebuild the
+    // OpenAI messages array in order. The system prompt is the first message.
     const { data: rows } = await supabaseAdmin
       .from('agent_messages')
       .select('role, content_json, created_at')
       .eq('conversation_id', conversationId)
       .order('created_at', { ascending: true });
 
-    const messages = rehydrateMessages(rows || []);
-    const system = buildSystemPrompt(repo?.full_name);
+    const messages = [
+      { role: 'system', content: buildSystemPrompt(repo?.full_name) },
+      ...rehydrateMessages(rows || []),
+    ];
 
     let totalInput = 0;
     let totalOutput = 0;
@@ -300,7 +307,7 @@ const chat = async (req, res) => {
           await recordUsage({
             userId,
             endpoint: 'agent_chat',
-            provider: 'anthropic',
+            provider: 'openai',
             promptTokens: totalInput,
             completionTokens: totalOutput,
           });
@@ -311,19 +318,19 @@ const chat = async (req, res) => {
 
       let turn;
       try {
-        const stream = await anthropic.messages.create({
+        const stream = await openai.chat.completions.create({
           model: MODEL,
           max_tokens: MAX_OUTPUT_TOKENS,
-          system,
           messages,
           tools,
-          tool_choice: { type: 'auto' },
+          tool_choice: 'auto',
           stream: true,
+          stream_options: { include_usage: true },
         }, { signal });
         turn = await consumeStream(stream, send);
       } catch (err) {
         if (isAbortError(err, signal)) return res.end();
-        console.error('[agent] anthropic stream error:', err);
+        console.error('[agent] OpenAI stream error:', err);
         send({ type: 'error', message: 'Model call failed' });
         return res.end();
       }
@@ -345,25 +352,30 @@ const chat = async (req, res) => {
         send({ type: 'tool_use', tool_use_id: tu.id, tool_name: tu.name, input: tu.input });
       }
 
-      // Add the assistant message to the running Anthropic context.
-      const assistantContent = [];
-      if (assistantText) assistantContent.push({ type: 'text', text: assistantText });
-      for (const tu of turn.toolUses) {
-        assistantContent.push({ type: 'tool_use', id: tu.id, name: tu.name, input: tu.input });
+      // Add the assistant message to the running OpenAI context.
+      if (assistantText || turn.toolUses.length > 0) {
+        const assistantMsg = { role: 'assistant', content: assistantText || null };
+        if (turn.toolUses.length > 0) {
+          assistantMsg.tool_calls = turn.toolUses.map((tu) => ({
+            id: tu.id,
+            type: 'function',
+            function: { name: tu.name, arguments: JSON.stringify(tu.input) },
+          }));
+        }
+        messages.push(assistantMsg);
       }
-      if (assistantContent.length > 0) messages.push({ role: 'assistant', content: assistantContent });
 
       // Fire-and-forget title generation after the first assistant response.
       if (isFirstTurn && iter === 0) {
         generateTitleAsync(conversationId, message.trim());
       }
 
-      if (turn.stopReason !== 'tool_use' || turn.toolUses.length === 0) {
+      if (turn.toolUses.length === 0) {
         const newTotal = await bumpConversationTokens(conversationId, totalInput, totalOutput);
         await recordUsage({
           userId,
           endpoint: 'agent_chat',
-          provider: 'anthropic',
+          provider: 'openai',
           promptTokens: totalInput,
           completionTokens: totalOutput,
         });
@@ -392,12 +404,11 @@ const chat = async (req, res) => {
       const readResults = await Promise.all(readOnlyCalls.map(runTool));
       const writeResults = [];
       for (const tu of writeCalls) writeResults.push(await runTool(tu));
-      // Re-order results to match the original tool_use order so the
-      // tool_result blocks Anthropic sees line up.
+      // Re-order results to match the original tool_call order so each tool
+      // message lines up with its tool_call_id in the assistant message.
       const byId = new Map([...readResults, ...writeResults].map((r) => [r.id, r]));
       const orderedResults = turn.toolUses.map((tu) => byId.get(tu.id));
 
-      const userContent = [];
       for (const r of orderedResults) {
         const isError = Boolean(r.output?.is_error);
         await insertMessage(conversationId, 'tool_result', {
@@ -406,14 +417,13 @@ const chat = async (req, res) => {
           is_error: isError,
         });
         send({ type: 'tool_result', tool_use_id: r.id, output: r.output, is_error: isError });
-        userContent.push({
-          type: 'tool_result',
-          tool_use_id: r.id,
+        // OpenAI: one `role: 'tool'` message per tool_call_id.
+        messages.push({
+          role: 'tool',
+          tool_call_id: r.id,
           content: JSON.stringify(r.output),
-          is_error: isError,
         });
       }
-      messages.push({ role: 'user', content: userContent });
     }
 
     // Exhausted max iterations.
@@ -421,7 +431,7 @@ const chat = async (req, res) => {
     await recordUsage({
       userId,
       endpoint: 'agent_chat',
-      provider: 'anthropic',
+      provider: 'openai',
       promptTokens: totalInput,
       completionTokens: totalOutput,
     });
@@ -599,5 +609,5 @@ module.exports = {
   updateConversation,
   deleteConversation,
   getSuggestions,
-  _private: { rehydrateMessages, buildSystemPrompt },
+  _private: { rehydrateMessages, buildSystemPrompt, consumeStream },
 };
