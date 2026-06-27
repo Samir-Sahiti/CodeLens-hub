@@ -1,26 +1,100 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# Services:
+#   1. codelens-api       — Express backend (always-on web service, free plan)
+#   2. codelens-frontend  — Vite static site (always free)
+#   3. codelens-daily-snapshot — nightly metrics cron (PAID: Render crons are
+#                                not on the free tier; delete this block if you
+#                                want a $0 deploy. The job is only a pg_cron
+#                                fallback (US-081) and is safe to omit.)
+#
+# Vars marked `sync: false` are NOT set by this file — you enter them in the
+# Render dashboard. URL-dependent vars (FRONTEND_URL, GITHUB_CALLBACK_URL,
+# VITE_API_URL, PUBLIC_API_URL) are only known after the first deploy assigns
+# each service its *.onrender.com hostname — see the setup steps in chat.
+
 services:
+  # ── Backend API ──────────────────────────────────────────────────────────
   - type: web
     name: codelens-api
-    env: node
+    runtime: node
+    plan: free
+    region: oregon
+    rootDir: backend
     buildCommand: npm install
     startCommand: npm start
+    healthCheckPath: /health
     envVars:
+      - key: NODE_ENV
+        value: production
+      # Supabase
       - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
-      - key: INTERNAL_SNAPSHOT_SECRET
+      # GitHub OAuth — GITHUB_CALLBACK_URL must be:
+      #   https://codelens-api.onrender.com/api/auth/github/callback
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: GITHUB_CALLBACK_URL
+        sync: false
+      # OpenAI (embeddings + all chat/reasoning)
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_CHAT_MODEL
+        value: gpt-4.1
+      - key: OPENAI_TITLE_MODEL
+        value: gpt-4o-mini
+      # CI token HMAC secret — also used as the snapshot cron's server-secret.
+      # Render can generate a strong random value for this:
+      - key: CI_TOKEN_HMAC_SECRET
+        generateValue: true
+      # URL wiring — set after first deploy (the frontend's onrender.com URL)
+      - key: FRONTEND_URL
+        sync: false
+      # Budgets / limits (defaults are fine; override here if needed)
+      - key: MAX_DAILY_TOKENS_PER_USER
+        value: "500000"
+
+  # ── Frontend static site (always free) ───────────────────────────────────
+  - type: web
+    name: codelens-frontend
+    runtime: static
+    region: oregon
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+    # SPA fallback so React Router deep links resolve to index.html
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false
+      # Full https URL of the backend, e.g. https://codelens-api.onrender.com
+      - key: VITE_API_URL
         sync: false
 
+  # ── Nightly metrics snapshot (PAID — delete for a fully free deploy) ──────
   - type: cron
     name: codelens-daily-snapshot
-    schedule: "0 3 * * *"
+    runtime: node
     region: oregon
-    command: node scripts/snapshot-daily.js
+    schedule: "0 3 * * *"
+    buildCommand: npm install
+    startCommand: node scripts/snapshot-daily.js
     envVars:
-      - key: SUPABASE_URL
+      # Full https URL of the backend, e.g. https://codelens-api.onrender.com
+      - key: PUBLIC_API_URL
         sync: false
-      - key: SUPABASE_SERVICE_ROLE_KEY
-        sync: false
-      - key: INTERNAL_SNAPSHOT_SECRET
+      # MUST match codelens-api's CI_TOKEN_HMAC_SECRET (the snapshot endpoint
+      # checks it as the `server-secret` header — internal.js).
+      - key: CI_TOKEN_HMAC_SECRET
         sync: false
