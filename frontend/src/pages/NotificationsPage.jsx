@@ -16,7 +16,9 @@ export default function NotificationsPage() {
   const [items, setItems] = useState([]);
   const [cursor, setCursor] = useState(null);
   const [hasMore, setHasMore] = useState(false);
-  const [loading, setLoading] = useState(false);
+  // Start true so the first load shows a loading state instead of briefly
+  // flashing the "no notifications" empty state before the fetch resolves.
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
   const loadPage = useCallback(async (before) => {

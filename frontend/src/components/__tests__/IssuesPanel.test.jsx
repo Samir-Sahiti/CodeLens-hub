@@ -6,6 +6,10 @@ vi.mock('../../context/AuthContext', () => ({
   useAuth: () => ({ session: { access_token: 'token-1' } }),
 }));
 
+vi.mock('../Toast', () => ({
+  useToast: () => ({ success: vi.fn(), error: vi.fn() }),
+}));
+
 import IssuesPanel from '../IssuesPanel';
 
 function makeSseResponse(events) {

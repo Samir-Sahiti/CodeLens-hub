@@ -157,7 +157,7 @@ export default function SettingsPanel({ repo, session, onRepoUpdated }) {
       const data = await res.json();
       setWebhookInfo(data);
     } catch (err) {
-      console.error(err);
+      toast.error(err.message || 'Failed to generate webhook');
     } finally {
       setIsGenerating(false);
     }

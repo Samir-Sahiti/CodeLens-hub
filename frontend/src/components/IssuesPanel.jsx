@@ -10,6 +10,7 @@ import Modal from './ui/Modal';
 import { Button, Badge, Select } from './ui/Primitives';
 import IssueCard, { getBadgeStyles } from './IssueCard';
 import ProposalPanel from './ProposalPanel';
+import { useToast } from './Toast';
 import {
   Package, Lock, ShieldAlert, GitMerge,
   FileWarning, Link2, FileX, Search,
@@ -371,13 +372,13 @@ function DuplicationDetailModal({ cluster, repoId, token, onClose }) {
 export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDependencies, onOpenFile, repoId }) {
   const { session } = useAuth();
   const accessToken = session?.access_token;
+  const toast = useToast();
 
   const [localIssues, setLocalIssues] = useState(issues || []);
   const [duplicationClusters, setDuplicationClusters] = useState([]);
   const [selectedDuplicationCluster, setSelectedDuplicationCluster] = useState(null);
   const [filterText,  setFilterText]  = useState('');
   const [sortBy, setSortBy] = useState('risk');
-  const [isFetching, setIsFetching] = useState(false);
   const [canMutateIssues, setCanMutateIssues] = useState(true);
   const [selectedProposalIssue, setSelectedProposalIssue] = useState(null);
   const [proposalsByIssue, setProposalsByIssue] = useState({});
@@ -388,11 +389,11 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
   // needs the actual DOM node, not a ref placeholder.
   const [scrollParent, setScrollParent] = useState(null);
 
-  // Sync local state if the upstream issues prop changes
+  // Sync local state if the upstream issues prop changes. Always mirror the
+  // prop (including the empty case) so a re-index that clears issues doesn't
+  // leave stale cards on screen.
   useEffect(() => {
-    if (issues && issues.length > 0) {
-      setLocalIssues(issues);
-    }
+    setLocalIssues(issues || []);
   }, [issues]);
 
 
@@ -497,15 +498,29 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
   const handleSuppress = useCallback(async (e, issue) => {
     e.stopPropagation();
     if (!canMutateIssues) return;
-    const ruleMatch = issue.description.match(/Rule ID: (.*?)\)/);
-    if (!ruleMatch) return;
-    const lineMatch = issue.description.match(/line (\d+)/);
 
-    const payload = {
-      file_path:   issue.file_paths[0],
-      rule_id:     ruleMatch[1],
-      line_number: lineMatch ? parseInt(lineMatch[1], 10) : 0,
-    };
+    let payload;
+    if (issue.type === 'missing_auth') {
+      // missing_auth is a file-level suppression with a fixed rule_id and the
+      // line_number: 0 sentinel — it has no "line N" in its description.
+      payload = {
+        file_path:   issue.file_paths[0],
+        rule_id:     'missing_auth',
+        line_number: 0,
+        type:        'missing_auth',
+      };
+    } else {
+      const ruleMatch = issue.description.match(/Rule ID: (.*?)\)/);
+      if (!ruleMatch) return;
+      const lineMatch = issue.description.match(/line (\d+)/);
+      payload = {
+        file_path:   issue.file_paths[0],
+        rule_id:     ruleMatch[1],
+        line_number: lineMatch ? parseInt(lineMatch[1], 10) : 0,
+        type:        issue.type,
+      };
+    }
+
     try {
       const res = await fetch(apiUrl(`/api/analysis/${repoId}/issues/suppress`), {
         method: 'POST',
@@ -519,8 +534,9 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
       setLocalIssues(prev => prev.filter(i => i.id !== issue.id));
     } catch (err) {
       console.error('Failed to suppress issue', err);
+      toast.error(err.message || 'Failed to suppress issue');
     }
-  }, [canMutateIssues, repoId, session]);
+  }, [canMutateIssues, repoId, session, toast]);
 
   const handleDisableSastRule = useCallback(async (e, issue) => {
     e.stopPropagation();
@@ -589,20 +605,11 @@ export default function IssuesPanel({ nodes, issues, onNodeSelect, onOpenDepende
     return (
       <>
         <div className="flex h-auto min-h-[30rem] flex-col items-center justify-center rounded-xl border border-dashed border-gray-700 bg-gray-900/30 px-6 text-center xl:h-[calc(100vh-12rem)]">
-          {isFetching ? (
-            <div className="flex flex-col items-center">
-              <div className="h-8 w-8 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent mb-3" />
-              <p className="text-sm text-gray-400">Loading issues...</p>
-            </div>
-          ) : (
-            <>
-              <div className="flex items-center justify-center w-16 h-16 rounded-full bg-green-500/10 border border-green-500/20 mb-4">
-                <CheckCircle2 className="w-8 h-8 text-green-400" />
-              </div>
-              <h3 className="text-lg font-medium text-gray-200">No issues detected</h3>
-              <p className="mt-1 text-sm text-gray-500">No architectural, security, or duplication findings need attention.</p>
-            </>
-          )}
+          <div className="flex items-center justify-center w-16 h-16 rounded-full bg-green-500/10 border border-green-500/20 mb-4">
+            <CheckCircle2 className="w-8 h-8 text-green-400" />
+          </div>
+          <h3 className="text-lg font-medium text-gray-200">No issues detected</h3>
+          <p className="mt-1 text-sm text-gray-500">No architectural, security, or duplication findings need attention.</p>
         </div>
         <DuplicationDetailModal
           cluster={selectedDuplicationCluster}

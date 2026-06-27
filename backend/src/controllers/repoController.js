@@ -163,11 +163,16 @@ const listRepos = async (req, res) => {
 /** GET /api/repos/:repoId/status — polling endpoint for indexing progress */
 const getStatus = async (req, res) => {
   const { repoId } = req.params;
+
+  // Team members (not just the owner) must be able to poll status, so gate on
+  // can_access_repo rather than a hard user_id match.
+  const allowed = await canAccessRepo(repoId, req.user.id);
+  if (!allowed) return res.status(404).json({ error: 'Repository not found' });
+
   const { data, error } = await supabaseAdmin
     .from('repositories')
-    .select('status, file_count, sast_disabled_rules')
+    .select('status, file_count, sast_disabled_rules, indexed_at')
     .eq('id', repoId)
-    .eq('user_id', req.user.id)
     .single();
 
   if (error || !data) {

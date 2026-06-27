@@ -8,6 +8,7 @@ import { LANGUAGE_COLORS } from '../lib/constants';
 import ConnectGitHubModal from '../components/ConnectGitHubModal';
 import UploadRepoModal from '../components/UploadRepoModal';
 import CreateTeamModal from '../components/CreateTeamModal';
+import Modal from '../components/ui/Modal';
 import { Badge, Banner, Button, EmptyState, Panel, SearchInput, Select, Skeleton, Toolbar } from '../components/ui/Primitives';
 import {
   ArrowRight,
@@ -134,7 +135,7 @@ const RepoCard = memo(function RepoCard({ repo, onRetry, onDelete, isRetrying, s
               size="sm"
               variant="danger"
               icon={Trash2}
-              onClick={(e) => { e.preventDefault(); e.stopPropagation(); onDelete(e, repo.id); }}
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); onDelete(e, repo.id, repo.name); }}
             >
               Delete
             </Button>
@@ -167,6 +168,8 @@ export default function Dashboard() {
   const [retryingIds, setRetryingIds] = useState(() => new Set());
   const [search, setSearch] = useState('');
   const [sortBy, setSortBy] = useState('updated');
+  const [pendingDelete, setPendingDelete] = useState(null); // { id, name } awaiting confirmation
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const fetchRepos = useCallback(async () => {
     if (!session?.access_token) return;
@@ -220,19 +223,27 @@ export default function Dashboard() {
     }
   };
 
-  const handleDelete = async (e, repoId) => {
+  const handleDelete = (e, repoId, repoName) => {
     e.preventDefault(); e.stopPropagation();
-    if (!window.confirm('Are you sure you want to delete this repository? This cannot be undone.')) return;
+    setPendingDelete({ id: repoId, name: repoName });
+  };
+
+  const confirmDelete = async () => {
+    if (!pendingDelete) return;
+    setIsDeleting(true);
     try {
-      const res = await fetch(apiUrl(`/api/repos/${repoId}`), {
+      const res = await fetch(apiUrl(`/api/repos/${pendingDelete.id}`), {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (!res.ok) throw new Error('Failed to delete repository');
       await fetchRepos();
       toast.success('Repository deleted');
+      setPendingDelete(null);
     } catch (err) {
       toast.error(err.message);
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -383,6 +394,27 @@ export default function Dashboard() {
           toast.success(`Team "${team.name}" created with ${count} collaborator${count !== 1 ? 's' : ''} added.`);
         }}
       />
+      <Modal
+        isOpen={!!pendingDelete}
+        onClose={() => { if (!isDeleting) setPendingDelete(null); }}
+        title="Delete repository"
+      >
+        <div className="px-5 py-4">
+          <p className="text-sm text-surface-300">
+            Are you sure you want to delete{' '}
+            <span className="font-semibold text-surface-100">{pendingDelete?.name || 'this repository'}</span>?
+            This permanently removes its index, analysis, and history and cannot be undone.
+          </p>
+          <div className="mt-6 flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setPendingDelete(null)} disabled={isDeleting}>
+              Cancel
+            </Button>
+            <Button variant="danger" icon={Trash2} loading={isDeleting} onClick={confirmDelete}>
+              Delete repository
+            </Button>
+          </div>
+        </div>
+      </Modal>
       </div>
     </div>
   );
