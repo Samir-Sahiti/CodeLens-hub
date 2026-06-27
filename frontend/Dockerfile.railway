@@ -1,0 +1,41 @@
+# Railway-specific frontend image.
+# Differs from ./Dockerfile (docker-compose) in two ways that matter on Railway:
+#   1. nginx listens on Railway's injected $PORT (not hardcoded :80)
+#   2. runs nginx as root so the master can bind the port, and uses the stock
+#      entrypoint (which envsubst-renders the *.template config at startup)
+#   3. no /api/ proxy — the SPA calls the backend via absolute VITE_API_URL
+
+# ── Stage 1: Vite build ───────────────────────────────────────────────────────
+FROM node:20-slim AS builder
+
+# Vite bakes these into the bundle at build time. Railway passes matching
+# service variables as Docker build args for each declared ARG.
+ARG VITE_SUPABASE_URL
+ARG VITE_SUPABASE_ANON_KEY
+ARG VITE_API_URL
+
+ENV VITE_SUPABASE_URL=$VITE_SUPABASE_URL
+ENV VITE_SUPABASE_ANON_KEY=$VITE_SUPABASE_ANON_KEY
+ENV VITE_API_URL=$VITE_API_URL
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm install
+
+COPY . .
+RUN npm run build
+
+# ── Stage 2: Nginx serve ──────────────────────────────────────────────────────
+FROM nginx:alpine AS runtime
+
+# Fallback if Railway doesn't inject PORT (it normally does).
+ENV PORT=80
+
+COPY --from=builder /app/dist /usr/share/nginx/html
+# Goes in templates/ so the official entrypoint runs envsubst → conf.d at boot.
+COPY nginx.railway.conf.template /etc/nginx/templates/default.conf.template
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]

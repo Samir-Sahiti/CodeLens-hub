@@ -1,0 +1,28 @@
+# Railway nginx config TEMPLATE.
+# The official nginx image's entrypoint runs envsubst on files in
+# /etc/nginx/templates/*.template at container start, substituting only
+# variables that exist in the environment (so ${PORT} is replaced but
+# nginx runtime vars like $uri are preserved).
+#
+# Unlike nginx.conf (docker-compose), there is NO /api/ proxy block: on
+# Railway the SPA calls the backend by absolute URL via VITE_API_URL, so
+# nginx only serves static files + the SPA fallback.
+server {
+    listen ${PORT};
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Long-term caching for hashed static assets
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    # SPA fallback — all other routes served by index.html
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
