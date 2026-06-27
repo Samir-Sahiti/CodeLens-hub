@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const repoController = require('../controllers/repoController');
+const reviewController = require('../controllers/reviewController');
 const { requireAuth } = require('../middleware/auth');
 const multer = require('multer');
 const os = require('os');
@@ -63,7 +64,6 @@ router.get('/:repoId/trends', requireAuth, repoController.getTrends);
 router.post('/:repoId/dependencies/batch-proposal', requireAuth, reviewController.batchDependencyProposal);
 
 // PR review run (deterministic-only pipeline) — US-073
-const reviewController = require('../controllers/reviewController');
 router.get('/:repoId/pulls', requireAuth, reviewController.listPullRequests);
 router.get('/:repoId/pulls/:number/reviews', requireAuth, reviewController.listPullRequestReviews);
 router.post('/:repoId/pulls/:number/reviews', requireAuth, reviewController.runPrReview);
