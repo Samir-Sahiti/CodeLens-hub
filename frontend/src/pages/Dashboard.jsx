@@ -107,16 +107,22 @@ const RepoCard = memo(function RepoCard({ repo, onRetry, onDelete, isRetrying, s
           </div>
 
           <LanguageMiniBar languages={repo.languages} />
+
+          <p
+            className="inline-flex min-w-0 max-w-full items-center gap-1.5 truncate text-xs text-surface-500"
+            title={repo.indexed_at
+              ? `Indexed ${new Date(repo.indexed_at).toLocaleString()}`
+              : `Added ${new Date(repo.created_at).toLocaleString()}`}
+          >
+            <Clock className="h-3.5 w-3.5 shrink-0" />
+            {repo.indexed_at
+              ? `Indexed ${timeAgo(repo.indexed_at)}`
+              : `Added ${timeAgo(repo.created_at)}`}
+          </p>
         </div>
       </Link>
 
-      <div className="flex items-center justify-between gap-3 border-t border-surface-800 bg-surface-950/35 px-5 py-3.5">
-        <span className="inline-flex min-w-0 items-center gap-1.5 truncate text-xs text-surface-500">
-          <Clock className="h-3.5 w-3.5 shrink-0" />
-          {repo.indexed_at
-            ? `Indexed ${timeAgo(repo.indexed_at)}`
-            : `Added ${timeAgo(repo.created_at)}`}
-        </span>
+      <div className="flex items-center justify-end gap-3 border-t border-surface-800 bg-surface-950/35 px-5 py-3.5">
         <Toolbar className="shrink-0 gap-1.5">
           {!repo.shared && (
             <Button
