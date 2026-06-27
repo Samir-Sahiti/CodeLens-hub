@@ -315,7 +315,7 @@ export default function DependenciesPanel({ repoId, refreshKey = 0 }) {
       </div>
 
       <div className="shrink-0 rounded-xl border border-gray-800 bg-gray-900/40 px-4 py-3 text-sm text-gray-400">
-        Dependencies is the full package inventory for this repository. Vulnerable packages are also listed in `Issues` so risk triage stays in one place.
+        Dependencies is the full package inventory for this repository. Vulnerable packages are also listed in <span className="font-medium text-gray-300">Issues</span> so risk triage stays in one place.
       </div>
 
       {(highlightedPackage || highlightedFromIssue) && (

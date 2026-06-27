@@ -151,7 +151,9 @@ export default function PullRequestsPanel({ repoId, repo, active, onRepoUpdated 
   const [listError, setListError] = useState(null);
   const [detail, setDetail] = useState(null);
   const [history, setHistory] = useState([]);
-  const [detailLoading, setDetailLoading] = useState(false);
+  // When a review id is present in the URL the detail fetch fires on mount, so
+  // start in the loading state to avoid flashing undefined PR data first.
+  const [detailLoading, setDetailLoading] = useState(Boolean(reviewId));
   const [isEnabling, setIsEnabling] = useState(false);
   const [isRerunning, setIsRerunning] = useState(false);
   const [runStatus, setRunStatus] = useState('');
@@ -317,6 +319,7 @@ export default function PullRequestsPanel({ repoId, repo, active, onRepoUpdated 
         file_path: finding.file_path || finding.file_paths?.[0],
         rule_id: finding.rule_id || finding._meta?.rule_id,
         line_number: finding.line_number || finding._meta?.line_number || 0,
+        type: finding.type,
       };
       const res = await fetch(apiUrl(`/api/analysis/${repoId}/issues/suppress`), {
         method: 'POST',

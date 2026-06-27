@@ -667,7 +667,7 @@ export default function RepoView() {
             <div className="flex min-w-0 flex-wrap items-center gap-3">
               <h1 className="min-w-0 truncate text-xl font-bold tracking-tight text-white">{repo.name}</h1>
               <Badge tone={repo.status === 'ready' ? 'success' : repo.status === 'failed' ? 'danger' : isWorking ? 'accent' : 'subtle'}>
-                {repo.status === 'pending' ? 'Indexing' : repo.status.charAt(0).toUpperCase() + repo.status.slice(1)}
+                {repo.status === 'pending' ? 'Indexing' : (repo.status?.charAt(0).toUpperCase() ?? '') + (repo.status?.slice(1) ?? '')}
               </Badge>
             </div>
             <p className="text-xs text-gray-500 mt-1">
@@ -734,7 +734,7 @@ export default function RepoView() {
 
         {isWorking && !canShowAnalysis ? (
           <EmptyState
-            title={stageCopy}
+            title="Indexing in progress"
             description={`${stageCopy} This refreshes automatically while indexing continues.`}
             className="py-32"
             actions={(

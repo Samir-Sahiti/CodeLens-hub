@@ -166,7 +166,7 @@ describe('PullRequestsPanel', () => {
     expect(screen.getByText(/high: 0/i)).toBeInTheDocument();
     expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/api/analysis/repo-1/issues/suppress'), expect.objectContaining({
       method: 'POST',
-      body: JSON.stringify({ file_path: 'src/auth.js', rule_id: 'missing_check', line_number: 12 }),
+      body: JSON.stringify({ file_path: 'src/auth.js', rule_id: 'missing_check', line_number: 12, type: 'insecure_pattern' }),
     }));
   });
 });

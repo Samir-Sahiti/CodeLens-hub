@@ -476,7 +476,14 @@ export default function AgentPanel({ repoId, onOpenFile, onSwitchTab }) {
 
   // ── Rehydrate a saved conversation into the UI's message shape ───────────
   const loadConversation = useCallback(async (convId) => {
-    if (!session?.access_token) return;
+    if (!session?.access_token || convId === activeConvId) return;
+    // Abort any in-flight stream and clear the previous conversation's messages
+    // up front so its content doesn't linger (or get appended to) while the
+    // selected conversation loads.
+    abortRef.current?.abort();
+    setActiveConvId(convId);
+    setBudgetStopped(false);
+    setMessages([]);
     try {
       const res = await fetch(apiUrl(`/api/agent/conversations/${convId}`), {
         headers: { Authorization: `Bearer ${session.access_token}` },
@@ -486,13 +493,11 @@ export default function AgentPanel({ repoId, onOpenFile, onSwitchTab }) {
         return;
       }
       const data = await res.json();
-      setActiveConvId(convId);
-      setBudgetStopped(false);
       setMessages(rowsToTurns(data.messages || []));
     } catch (err) {
       toast.error(err.message);
     }
-  }, [session?.access_token, toast]);
+  }, [activeConvId, session?.access_token, toast]);
 
   // ── New conversation (frontend-only until first send) ────────────────────
   const handleNewConversation = useCallback(() => {

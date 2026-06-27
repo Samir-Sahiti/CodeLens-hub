@@ -5,7 +5,6 @@ import { useAuth } from '../context/AuthContext';
 import { Button, Badge, Panel, Banner } from '../components/ui/Primitives';
 import {
   Activity,
-  ArrowRight,
   BarChart3,
   CheckCircle2,
   Code2,
@@ -173,9 +172,6 @@ export default function Login() {
           <div className="mt-8 flex flex-col gap-3 sm:flex-row">
             <Button onClick={handleGitHubLogin} loading={isLoading} icon={GitBranch} variant="primary" size="lg">
               Sign in with GitHub
-            </Button>
-            <Button as="a" icon={ArrowRight} variant="outline" size="lg" href="https://github.com/Samir-Sahiti/CodeLens-hub" target="_blank" rel="noreferrer">
-              View repository
             </Button>
           </div>
 

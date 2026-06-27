@@ -5,8 +5,9 @@ const { supabaseAdmin } = require('../db/supabase');
 // Middleware to check server secret
 const requireServerSecret = (req, res, next) => {
   const secret = req.headers['server-secret'];
-  const expected = process.env.CI_TOKEN_HMAC_SECRET || 'fallback-secret-for-dev';
-  if (!secret || secret !== expected) {
+  const expected = process.env.CI_TOKEN_HMAC_SECRET;
+  // No fallback: if the secret isn't configured the endpoint is closed, not open.
+  if (!expected || !secret || secret !== expected) {
     return res.status(401).json({ error: 'Unauthorized: Invalid server-secret header' });
   }
   next();

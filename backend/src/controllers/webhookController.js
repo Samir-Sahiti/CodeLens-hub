@@ -61,10 +61,11 @@ const handleGitHubPush = async (req, res) => {
     .update(rawBody)
     .digest('hex');
 
-  const isValid = crypto.timingSafeEqual(
-    Buffer.from(signature, 'utf8'),
-    Buffer.from(expected, 'utf8')
-  );
+  // timingSafeEqual throws if the buffers differ in length, so guard the
+  // length first — a malformed/short signature must be a clean 403, not a 500.
+  const sigBuf = Buffer.from(signature, 'utf8');
+  const expBuf = Buffer.from(expected, 'utf8');
+  const isValid = sigBuf.length === expBuf.length && crypto.timingSafeEqual(sigBuf, expBuf);
 
   if (!isValid) {
     return res.status(403).json({ error: 'Invalid webhook signature' });
