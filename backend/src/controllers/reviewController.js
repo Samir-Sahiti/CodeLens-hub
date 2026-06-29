@@ -7,6 +7,7 @@ const crypto            = require('crypto');
 const { supabaseAdmin } = require('../db/supabase');
 const { recordUsage }   = require('../services/usageTracker');
 const { openai, streamChatText, CHAT_MODEL } = require('../ai/openaiClient');
+const { retrieveChunks } = require('../ai/ragService');
 
 function getOctokit(githubToken) {
   const { Octokit } = globalThis.__CODELENS_OCTOKIT__ || require('octokit');
@@ -84,27 +85,8 @@ async function remainingDailyTokens(userId) {
   return Math.max(0, MAX_DAILY_TOKENS - await dailyTokensUsed(userId));
 }
 
-async function retrieveChunks(repoId, embedding, topK = 5) {
-  const vectorLiteral = `[${embedding.join(',')}]`;
-  const { data, error } = await supabaseAdmin.rpc('match_code_chunks', {
-    p_repo_id:   repoId,
-    p_embedding: vectorLiteral,
-    p_top_k:     topK,
-  });
-
-  if (error) {
-    console.warn('[review] match_code_chunks RPC failed, using plain fallback:', error.message);
-    const { data: fallback, error: fallbackErr } = await supabaseAdmin
-      .from('code_chunks')
-      .select('file_path, start_line, end_line, content')
-      .eq('repo_id', repoId)
-      .limit(topK);
-    if (fallbackErr) throw new Error(`Vector search failed: ${fallbackErr.message}`);
-    return (fallback || []).map(r => ({ ...r, distance: 0.5 }));
-  }
-
-  return data || [];
-}
+// retrieveChunks (RPC + degraded in-process cosine fallback) is shared from
+// ../ai/ragService so all RAG callers behave identically on RPC failure.
 
 function securityKeywordScore(text = '') {
   const lower = String(text).toLowerCase();
@@ -222,46 +204,32 @@ function parseFindingsFromText(text, fallback = {}) {
   const trimmed = String(text || '').trim();
   if (!trimmed) return findings;
 
+  const pushRows = (parsed) => {
+    const rows = Array.isArray(parsed) ? parsed : [parsed];
+    rows.forEach((row) => {
+      const finding = normalizeFinding(row, fallback);
+      if (finding) findings.push(finding);
+    });
+  };
+
+  // 1. Whole-text / fenced JSON — an array or a single (possibly pretty-printed)
+  //    object. Brace-safe because JSON.parse handles braces inside string values.
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const parseTargets = fenced ? [fenced[1].trim(), trimmed] : [trimmed];
-
   for (const target of parseTargets) {
     try {
-      const parsed = JSON.parse(target);
-      const rows = Array.isArray(parsed) ? parsed : [parsed];
-      rows.forEach((row) => {
-        const finding = normalizeFinding(row, fallback);
-        if (finding) findings.push(finding);
-      });
+      pushRows(JSON.parse(target));
       if (findings.length > 0) return findings;
     } catch {
       // Try the next parser strategy.
     }
   }
 
-  const jsonObjectMatches = trimmed.match(/\{[^{}]*(?:"severity"|"category"|"confidence")[^{}]*\}/g) || [];
-  for (const candidate of jsonObjectMatches) {
-    try {
-      const finding = normalizeFinding(JSON.parse(candidate), fallback);
-      if (finding) findings.push(finding);
-    } catch {
-      // Ignore malformed candidate objects while scanning streamed text.
-    }
-  }
-  if (findings.length > 0) return findings;
-
-  try {
-    const parsed = JSON.parse(trimmed);
-    const rows = Array.isArray(parsed) ? parsed : [parsed];
-    rows.forEach((row) => {
-      const finding = normalizeFinding(row, fallback);
-      if (finding) findings.push(finding);
-    });
-    if (findings.length > 0) return findings;
-  } catch {
-    // Fall through to line-by-line JSONL parsing.
-  }
-
+  // 2. JSONL — one compact JSON object per line, which is the format the
+  //    security-audit prompt requests. Parsed per-line so braces inside string
+  //    fields (e.g. code in suggested_fix like `if (x) { ... }`) stay safe.
+  //    MUST run before the regex scan below: that scan cannot match objects whose
+  //    string fields contain braces, and it previously dropped such findings.
   for (const line of trimmed.split(/\r?\n/)) {
     const candidate = line.trim().replace(/^```json|^```|```$/g, '').trim();
     if (!candidate.startsWith('{')) continue;
@@ -270,6 +238,20 @@ function parseFindingsFromText(text, fallback = {}) {
       if (finding) findings.push(finding);
     } catch {
       // Skip malformed JSONL rows; partial streams can split objects.
+    }
+  }
+  if (findings.length > 0) return findings;
+
+  // 3. Last resort: scan free text for brace-delimited objects (e.g. a partial
+  //    stream that never formed valid JSON). Cannot match objects whose string
+  //    fields contain braces — hence JSONL is attempted first.
+  const jsonObjectMatches = trimmed.match(/\{[^{}]*(?:"severity"|"category"|"confidence")[^{}]*\}/g) || [];
+  for (const candidate of jsonObjectMatches) {
+    try {
+      const finding = normalizeFinding(JSON.parse(candidate), fallback);
+      if (finding) findings.push(finding);
+    } catch {
+      // Ignore malformed candidate objects while scanning streamed text.
     }
   }
 

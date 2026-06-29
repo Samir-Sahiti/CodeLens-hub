@@ -18,42 +18,14 @@ const { supabaseAdmin } = require('../db/supabase');
 const { recordUsage } = require('../services/usageTracker');
 const { bindRequestAbort, isAbortError } = require('../lib/sseAbort');
 const { openai, CHAT_MODEL } = require('../ai/openaiClient');
+const { retrieveChunks } = require('../ai/ragService');
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Retrieve the top-k most similar code chunks from Supabase using pgvector.
- * Returns rows from code_chunks ordered by cosine distance ascending.
- */
-async function retrieveChunks(repoId, embedding, topK = 8) {
-  // pgvector cosine distance operator: <=>
-  // Lower = more similar. We cast the JS array to the postgres vector type.
-  const vectorLiteral = `[${embedding.join(',')}]`;
-
-  const { data, error } = await supabaseAdmin.rpc('match_code_chunks', {
-    p_repo_id:   repoId,
-    p_embedding: vectorLiteral,
-    p_top_k:     topK,
-  });
-
-  if (error) {
-    // Fallback: plain SELECT without vector ordering if the RPC doesn't exist yet.
-    // This lets developers test the panel even before the SQL function is deployed.
-    console.warn('[search] match_code_chunks RPC failed, using plain fallback:', error.message);
-    const { data: fallback, error: fallbackErr } = await supabaseAdmin
-      .from('code_chunks')
-      .select('file_path, start_line, end_line, content')
-      .eq('repo_id', repoId)
-      .limit(topK);
-
-    if (fallbackErr) throw new Error(`Vector search failed: ${fallbackErr.message}`);
-    return (fallback || []).map(r => ({ ...r, distance: 0.5 }));
-  }
-
-  return data || [];
-}
+// retrieveChunks (RPC + degraded in-process cosine fallback) is shared from
+// ../ai/ragService so all RAG callers behave identically on RPC failure.
 
 /**
  * Build the LLM system + user prompt from retrieved chunks.
