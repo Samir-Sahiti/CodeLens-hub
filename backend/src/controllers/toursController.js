@@ -10,7 +10,13 @@ const { openai, CHAT_MODEL } = require('../ai/openaiClient');
 
 const MODEL = CHAT_MODEL;
 const MAX_DAILY_TOKENS = parseInt(process.env.MAX_DAILY_TOKENS_PER_USER || '500000', 10);
-const DISTANCE_THRESHOLD = 0.4;
+// Cosine *distance* (0..2) from match_code_chunks, NOT similarity. For
+// natural-language→code retrieval with text-embedding-3-small, even a
+// perfectly relevant file lands around 0.6–0.75; the old 0.4 gate was
+// unreachable and made every tour 404. 0.75 keeps genuinely-relevant hits
+// while still rejecting nonsense queries (which return higher distances or
+// no rows at all on an indexed repo).
+const DISTANCE_THRESHOLD = 0.75;
 const MAX_STEPS = 8;
 
 async function getRepoAccess(repoId, userId) {

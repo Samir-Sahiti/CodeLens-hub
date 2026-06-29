@@ -7,13 +7,14 @@ const crypto            = require('crypto');
 const { supabaseAdmin } = require('../db/supabase');
 const { recordUsage }   = require('../services/usageTracker');
 const { openai, streamChatText, CHAT_MODEL } = require('../ai/openaiClient');
+const { retrieveChunks } = require('../ai/ragService');
 
 function getOctokit(githubToken) {
   const { Octokit } = globalThis.__CODELENS_OCTOKIT__ || require('octokit');
   return new Octokit({ auth: githubToken });
 }
 const { bindRequestAbort, isAbortError } = require('../lib/sseAbort');
-const { withSupabaseRetry } = require('../lib/dbHelpers');
+const { withSupabaseRetry, SAFE_FETCH_CEILING, warnIfCeilingHit } = require('../lib/dbHelpers');
 const { getGithubTokenForUser } = require('../lib/githubAuth');
 const { scanFileForSecrets } = require('../services/secretScanner');
 const { scanFileForInsecurePatterns } = require('../services/sastEngine');
@@ -33,6 +34,17 @@ const WHOLE_REPO_AUDIT_LIMIT = 20;
 const AUDIT_OUTPUT_TOKEN_ESTIMATE = 900;
 const AUDIT_CONTEXT_TOKEN_ESTIMATE = 1800;
 const EMBEDDING_TOKEN_ESTIMATE = 512;
+
+// Whole-repo audit target scoring. Structural centrality (incoming + complexity)
+// alone misses small but security-critical files (a 5-line route with a hardcoded
+// secret). These large tier offsets ensure security-relevant files reliably enter
+// the audited top-N regardless of how large complexity scores get on big files,
+// while structural score still orders files within each tier.
+const SECURITY_ISSUE_TYPES = new Set(['hardcoded_secret', 'insecure_pattern', 'missing_auth', 'vulnerable_dependency']);
+const ATTACK_SURFACE_CLASSIFICATIONS = new Set(['source', 'sink', 'both']);
+const AUDIT_SECURITY_ISSUE_OFFSET = 1000;
+const AUDIT_ATTACK_SURFACE_OFFSET = 500;
+const SEVERITY_WEIGHT = { critical: 25, high: 20, medium: 10, low: 5 };
 
 async function canAccessRepo(repoId, userId) {
   const { data: owned } = await supabaseAdmin
@@ -84,27 +96,8 @@ async function remainingDailyTokens(userId) {
   return Math.max(0, MAX_DAILY_TOKENS - await dailyTokensUsed(userId));
 }
 
-async function retrieveChunks(repoId, embedding, topK = 5) {
-  const vectorLiteral = `[${embedding.join(',')}]`;
-  const { data, error } = await supabaseAdmin.rpc('match_code_chunks', {
-    p_repo_id:   repoId,
-    p_embedding: vectorLiteral,
-    p_top_k:     topK,
-  });
-
-  if (error) {
-    console.warn('[review] match_code_chunks RPC failed, using plain fallback:', error.message);
-    const { data: fallback, error: fallbackErr } = await supabaseAdmin
-      .from('code_chunks')
-      .select('file_path, start_line, end_line, content')
-      .eq('repo_id', repoId)
-      .limit(topK);
-    if (fallbackErr) throw new Error(`Vector search failed: ${fallbackErr.message}`);
-    return (fallback || []).map(r => ({ ...r, distance: 0.5 }));
-  }
-
-  return data || [];
-}
+// retrieveChunks (RPC + degraded in-process cosine fallback) is shared from
+// ../ai/ragService so all RAG callers behave identically on RPC failure.
 
 function securityKeywordScore(text = '') {
   const lower = String(text).toLowerCase();
@@ -222,46 +215,32 @@ function parseFindingsFromText(text, fallback = {}) {
   const trimmed = String(text || '').trim();
   if (!trimmed) return findings;
 
+  const pushRows = (parsed) => {
+    const rows = Array.isArray(parsed) ? parsed : [parsed];
+    rows.forEach((row) => {
+      const finding = normalizeFinding(row, fallback);
+      if (finding) findings.push(finding);
+    });
+  };
+
+  // 1. Whole-text / fenced JSON — an array or a single (possibly pretty-printed)
+  //    object. Brace-safe because JSON.parse handles braces inside string values.
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const parseTargets = fenced ? [fenced[1].trim(), trimmed] : [trimmed];
-
   for (const target of parseTargets) {
     try {
-      const parsed = JSON.parse(target);
-      const rows = Array.isArray(parsed) ? parsed : [parsed];
-      rows.forEach((row) => {
-        const finding = normalizeFinding(row, fallback);
-        if (finding) findings.push(finding);
-      });
+      pushRows(JSON.parse(target));
       if (findings.length > 0) return findings;
     } catch {
       // Try the next parser strategy.
     }
   }
 
-  const jsonObjectMatches = trimmed.match(/\{[^{}]*(?:"severity"|"category"|"confidence")[^{}]*\}/g) || [];
-  for (const candidate of jsonObjectMatches) {
-    try {
-      const finding = normalizeFinding(JSON.parse(candidate), fallback);
-      if (finding) findings.push(finding);
-    } catch {
-      // Ignore malformed candidate objects while scanning streamed text.
-    }
-  }
-  if (findings.length > 0) return findings;
-
-  try {
-    const parsed = JSON.parse(trimmed);
-    const rows = Array.isArray(parsed) ? parsed : [parsed];
-    rows.forEach((row) => {
-      const finding = normalizeFinding(row, fallback);
-      if (finding) findings.push(finding);
-    });
-    if (findings.length > 0) return findings;
-  } catch {
-    // Fall through to line-by-line JSONL parsing.
-  }
-
+  // 2. JSONL — one compact JSON object per line, which is the format the
+  //    security-audit prompt requests. Parsed per-line so braces inside string
+  //    fields (e.g. code in suggested_fix like `if (x) { ... }`) stay safe.
+  //    MUST run before the regex scan below: that scan cannot match objects whose
+  //    string fields contain braces, and it previously dropped such findings.
   for (const line of trimmed.split(/\r?\n/)) {
     const candidate = line.trim().replace(/^```json|^```|```$/g, '').trim();
     if (!candidate.startsWith('{')) continue;
@@ -272,8 +251,29 @@ function parseFindingsFromText(text, fallback = {}) {
       // Skip malformed JSONL rows; partial streams can split objects.
     }
   }
+  if (findings.length > 0) return findings;
+
+  // 3. Last resort: scan free text for brace-delimited objects (e.g. a partial
+  //    stream that never formed valid JSON). Cannot match objects whose string
+  //    fields contain braces — hence JSONL is attempted first.
+  const jsonObjectMatches = trimmed.match(/\{[^{}]*(?:"severity"|"category"|"confidence")[^{}]*\}/g) || [];
+  for (const candidate of jsonObjectMatches) {
+    try {
+      const finding = normalizeFinding(JSON.parse(candidate), fallback);
+      if (finding) findings.push(finding);
+    } catch {
+      // Ignore malformed candidate objects while scanning streamed text.
+    }
+  }
 
   return findings;
+}
+
+// The audit prompt asks the model to return a single finding with category
+// "secure" when a file is clean. That sentinel is not a vulnerability: it must
+// not render as a finding card nor count toward findings_count / by_severity.
+function isSecureSentinel(finding = {}) {
+  return String(finding.category || '').toLowerCase() === 'secure';
 }
 
 function extractLineNumber(text = '') {
@@ -399,13 +399,19 @@ async function fetchFileSource(repoId, filePath) {
 
 async function fetchDeterministicIssues(repoId, filePaths) {
   if (!filePaths.length) return [];
+  // Push the file filter to Postgres via array overlap (file_paths && {wanted})
+  // instead of fetching every issue for the repo and filtering in JS — the
+  // unbounded fetch silently capped at PostgREST's 1000-row default and dropped
+  // issues for the audited files on large repos.
   const { data, error } = await supabaseAdmin
     .from('analysis_issues')
     .select('id, type, severity, description, file_paths')
-    .eq('repo_id', repoId);
+    .eq('repo_id', repoId)
+    .overlaps('file_paths', filePaths)
+    .range(0, SAFE_FETCH_CEILING - 1);
   if (error) return [];
-  const wanted = new Set(filePaths);
-  return (data || []).filter((issue) => (issue.file_paths || []).some((path) => wanted.has(path)));
+  warnIfCeilingHit('fetchDeterministicIssues analysis_issues', data || []);
+  return data || [];
 }
 
 function normalizeReviewFilePath(filePath) {
@@ -624,23 +630,62 @@ async function blastRadiusForFile(repoId, filePath) {
   }
 }
 
+// Select the files a whole-repo security audit should target. Supersedes the
+// older get_security_audit_targets RPC (which ranked purely on incoming +
+// complexity): for a *security* audit we also prioritise attack-surface files
+// and files that already carry deterministic security issues, so a small but
+// dangerous file is not crowded out by large-but-benign ones.
+//
+// `audit_score` is kept as the plain structural score (incoming + complexity)
+// for display continuity; ranking uses a separate tiered key. `security_signal`
+// records why a file was prioritised.
 async function fetchAuditTargets(repoId) {
-  const { data, error } = await supabaseAdmin.rpc('get_security_audit_targets', {
-    p_repo_id: repoId,
-    p_limit: WHOLE_REPO_AUDIT_LIMIT,
-  });
-  if (!error && data) return data;
-
-  const { data: rows, error: fallbackErr } = await supabaseAdmin
+  const { data: nodes, error: nodesErr } = await supabaseAdmin
     .from('graph_nodes')
-    .select('id, file_path, language, incoming_count, complexity_score, line_count')
+    .select('id, file_path, language, incoming_count, complexity_score, line_count, node_classification')
     .eq('repo_id', repoId)
-    .limit(1000);
-  if (fallbackErr) throw fallbackErr;
-  return (rows || [])
-    .map((row) => ({ ...row, audit_score: (row.incoming_count || 0) + (row.complexity_score || 0) }))
-    .sort((a, b) => (b.audit_score || 0) - (a.audit_score || 0))
-    .slice(0, WHOLE_REPO_AUDIT_LIMIT);
+    .range(0, SAFE_FETCH_CEILING - 1);
+  if (nodesErr) throw nodesErr;
+  const rows = nodes || [];
+  warnIfCeilingHit('fetchAuditTargets graph_nodes', rows);
+  if (rows.length === 0) return [];
+
+  // Strongest deterministic security-issue weight per file.
+  const issueBoost = new Map();
+  const { data: issues } = await supabaseAdmin
+    .from('analysis_issues')
+    .select('type, severity, file_paths')
+    .eq('repo_id', repoId)
+    .range(0, SAFE_FETCH_CEILING - 1);
+  for (const issue of issues || []) {
+    if (!SECURITY_ISSUE_TYPES.has(issue.type)) continue;
+    const weight = SEVERITY_WEIGHT[String(issue.severity || '').toLowerCase()] || SEVERITY_WEIGHT.low;
+    for (const filePath of issue.file_paths || []) {
+      issueBoost.set(filePath, (issueBoost.get(filePath) || 0) + weight);
+    }
+  }
+
+  const scored = rows.map((node) => {
+    const structural = (node.incoming_count || 0) + (node.complexity_score || 0);
+    const secWeight = issueBoost.get(node.file_path) || 0;
+    const isAttackSurface = ATTACK_SURFACE_CLASSIFICATIONS.has(node.node_classification);
+    const rankKey = structural
+      + (secWeight > 0 ? AUDIT_SECURITY_ISSUE_OFFSET + secWeight : 0)
+      + (isAttackSurface ? AUDIT_ATTACK_SURFACE_OFFSET : 0);
+    return {
+      id: node.id,
+      file_path: node.file_path,
+      language: node.language,
+      line_count: node.line_count,
+      incoming_count: node.incoming_count,
+      complexity_score: node.complexity_score,
+      audit_score: structural,
+      security_signal: secWeight > 0 ? 'security_issue' : (isAttackSurface ? 'attack_surface' : null),
+      _rank: rankKey,
+    };
+  });
+  scored.sort((a, b) => b._rank - a._rank);
+  return scored.slice(0, WHOLE_REPO_AUDIT_LIMIT).map(({ _rank, ...target }) => target);
 }
 
 async function persistAudit({ userId, repoId, report }) {
@@ -830,7 +875,8 @@ const review = async (req, res) => {
 
     if (mode === 'security_audit') {
       const issues = await fetchDeterministicIssues(repoId, filePath ? [filePath] : []);
-      const findings = linkFindingsToIssues(parseFindingsFromText(text, { file_path: filePath }), issues);
+      const parsed = parseFindingsFromText(text, { file_path: filePath }).filter((finding) => !isSecureSentinel(finding));
+      const findings = linkFindingsToIssues(parsed, issues);
       findings.forEach((finding) => send({ type: 'finding', finding }));
     }
 
@@ -964,6 +1010,8 @@ const runSecurityAudit = async (req, res) => {
 
       const fileIssues = deterministicIssues.filter((issue) => (issue.file_paths || []).includes(target.file_path));
       let findings = parseFindingsFromText(text, { file_path: target.file_path, line_reference: target.file_path });
+      // Drop "secure" sentinels: a clean file contributes audited_count but zero findings.
+      findings = findings.filter((finding) => !isSecureSentinel(finding));
       findings = linkFindingsToIssues(findings, fileIssues);
       findings.forEach((finding) => {
         report.summary.findings_count++;
@@ -1018,15 +1066,24 @@ const listSecurityAudits = async (req, res) => {
   const allowed = await canAccessRepo(repoId, req.user.id);
   if (!allowed) return res.status(404).json({ error: 'Repository not found or unauthorized' });
 
+  // Project only status + summary out of findings_json server-side. The full
+  // report (per-file findings + concatenated raw_text) can be large; the history
+  // list only needs the status badge and finding count. The detail endpoint
+  // (getSecurityAudit) still returns the complete report.
   const { data, error } = await supabaseAdmin
     .from('security_audits')
-    .select('id, user_id, repo_id, findings_json, created_at')
+    .select('id, user_id, repo_id, created_at, status:findings_json->>status, summary:findings_json->summary')
     .eq('repo_id', repoId)
     .eq('user_id', req.user.id)
     .order('created_at', { ascending: false });
 
   if (error) return res.status(500).json({ error: 'Failed to fetch security audit history' });
-  res.json({ audits: data || [] });
+  // Preserve the findings_json.{status,summary} shape the client reads.
+  const audits = (data || []).map(({ status, summary, ...rest }) => ({
+    ...rest,
+    findings_json: { status, summary },
+  }));
+  res.json({ audits });
 };
 
 const getSecurityAudit = async (req, res) => {
@@ -3615,6 +3672,9 @@ module.exports = {
   batchDependencyProposalInternal,
   _private: {
     parseFindingsFromText,
+    isSecureSentinel,
+    fetchAuditTargets,
+    fetchDeterministicIssues,
     rerankSecurityChunks,
     securityKeywordScore,
     linkFindingsToIssues,

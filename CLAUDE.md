@@ -396,9 +396,9 @@ GitHub tokens stored encrypted in Supabase Vault — never plaintext.
 - Cross-links findings to deterministic `analysis_issues` rows that affect the same file
 
 **Whole-repo audit** (`POST /api/review/:repoId/security-audit`):
-- Targets top 20 files by `incoming_count + complexity_score` (via `get_security_audit_targets()` RPC)
+- Targets top 20 files via `fetchAuditTargets` (in `reviewController.js`): security-relevant files are prioritised first — those carrying deterministic security issues (`hardcoded_secret`/`insecure_pattern`/`missing_auth`/`vulnerable_dependency`, severity-weighted) and attack-surface files (`node_classification` source/sink/both) — then remaining slots fill by structural score (`incoming_count + complexity_score`). Each target carries a `security_signal` tag; `audit_score` stays the plain structural score for display. (Supersedes the older `get_security_audit_targets()` RPC, which ranked on structural score alone.)
 - Processes sequentially, checking daily token budget before each file
-- Streams `progress` + `finding` + `summary` SSE events; report persisted to `security_audits` table
+- Streams `progress` + `finding` + `summary` SSE events; report persisted to `security_audits` table. A "secure" sentinel finding (clean file) is excluded from `findings_count`/`by_severity` and not emitted as a finding
 - Partial audits (budget exhausted) are saved with `status: 'partial'`
 
 **Frontend (CodeReviewPanel.jsx):**
