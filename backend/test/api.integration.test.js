@@ -94,6 +94,14 @@ function createSupabaseMock(handlers) {
       this.filters.push({ op: 'in', column, value });
       return this;
     }
+    contains(column, value) {
+      this.filters.push({ op: 'contains', column, value });
+      return this;
+    }
+    overlaps(column, value) {
+      this.filters.push({ op: 'overlaps', column, value });
+      return this;
+    }
     is(column, value) {
       this.filters.push({ op: 'is', column, value });
       return this;
@@ -852,9 +860,9 @@ describe('Backend API integration (mocked)', () => {
       'repositories.select.maybeSingle': async () => ({ data: { id: 'repo-1' }, error: null }),
       'api_usage.select.many': async () => ({ data: [], error: null }),
       'analysis_issues.select.many': async () => ({ data: [], error: null }),
-      'rpc.get_security_audit_targets': async () => ({
+      'graph_nodes.select.many': async () => ({
         data: [
-          { id: 'n1', file_path: 'missing.js', incoming_count: null, complexity_score: null, audit_score: 0 },
+          { id: 'n1', file_path: 'missing.js', language: 'javascript', incoming_count: null, complexity_score: null, line_count: null, node_classification: null },
         ],
         error: null,
       }),
@@ -879,6 +887,88 @@ describe('Backend API integration (mocked)', () => {
     expect(res.text).toContain('"status":"skipped"');
     expect(res.text).toContain('"skipped_count":1');
     expect(res.text).toContain('"type":"done"');
+  });
+
+  it('whole-repo audit targets prioritise security-relevant files over larger benign ones', async () => {
+    supabaseAdminMock = createSupabaseMock({
+      'graph_nodes.select.many': async () => ({
+        data: [
+          { id: 'big', file_path: 'big.js', language: 'js', incoming_count: 40, complexity_score: 60, line_count: 800, node_classification: null },
+          { id: 'route', file_path: 'route.js', language: 'js', incoming_count: 1, complexity_score: 2, line_count: 20, node_classification: 'source' },
+          { id: 'secret', file_path: 'secret.js', language: 'js', incoming_count: 0, complexity_score: 1, line_count: 10, node_classification: null },
+        ],
+        error: null,
+      }),
+      'analysis_issues.select.many': async () => ({
+        data: [{ id: 'i1', type: 'hardcoded_secret', severity: 'high', file_paths: ['secret.js'] }],
+        error: null,
+      }),
+    });
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+    globalThis.__CODELENS_SUPABASE_ANON__ = supabaseAdminMock;
+
+    const reviewController = (await import('../src/controllers/reviewController.js')).default;
+    const targets = await reviewController._private.fetchAuditTargets('repo-1');
+    const order = targets.map((t) => t.file_path);
+
+    // Despite the lowest structural score, the secret-bearing file and the
+    // attack-surface route outrank the large-but-benign file.
+    expect(order.indexOf('secret.js')).toBeLessThan(order.indexOf('big.js'));
+    expect(order.indexOf('route.js')).toBeLessThan(order.indexOf('big.js'));
+
+    const secret = targets.find((t) => t.file_path === 'secret.js');
+    expect(secret.security_signal).toBe('security_issue');
+    // audit_score stays the plain structural score, not polluted by tier offsets.
+    expect(secret.audit_score).toBe(1);
+    expect(targets.find((t) => t.file_path === 'route.js').security_signal).toBe('attack_surface');
+    expect(targets.some((t) => '_rank' in t)).toBe(false);
+  });
+
+  it('whole-repo audit excludes "secure" sentinels from findings and counts', async () => {
+    supabaseAdminMock = createSupabaseMock({
+      'repositories.select.maybeSingle': async () => ({ data: { id: 'repo-1' }, error: null }),
+      'api_usage.select.many': async () => ({ data: [], error: null }),
+      'analysis_issues.select.many': async () => ({ data: [], error: null }),
+      'graph_nodes.select.many': async () => ({
+        data: [{ id: 'n1', file_path: 'clean.js', language: 'js', incoming_count: 5, complexity_score: 3, line_count: 40, node_classification: null }],
+        error: null,
+      }),
+      'file_contents.select.maybeSingle': async () => ({ data: { content: 'export const x = 1;\n' }, error: null }),
+      'rpc.match_code_chunks': async () => ({ data: [], error: null }),
+      'security_audits.insert.single': async (state) => ({ data: { id: 'audit-1', ...state.payload }, error: null }),
+    });
+    globalThis.__CODELENS_SUPABASE_ADMIN__ = supabaseAdminMock;
+    globalThis.__CODELENS_SUPABASE_ANON__ = supabaseAdminMock;
+    globalThis.__CODELENS_OPENAI__ = {
+      embeddings: { create: async () => ({ data: [{ embedding: [0.01, 0.02, 0.03] }], usage: { total_tokens: 3 } }) },
+      chat: {
+        completions: {
+          create: async () => {
+            async function* gen() {
+              yield { choices: [{ delta: { content: '{"severity":"low","category":"secure","line_reference":"clean.js","explanation":"no issue found","suggested_fix":"No fix needed.","confidence":"high"}' }, finish_reason: 'stop' }] };
+              yield { choices: [], usage: { prompt_tokens: 5, completion_tokens: 10 } };
+            }
+            return gen();
+          },
+        },
+      },
+    };
+
+    const reviewController = (await import('../src/controllers/reviewController.js')).default;
+    const app = express();
+    app.use(express.json());
+    app.post('/api/review/:repoId/security-audit', (req, _res, next) => { req.user = { id: 'user-1' }; next(); }, wrap(reviewController.runSecurityAudit));
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message || 'error' }));
+
+    const res = await request(app)
+      .post('/api/review/repo-1/security-audit')
+      .expect(200);
+
+    // The clean file is audited, but its "secure" sentinel is neither emitted as
+    // a finding nor counted.
+    expect(res.text).toContain('"audited_count":1');
+    expect(res.text).toContain('"findings_count":0');
+    expect(res.text).not.toContain('"type":"finding"');
   });
 
   it('security finding parsing rejects incomplete objects and links issues by category and line proximity', async () => {
